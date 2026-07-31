@@ -126,11 +126,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
-    # REPLACE the pinned SHA below with a workflows-template release SHA
-    # (or your instantiated workflows repository's release SHA).
+    # REPLACE the pinned SHA below with a docker-workflows release SHA.
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/workflows-template/.github/workflows/build-test.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    uses: lfreleng-actions/docker-workflows/.github/workflows/build-test.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
     with:
       # When GERRIT_DISABLED is true the gerrit_* values are blanked so the
       # reusable workflow falls back to a standard checkout.
@@ -141,6 +140,12 @@ jobs:
       # yamllint disable-line rule:line-length
       gerrit_branch: ${{ !inputs.GERRIT_DISABLED && inputs.GERRIT_BRANCH || '' }}
       # gerrit_url falls back to the GERRIT_URL repository variable.
+      # Optional Docker tuning; empty values auto-discover Dockerfiles:
+      # images: ''                    # JSON image list + build order
+      # image_namespace: ''           # e.g. 'onap' -> onap/<name>
+      # build_command: ''             # escape hatch: project tooling builds
+      # test_command: ''              # smoke-test hook (IMAGES env = tags)
+      # build_permit_egress_traffic: false  # audit egress for build job
 
   # Report the overall workflow conclusion back to Gerrit as a Verified vote.
   vote:

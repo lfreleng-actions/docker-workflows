@@ -13,7 +13,7 @@
 # standard GitHub project. For projects where Gerrit is the source of truth,
 # use the gerrit.yaml example in this directory instead.
 # =============================================================================
-name: 'Build/Test'
+name: 'Docker Build/Test'
 
 # yamllint disable-line rule:truthy
 on:
@@ -32,20 +32,29 @@ permissions: {}
 
 jobs:
   build-test:
-    name: 'Build/Test'
+    name: 'Docker Build/Test'
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
-    # REPLACE the pinned SHA below with a workflows-template release SHA
-    # (or your instantiated workflows repository's release SHA).
+    # REPLACE the pinned SHA below with a docker-workflows release SHA.
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/workflows-template/.github/workflows/build-test.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    uses: lfreleng-actions/docker-workflows/.github/workflows/build-test.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
     # All inputs are optional. Uncomment and tune only what your project
     # needs; everything else falls back to sensible defaults.
     # with:
     #   path_prefix: '.'              # project root (monorepo subdir, etc.)
+    #   images: ''                    # JSON image list; empty auto-discovers
+    #                                 # Dockerfiles (root, docker/,
+    #                                 # src/main/docker/, per-image dirs)
+    #   image_namespace: ''           # e.g. 'onap' -> onap/<name>
+    #   build_command: ''             # escape hatch: project tooling builds
+    #                                 # the images (make/mvn/gradle/script)
+    #   test_command: ''              # smoke-test hook; built images load
+    #                                 # first, IMAGES env carries the tags
     #   test_permit_fail: false       # soft-fail tests
-    #   audit_permit_fail: false      # soft-fail dependency audit
+    #   audit_permit_fail: false      # soft-fail Dockerfile lint (hadolint)
     #   grype_fail_on: 'medium'       # Grype severity gate
     #   harden_runner_egress: 'block' # 'block' (default) or 'audit'
+    #   build_permit_egress_traffic: false  # audit egress for build job only
+    #                                 # (third-party base image registries)

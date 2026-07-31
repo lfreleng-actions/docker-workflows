@@ -36,19 +36,44 @@ concurrency:
 permissions: {}
 
 jobs:
-  # Fixture repositories of different languages, fanned out in parallel
-  # via a matrix; the template placeholders run identically for both.
+  # Fixture legs exercising both image-selection modes against the
+  # deterministic test-docker-project fixture (single image, Dockerfile
+  # under docker/):
+  #   - leg 1: auto-discovery under full block-mode egress
+  #   - leg 2: explicit 'images' input, image_namespace and the
+  #     build_permit_egress_traffic hatch plumbing
+  # ONAP's sdc-sdc-docker-base was evaluated as a real-world fixture,
+  # but every image on its master is bit-rotted (Debian stretch apt
+  # repos EOL, openjdk:8-jdk-alpine withdrawn from Docker Hub, apk
+  # ruby=2.7.5-r0 pin unsatisfiable), so no leg can gate on it. A
+  # multi-image test-docker-monorepo fixture (see docs/BRIEF.md)
+  # replaces leg 2 once created.
+  # Lint and Grype findings in fixture CONTENT soft-fail: the
+  # self-test validates that the machinery executes, not the hygiene
+  # of fixture Dockerfiles.
   build-test:
     name: 'Build/Test'
     strategy:
       fail-fast: false
       matrix:
-        repository:
-          - 'lfreleng-actions/test-go-project'
-          - 'lfreleng-actions/test-node-project'
+        include:
+          - repository: 'lfreleng-actions/test-docker-project'
+            images: ''
+            image_namespace: ''
+            build_permit_egress_traffic: false
+          - repository: 'lfreleng-actions/test-docker-project'
+            # yamllint disable-line rule:line-length
+            images: '[{"name": "hello-nginx", "context": "docker"}]'
+            image_namespace: 'lfreleng'
+            build_permit_egress_traffic: true
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
     uses: ./.github/workflows/build-test.yaml
     with:
       repository: ${{ matrix.repository }}
+      images: ${{ matrix.images }}
+      image_namespace: ${{ matrix.image_namespace }}
+      build_permit_egress_traffic: ${{ matrix.build_permit_egress_traffic }}
+      audit_permit_fail: true
+      grype_permit_fail: true
