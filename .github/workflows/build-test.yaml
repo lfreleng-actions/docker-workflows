@@ -2,22 +2,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Reusable build/test pipeline SKELETON (language-agnostic template).
+# Reusable Docker build/test (verify) pipeline.
 #
-# Reproduces the canonical Linux Foundation pipeline shape. The
-# repository-metadata job runs in parallel as an informational step.
-# After build the jobs in { } run in parallel; none gates another, so a
-# PR surfaces every failure (-> denotes sequence):
-#   build -> { tests | audit | sbom -> grype }
+# Builds every container image in the repository (or an explicit list),
+# lints the Dockerfiles, generates per-image SBOMs and scans them with
+# Grype. Nothing publishes from this lane; merge.yaml and
+# build-test-release.yaml own the publish legs.
 #
-# Steps marked "# TEMPLATE:" are placeholders. When instantiating this
-# template for a language, replace them with the real build/test/audit/
-# SBOM actions; the surrounding job graph, harden-runner wiring, dual
-# checkout and Grype scan are generic and transfer as-is.
+# Job graph (-> denotes sequence; { } runs in parallel):
+#   gerrit-validate -> { repository-metadata | docker-metadata }
+#   docker-metadata -> { audit | build }
+#   build -> { tests | sbom -> grype }
+#
+# The audit (hadolint) job gates on docker-metadata rather than build:
+# Dockerfile lint needs no built image, and surfacing lint findings
+# when the build itself fails shortens the fix cycle.
+#
+# Image discovery: with no 'images' input the docker-metadata job
+# walks path_prefix for Dockerfiles at the locations observed across
+# the LF project estate (repository root, docker/, src/main/docker/,
+# and one-level per-image directories such as base_sdc-jetty/). Pass
+# the 'images' JSON input to override discovery; its order is the
+# build order, which also serves same-repository FROM chains.
+#
+# This verify lane builds single-platform images (the runner's native
+# platform). Multi-architecture builds and manifest assembly belong to
+# the publish lanes.
 #
 # Call this from a thin caller workflow; see examples/build-test/ for
 # both a plain GitHub-native caller and a Gerrit-wrapped caller.
-name: '[R] Build/Test (Template)'
+name: '[R] Docker Build/Test'
 
 # yamllint disable-line rule:truthy
 on:
@@ -42,16 +56,62 @@ on:
         type: string
         default: '.'
 
+      # --- Image selection/build ---
+      images:
+        description: >-
+          JSON array describing the images to build; an empty string
+          (the default) auto-discovers Dockerfiles under path_prefix.
+          When provided, the array must be non-empty; each entry takes
+          name and context (required), dockerfile (default
+          context/Dockerfile), target and build_args (optional list of
+          KEY=VALUE strings). Array order is the build order.
+        required: false
+        type: string
+        default: ''
+      image_namespace:
+        description: >-
+          Namespace prefixed to every image name (e.g. 'onap' tags
+          images as onap/<name>). Empty applies no namespace.
+        required: false
+        type: string
+        default: ''
+      build_command:
+        description: >-
+          Escape hatch: a shell command run from path_prefix that
+          builds the container images (e.g. 'make images' or
+          'mvn -P docker package'). The workflow then enumerates the
+          images the command created and feeds them to the test, SBOM
+          and scan jobs. Empty (default) builds the discovered/declared
+          Dockerfiles natively with docker buildx.
+        required: false
+        type: string
+        default: ''
+      build_timeout_minutes:
+        description: 'Timeout for the build job in whole minutes'
+        required: false
+        type: number
+        default: 30
+
       # --- Tests ---
+      test_command:
+        description: >-
+          Shell command run from path_prefix after the built images
+          load into the Docker daemon (a smoke/integration hook, e.g.
+          'make test'). The IMAGES environment variable carries a JSON
+          array of the built image tags. Empty skips the tests job
+          with a notice.
+        required: false
+        type: string
+        default: ''
       test_permit_fail:
         description: 'Permit test failures without failing the workflow'
         required: false
         type: boolean
         default: false
 
-      # --- Audit ---
+      # --- Audit (Dockerfile lint) ---
       audit_permit_fail:
-        description: 'Permit dependency audit failures (the NO_BLOCK pattern)'
+        description: 'Permit hadolint findings (the NO_BLOCK pattern)'
         required: false
         type: boolean
         default: false
@@ -82,6 +142,17 @@ on:
         type: string
         # yamllint disable-line rule:line-length
         default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@bf6642f68d58c1b81bbe993e676d6cc339ac3654'  # v0.12.2
+      build_permit_egress_traffic:
+        description: >-
+          Run harden-runner in audit mode for the build job only,
+          permitting unrestricted egress. Use when base images or
+          build-time dependencies come from registries/CDNs that are
+          impractical to enumerate in the allow-list. Other jobs stay
+          governed by harden_runner_egress; left unset, the build job
+          follows it too.
+        required: false
+        type: boolean
+        default: false
 
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
@@ -205,16 +276,16 @@ jobs:
           artifact_upload: 'true'
           artifact_formats: 'json'
 
-  build:
-    name: 'Build'
+  docker-metadata:
+    name: 'Docker Metadata'
     needs: gerrit-validate
     runs-on: ubuntu-latest
     outputs:
-      artefact_name: ${{ steps.build.outputs.artefact_name }}
-      artefact_path: ${{ steps.build.outputs.artefact_path }}
+      images_json: ${{ steps.discover.outputs.images_json }}
+      image_count: ${{ steps.discover.outputs.image_count }}
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -250,40 +321,275 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language build
-      # action, keeping the step id and the artefact_name/artefact_path
-      # outputs so downstream jobs continue to work, e.g.:
-      #   - name: 'Build project'
-      #     id: build
-      #     uses: lfreleng-actions/<lang>-build-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      - name: 'Build project (placeholder)'
+      - name: 'Discover images'
+        id: discover
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          IMAGES_INPUT: ${{ inputs.images }}
+          TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
+        run: |
+          # Resolve the image list: an explicit 'images' input wins;
+          # otherwise walk the estate-observed Dockerfile locations.
+          cd "${PATH_PREFIX}"
+          if [ -n "${IMAGES_INPUT}" ]; then
+            if ! jq -e 'type == "array" and length > 0 and
+                all(.[]; (.name | type == "string") and
+                         (.context | type == "string") and
+                         ((.dockerfile // "") | type == "string") and
+                         ((.target // "") | type == "string") and
+                         ((.build_args // []) | type == "array" and
+                           all(.[]; type == "string")))' \
+                >/dev/null 2>&1 <<< "${IMAGES_INPUT}"; then
+              echo "::error::images input must be a non-empty JSON" \
+                "array of objects with string 'name' and 'context'" \
+                "keys; optional 'dockerfile'/'target' take strings" \
+                "and 'build_args' a list of KEY=VALUE strings. Pass" \
+                "an empty string (not []) for auto-discovery"
+              exit 1
+            fi
+            images=$(jq -c . <<< "${IMAGES_INPUT}")
+          else
+            repo_name="${TARGET_REPOSITORY##*/}"
+            if [ "${PATH_PREFIX}" != "." ]; then
+              repo_name=$(basename "${PATH_PREFIX}")
+            fi
+            images='[]'
+            add_image() {
+              images=$(jq -c \
+                --arg n "$1" --arg d "$2" --arg c "$3" \
+                '. + [{name: $n, dockerfile: $d, context: $c}]' \
+                <<< "${images}")
+            }
+            if [ -f Dockerfile ]; then
+              add_image "${repo_name}" "Dockerfile" "."
+            fi
+            if [ -f docker/Dockerfile ]; then
+              add_image "${repo_name}" "docker/Dockerfile" "docker"
+            fi
+            if [ -f src/main/docker/Dockerfile ]; then
+              add_image "${repo_name}" \
+                "src/main/docker/Dockerfile" "src/main/docker"
+            fi
+            for df in */Dockerfile; do
+              [ -f "${df}" ] || continue
+              dir="${df%/Dockerfile}"
+              case "${dir}" in
+                docker|src) continue ;;
+              esac
+              add_image "${dir}" "${df}" "${dir}"
+            done
+          fi
+          # Sanitise names to the docker repository character set and
+          # drop duplicates (e.g. a root Dockerfile plus docker/ both
+          # mapping to the repository name). The de-duplication
+          # preserves array order — order is the build order, which
+          # same-repository FROM chains rely on — keeping the first
+          # occurrence of each name.
+          images=$(jq -c \
+            '[.[] | .name |= (ascii_downcase |
+              gsub("[^a-z0-9._-]"; "-"))] |
+              reduce .[] as $img ([];
+                if any(.[]; .name == $img.name) then .
+                else . + [$img] end)' \
+            <<< "${images}")
+          count=$(jq 'length' <<< "${images}")
+          if [ "${count}" -eq 0 ]; then
+            echo "::error::No Dockerfiles found under" \
+              "'${PATH_PREFIX}' and no images input provided"
+            exit 1
+          fi
+          # Post-sanitisation validation: every name must be a valid
+          # Docker repository component (start and end alphanumeric),
+          # so tag construction fails here with a clear message rather
+          # than at build time.
+          bad=$(jq -r '.[] | .name |
+            select(test("^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$") | not)' \
+            <<< "${images}")
+          if [ -n "${bad}" ]; then
+            echo "::error::Invalid image name(s) after sanitisation:" \
+              "${bad} (names must start/end with a-z or 0-9)"
+            exit 1
+          fi
+          echo "Discovered ${count} image(s):"
+          jq -r '.[] | "  \(.name)  (\(.dockerfile //
+            (.context + "/Dockerfile")))"' <<< "${images}"
+          echo "images_json=${images}" >> "$GITHUB_OUTPUT"
+          echo "image_count=${count}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Docker Images"
+            echo ""
+            echo "| Image | Dockerfile | Context |"
+            echo "| ----- | ---------- | ------- |"
+            jq -r '.[] | "| \(.name) | \(.dockerfile //
+              (.context + "/Dockerfile")) | \(.context) |"' \
+              <<< "${images}"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: 'Docker Build'
+    needs: docker-metadata
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.build.outputs.images }}
+      image_count: ${{ steps.build.outputs.image_count }}
+    permissions:
+      contents: read
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
+    steps:
+      # The build job can opt into audit egress independently of the
+      # other jobs via build_permit_egress_traffic, for base images and
+      # build-time dependencies from registries/CDNs impractical to
+      # enumerate in the allow-list. Left unset it follows
+      # harden_runner_egress like every other job.
+      #
+      # One harden-runner step with the policy computed, rather than
+      # two selected by condition: harden-runner declares a 'pre'
+      # entry point and no 'pre-if', so its pre-phase runs whatever a
+      # step-level 'if:' says. Both would engage the agent, the first
+      # would win, and audit mode would be unreachable.
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ (inputs.build_permit_egress_traffic || inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@f87b90a3370e62dad310797fedc7fd3700c75832  # v1.0.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: 'Set up Docker buildx'
+        # yamllint disable-line rule:line-length
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+
+      - name: 'Build images'
         id: build
         shell: bash
         env:
           PATH_PREFIX: ${{ inputs.path_prefix }}
+          IMAGES_JSON: ${{ needs.docker-metadata.outputs.images_json }}
+          IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
         run: |
-          # TEMPLATE: placeholder build step; produces a trivial text
-          # artefact so the artifact plumbing can be exercised.
+          # Build every image, then export each to a docker archive so
+          # the test/SBOM jobs can consume the exact bits built here.
           cd "${PATH_PREFIX}"
-          mkdir -p dist
+          if [ -n "${IMAGE_NAMESPACE}" ] &&
+            [[ ! "${IMAGE_NAMESPACE}" =~ ^[a-z0-9._-]+(/[a-z0-9._-]+)*$ ]]
+          then
+            echo "::error::Invalid image_namespace" \
+              "'${IMAGE_NAMESPACE}' (lowercase path components" \
+              "without leading/trailing/consecutive slashes)"
+            exit 1
+          fi
+          declare -a tags=()
+          if [ -n "${BUILD_COMMAND}" ]; then
+            # Escape hatch: the project's own tooling builds the
+            # images; enumerate what it created by diffing the image
+            # list around the command. Pulled images (e.g. FROM base
+            # images fetched by a classic 'docker build') carry a
+            # registry RepoDigest, locally built images do not, so
+            # the diff filters to genuinely built images and the
+            # test/SBOM/scan jobs never process unrelated bases.
+            docker image ls --format '{{.Repository}}:{{.Tag}}' \
+              | sort -u > /tmp/images-before.txt
+            echo "::group::build_command"
+            bash -e -c "${BUILD_COMMAND}"
+            echo "::endgroup::"
+            docker image ls --format '{{.Repository}}:{{.Tag}}' \
+              | sort -u > /tmp/images-after.txt
+            while IFS= read -r candidate; do
+              digests=$(docker image inspect \
+                --format '{{len .RepoDigests}}' "${candidate}")
+              if [ "${digests}" = "0" ]; then
+                tags+=("${candidate}")
+              else
+                echo "::notice::Skipping pulled image ${candidate}" \
+                  "(has a registry digest; not built here)"
+              fi
+            done < <(comm -13 /tmp/images-before.txt \
+              /tmp/images-after.txt | grep -v '<none>' || true)
+            if [ "${#tags[@]}" -eq 0 ]; then
+              echo "::error::build_command completed but created no" \
+                "new images"
+              exit 1
+            fi
+          else
+            while IFS= read -r spec; do
+              name=$(jq -r '.name' <<< "${spec}")
+              ctx=$(jq -r '.context' <<< "${spec}")
+              df=$(jq -r '.dockerfile //
+                (.context + "/Dockerfile")' <<< "${spec}")
+              target=$(jq -r '.target // empty' <<< "${spec}")
+              tag="${name}:verify"
+              if [ -n "${IMAGE_NAMESPACE}" ]; then
+                tag="${IMAGE_NAMESPACE}/${tag}"
+              fi
+              args=(--load -f "${df}" -t "${tag}")
+              if [ -n "${target}" ]; then
+                args+=(--target "${target}")
+              fi
+              while IFS= read -r build_arg; do
+                [ -n "${build_arg}" ] &&
+                  args+=(--build-arg "${build_arg}")
+              done < <(jq -r '.build_args[]? // empty' <<< "${spec}")
+              echo "::group::Build ${tag}"
+              docker buildx build "${args[@]}" "${ctx}"
+              echo "::endgroup::"
+              tags+=("${tag}")
+            done < <(jq -c '.[]' <<< "${IMAGES_JSON}")
+          fi
+          mkdir -p /tmp/docker-archives
+          for tag in "${tags[@]}"; do
+            safe=$(tr '/:' '__' <<< "${tag}")
+            docker save "${tag}" \
+              -o "/tmp/docker-archives/${safe}.tar"
+          done
+          built=$(printf '%s\n' "${tags[@]}" | jq -cnR '[inputs]')
+          echo "Built ${#tags[@]} image(s): ${built}"
+          echo "images=${built}" >> "$GITHUB_OUTPUT"
+          echo "image_count=${#tags[@]}" >> "$GITHUB_OUTPUT"
           {
-            echo "workflows-template placeholder build artefact"
-            echo "repository: ${GITHUB_REPOSITORY}"
-            echo "ref: ${GITHUB_REF}"
-            echo "sha: ${GITHUB_SHA}"
-            echo "run_id: ${GITHUB_RUN_ID}"
-          } > dist/template-artefact.txt
-          echo "artefact_name=template-build" >> "$GITHUB_OUTPUT"
-          echo "artefact_path=${PATH_PREFIX}/dist" >> "$GITHUB_OUTPUT"
+            echo "## Docker Build"
+            echo ""
+            echo "Built **${#tags[@]}** image(s):"
+            echo ""
+            printf -- '- %s\n' "${tags[@]}"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 'Upload build artefact'
+      - name: 'Upload image archives'
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ steps.build.outputs.artefact_name }}
-          path: ${{ steps.build.outputs.artefact_path }}
+          name: docker-archives
+          path: /tmp/docker-archives/
+          retention-days: 1
           if-no-files-found: error
 
   tests:
@@ -293,7 +599,7 @@ jobs:
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -329,26 +635,46 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language test
-      # action. Pass test_permit_fail through to the action's own
-      # permit_fail input where available, e.g.:
-      #   - name: 'Run tests'
-      #     uses: lfreleng-actions/<lang>-test-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       permit_fail: ${{ inputs.test_permit_fail }}
-      - name: 'Run tests (placeholder)'
+      - name: 'Download image archives'
+        if: inputs.test_command != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: docker-archives
+          path: /tmp/docker-archives
+
+      - name: 'Run tests'
         shell: bash
         env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          TEST_COMMAND: ${{ inputs.test_command }}
+          IMAGES: ${{ needs.build.outputs.images }}
           # The NO_BLOCK/soft-fail pattern: the test_permit_fail input
           # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
           # variable) disables failure propagation.
           # yamllint disable-line rule:line-length
           NO_BLOCK: ${{ inputs.test_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
         run: |
-          # TEMPLATE: placeholder test step; replace with real tests.
+          # Load the built images and run the caller's test hook; the
+          # IMAGES environment variable carries the built tag list.
+          if [ -z "${TEST_COMMAND}" ]; then
+            echo "::notice::No test_command provided; nothing to run"
+            exit 0
+          fi
+          # nullglob: a missing/empty artifact must fail with a clear
+          # message, not a literal-glob docker load error.
+          shopt -s nullglob
+          archives=(/tmp/docker-archives/*.tar)
+          if [ "${#archives[@]}" -eq 0 ]; then
+            echo "::error::No image archives found to load"
+            exit 1
+          fi
+          for archive in "${archives[@]}"; do
+            docker load -i "${archive}"
+          done
+          cd "${PATH_PREFIX}"
           status=0
-          echo "Placeholder tests executed"
+          bash -e -c "${TEST_COMMAND}" || status=$?
           if [ "${status}" != "0" ]; then
             if [ "${NO_BLOCK}" = "true" ]; then
               echo "::warning::Tests failed, but failures are" \
@@ -359,13 +685,13 @@ jobs:
           fi
 
   audit:
-    name: 'Audit'
+    name: 'Dockerfile Lint'
     runs-on: ubuntu-latest
-    needs: 'build'
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    needs: 'docker-metadata'
+    if: ${{ !cancelled() && needs.docker-metadata.result == 'success' }}
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -401,40 +727,54 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language dependency
-      # audit action, e.g.:
-      #   - name: 'Audit dependencies'
-      #     uses: lfreleng-actions/<lang>-audit-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       permit_fail: ${{ inputs.audit_permit_fail }}
-      - name: 'Audit dependencies (placeholder)'
+      - name: 'Lint Dockerfiles (hadolint)'
         shell: bash
         env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          IMAGES_JSON: ${{ needs.docker-metadata.outputs.images_json }}
+          # Digest-pinned hadolint container; docker.io serves it and
+          # sits in the egress allow-list.
+          # yamllint disable-line rule:line-length
+          HADOLINT_IMAGE: 'hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d'
           # The NO_BLOCK/soft-fail pattern: the audit_permit_fail input
           # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
           # variable) disables failure propagation.
           # yamllint disable-line rule:line-length
           NO_BLOCK: ${{ inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
         run: |
-          # TEMPLATE: placeholder audit step; replace with real audit.
+          # Lint exactly the Dockerfiles the build consumes (from the
+          # resolved image list), so per-image dockerfile overrides
+          # and non-standard filenames stay covered. The resolved
+          # paths are relative to path_prefix (discovery runs there).
+          cd "${PATH_PREFIX}"
           status=0
-          echo "Placeholder dependency audit executed"
-          if [ "${status}" != "0" ]; then
-            if [ "${NO_BLOCK}" = "true" ]; then
-              echo "::warning::Audit failed, but failures are" \
-                "permitted so the job will not fail."
-              exit 0
-            fi
-            exit "${status}"
+          while IFS= read -r dockerfile; do
+            echo "::group::hadolint ${dockerfile}"
+            docker run --rm \
+              -v "${PWD}:/mnt:ro" -w /mnt \
+              "${HADOLINT_IMAGE}" \
+              hadolint "${dockerfile}" || status=1
+            echo "::endgroup::"
+          done < <(jq -r '.[] | .dockerfile //
+            (.context + "/Dockerfile")' <<< "${IMAGES_JSON}")
+          if [ "${status}" = "0" ]; then
+            echo "Dockerfile lint passed ✅"
+            exit 0
           fi
+          if [ "${NO_BLOCK}" = "true" ]; then
+            echo "::warning::hadolint reported findings, but failures" \
+              "are permitted so the job will not fail."
+            exit 0
+          fi
+          echo "::error::hadolint reported findings"
+          exit 1
 
   sbom:
     name: 'Generate SBOM'
     runs-on: ubuntu-latest
     needs: 'build'
     if: ${{ !cancelled() && needs.build.result == 'success' }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -452,70 +792,63 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
+      - name: 'Download image archives'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@f87b90a3370e62dad310797fedc7fd3700c75832  # v1.0.2
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
+          name: docker-archives
+          path: /tmp/docker-archives
 
-      # TEMPLATE: Replace this placeholder with your language SBOM
-      # action. It MUST emit sbom-cyclonedx.json at the workspace root
-      # (the Grype job contract), e.g.:
-      #   - name: 'Generate SBOM'
-      #     uses: lfreleng-actions/<lang>-sbom-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      # The placeholder writes a minimal VALID empty CycloneDX document
-      # so the downstream Grype scan stays fully functional.
-      - name: 'Generate SBOM (placeholder)'
+      - name: 'Install Syft'
+        id: syft
+        # yamllint disable-line rule:line-length
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+
+      - name: 'Generate image SBOMs'
         shell: bash
+        env:
+          SYFT_CMD: ${{ steps.syft.outputs.cmd }}
         run: |
-          # TEMPLATE: placeholder SBOM step; replace with a real SBOM
-          # generator emitting sbom-cyclonedx.json.
-          cat > sbom-cyclonedx.json <<'EOF'
+          # One CycloneDX SBOM per image archive; the Grype job scans
+          # every sbom-cyclonedx-*.json this step produces. nullglob:
+          # a missing/empty artifact must fail with a clear message,
+          # not a literal-glob Syft error.
+          shopt -s nullglob
+          archives=(/tmp/docker-archives/*.tar)
+          if [ "${#archives[@]}" -eq 0 ]; then
+            echo "::error::No image archives found to scan"
+            exit 1
+          fi
+          total=0
+          for archive in "${archives[@]}"; do
+            base=$(basename "${archive}" .tar)
+            out="sbom-cyclonedx-${base}.json"
+            echo "::group::SBOM ${base}"
+            "${SYFT_CMD}" scan "docker-archive:${archive}" \
+              -o "cyclonedx-json=${out}"
+            echo "::endgroup::"
+            count=$(jq '.components | length' "${out}")
+            echo "${base}: ${count} components"
+            total=$((total + count))
+          done
           {
-            "bomFormat": "CycloneDX",
-            "specVersion": "1.5",
-            "version": 1,
-            "components": []
-          }
-          EOF
-          echo "Wrote placeholder CycloneDX SBOM (0 components)"
+            echo "## SBOM Summary"
+            echo ""
+            echo "CycloneDX SBOM per image;" \
+              "**${total}** components in total"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'Upload SBOM artifacts'
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: sbom-files
-          # Glob matches whichever SBOM formats the generator produced
-          path: sbom-cyclonedx.*
+          path: sbom-cyclonedx-*.json
           retention-days: 45
           # Fail fast: the downstream Grype job requires this artifact,
           # so a missing/misnamed SBOM must surface here, not later
           if-no-files-found: error
-
-      - name: 'SBOM summary'
-        shell: bash
-        run: |
-          # SBOM summary
-          {
-            echo "## SBOM Summary"
-            echo "Placeholder CycloneDX SBOM (0 components)"
-          } >> "$GITHUB_STEP_SUMMARY"
 
   grype:
     name: 'Grype Audit SBOM'
@@ -555,9 +888,9 @@ jobs:
 
       # The grype_permit_fail input (or, when unset, the NO_BLOCK_AUDIT_FAIL
       # repository variable) disables failure propagation so pull requests
-      # can proceed when blocked by newly discovered CVEs in transitive
-      # dependencies.
-      - name: 'Grype audit SBOM'
+      # can proceed when blocked by newly discovered CVEs in base images
+      # or transitive dependencies.
+      - name: 'Grype audit SBOMs'
         id: grype-audit
         env:
           GRYPE_CMD: ${{ steps.grype.outputs.cmd }}
@@ -566,94 +899,97 @@ jobs:
           NO_BLOCK_AUDIT_FAIL: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
         shell: bash
         run: |
-          # The audit scans the JSON CycloneDX SBOM, which the sbom step
-          # always generates. Guard anyway so the step still emits a
-          # summary (and honours grype_permit_fail) if it is missing.
-          if [ ! -f sbom-cyclonedx.json ]; then
-            echo "::warning::No JSON SBOM found; Grype scan skipped"
+          # Scan every per-image SBOM the sbom job produced; the worst
+          # result across images decides the job outcome.
+          shopt -s nullglob
+          sboms=(sbom-cyclonedx-*.json)
+          if [ "${#sboms[@]}" -eq 0 ]; then
+            echo "::warning::No JSON SBOMs found; Grype scan skipped"
             {
               echo "## Grype Vulnerability Scan"
               echo ""
-              echo "No JSON SBOM available to scan."
+              echo "No JSON SBOMs available to scan."
             } >> "$GITHUB_STEP_SUMMARY"
             if [ "${NO_BLOCK_AUDIT_FAIL}" = "true" ]; then
               exit 0
             fi
-            echo "::error::No JSON SBOM available for the Grype audit"
+            echo "::error::No JSON SBOMs available for the Grype audit"
             exit 1
           fi
 
-          # Run grype once, emitting all three output formats
-          set +e
-          "${GRYPE_CMD}" \
-            -o "sarif=grype-results.sarif" \
-            -o "json=grype-results.json" \
-            -o "table=grype-results.txt" \
-            --fail-on "${GRYPE_FAIL_ON}" \
-            "sbom:sbom-cyclonedx.json"
-          grype_exit=$?
-          set -e
+          worst=0
+          for sbom in "${sboms[@]}"; do
+            base="${sbom#sbom-cyclonedx-}"
+            base="${base%.json}"
+            echo "::group::Grype ${base}"
+            set +e
+            "${GRYPE_CMD}" \
+              -o "sarif=grype-results-${base}.sarif" \
+              -o "json=grype-results-${base}.json" \
+              -o "table=grype-results-${base}.txt" \
+              --fail-on "${GRYPE_FAIL_ON}" \
+              "sbom:${sbom}"
+            grype_exit=$?
+            set -e
+            if [ -f "grype-results-${base}.txt" ]; then
+              cat "grype-results-${base}.txt"
+            fi
+            echo "::endgroup::"
+            # grype returns 2 when it finds vulnerabilities at or
+            # above the --fail-on threshold; any other non-zero exit
+            # is a grype failure and fails the job outright.
+            if [ "${grype_exit}" != "0" ] &&
+              [ "${grype_exit}" != "2" ]; then
+              echo "::error::Grype exited with code ${grype_exit}" \
+                "for ${base}"
+              exit "${grype_exit}"
+            fi
+            if [ "${grype_exit}" -gt "${worst}" ]; then
+              worst="${grype_exit}"
+            fi
+          done
 
-          echo "--- Grype scan results ---"
-          if [ -f grype-results.txt ]; then
-            cat grype-results.txt
-          else
-            echo "No table output produced"
-          fi
-
-          # grype returns 2 when it finds vulnerabilities at or above the
-          # configured --fail-on threshold; any other non-zero exit is
-          # treated as a grype failure.
-          if [ "${grype_exit}" = "0" ]; then
+          if [ "${worst}" = "0" ]; then
             echo "No vulnerabilities at or above '${GRYPE_FAIL_ON}'"
             exit 0
           fi
-          if [ "${grype_exit}" != "2" ]; then
-            echo "::error::Grype exited with code ${grype_exit}"
-            exit "${grype_exit}"
-          fi
-
           if [ "${NO_BLOCK_AUDIT_FAIL}" = "true" ]; then
-            echo "::warning::Grype found vulnerabilities at or above the" \
-              "'${GRYPE_FAIL_ON}' threshold, but failures are permitted" \
-              "so the job will not fail."
+            echo "::warning::Grype found vulnerabilities at or above" \
+              "the '${GRYPE_FAIL_ON}' threshold, but failures are" \
+              "permitted so the job will not fail."
             exit 0
           fi
           echo "::error::Grype found vulnerabilities at or above the" \
-            "'${GRYPE_FAIL_ON}' severity threshold. See the table above" \
-            "for the offending packages and CVEs."
+            "'${GRYPE_FAIL_ON}' threshold"
           exit 1
 
-      - name: 'Upload Grype scan results'
+      - name: 'Upload Grype results'
+        if: always()
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: always()
         with:
           name: grype-scan-results
           path: |
-            grype-results.sarif
-            grype-results.json
-            grype-results.txt
-          retention-days: 90
+            grype-results-*.sarif
+            grype-results-*.json
+            grype-results-*.txt
+          retention-days: 45
           if-no-files-found: warn
 
       - name: 'Grype summary'
         if: always()
         shell: bash
         run: |
-          # Render a Markdown summary of the Grype findings
+          # Per-image finding counts for the step summary
           {
             echo "## Grype Vulnerability Scan"
             echo ""
-            if [ ! -f grype-results.json ]; then
-              echo "No scan results available"
-              exit 0
-            fi
-            match_count=$(jq '.matches | length' grype-results.json)
-            if [ "${match_count}" = "0" ]; then
-              echo "No vulnerabilities found at or above the configured" \
-                "severity threshold."
-              exit 0
-            fi
-            echo "Found ${match_count} matching Grype record(s)."
+            shopt -s nullglob
+            for res in grype-results-*.json; do
+              base="${res#grype-results-}"
+              base="${base%.json}"
+              count=$(jq '.matches | length' "${res}")
+              echo "- \`${base}\`: ${count} finding(s)"
+            done
+            echo ""
           } >> "$GITHUB_STEP_SUMMARY"
