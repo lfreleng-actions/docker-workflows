@@ -1,152 +1,147 @@
 <!--
 SPDX-License-Identifier: Apache-2.0
-SPDX-FileCopyrightText: 2025 The Linux Foundation
+SPDX-FileCopyrightText: 2026 The Linux Foundation
 -->
 
-# 🔧 Workflows Template
+# 🐳 Docker Reusable Workflows
 
 <!-- prettier-ignore-start -->
 <!-- markdownlint-disable-next-line MD013 -->
-[![Linux Foundation](https://img.shields.io/badge/Linux-Foundation-blue)](https://linuxfoundation.org/) [![Source Code](https://img.shields.io/badge/GitHub-100000?logo=github&logoColor=white&color=blue)](https://github.com/lfreleng-actions/workflows-template) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![pre-commit.ci status badge]][pre-commit.ci results page] [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/lfreleng-actions/workflows-template/badge)](https://scorecard.dev/viewer/?uri=github.com/lfreleng-actions/workflows-template)
+[![Linux Foundation](https://img.shields.io/badge/Linux-Foundation-blue)](https://linuxfoundation.org/) [![Source Code](https://img.shields.io/badge/GitHub-100000?logo=github&logoColor=white&color=blue)](https://github.com/lfreleng-actions/docker-workflows) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 <!-- prettier-ignore-end -->
 
-The generic, language-agnostic starting point for reusable-workflow
-repositories in this GitHub organisation (`go-workflows`,
-`node-workflows`, …). It carries the canonical Linux Foundation pipeline
-**skeletons and patterns** — not a real pipeline: language-specific
-steps are `# TEMPLATE:`-marked placeholders that instantiators
-replace with real actions. `python-workflows` is the language-specific
-reference implementation of these patterns.
+Reusable GitHub workflows that build, lint, test and scan Docker
+container images for the Linux Foundation. The workflows support both
+GitHub-native projects and projects where Gerrit serves as the source
+of truth (dispatched through gerrit_to_platform), and handle single
+Dockerfile repositories through to multi-image monorepos with
+same-repository FROM chains.
 
-## Skeleton reusable workflows
+The design research behind this repository, including the ONAP
+container-build census the workflows target, lives in
+[docs/BRIEF.md](docs/BRIEF.md).
+
+## Workflow Inventory
 
 <!-- markdownlint-disable MD013 -->
 
-| Workflow | Purpose | Trigger style |
-| -------- | ------- | ------------- |
-| `.github/workflows/build-test.yaml` | Build, test, audit, SBOM and Grype scan skeleton | Pull request |
-| `.github/workflows/build-test-release.yaml` | Release skeleton (Model A, tag-driven): tag validation, release artefact attachment and draft-release promotion | Tag push |
-| `.github/workflows/merge.yaml` | Merge/publish skeleton (Model B, merge-driven): snapshot publish on every merge plus `releases/` file-triggered release publish | Merge / push to main |
+| Workflow                                    | Trigger context       | Status      | Purpose                                                              |
+| ------------------------------------------- | --------------------- | ----------- | -------------------------------------------------------------------- |
+| `.github/workflows/build-test.yaml`         | Pull request / verify | Implemented | Image discovery, buildx build, hadolint, test hook, SBOM, Grype scan |
+| `.github/workflows/build-test-release.yaml` | Tag push (Model A)    | Planned     | Template skeleton; publish/sign/attest lanes follow                  |
+| `.github/workflows/merge.yaml`              | Merge (Model B)       | Planned     | Template skeleton; snapshot/staging registry publish follows         |
 
 <!-- markdownlint-enable MD013 -->
 
-Each pipeline runs a `repository-metadata` job in parallel (an
-informational step that does not gate the build). After `build`, the
-test, audit and SBOM/Grype branches run in parallel - none gates
-another, so a pull request surfaces every failure at once (jobs in
-`{ }` run concurrently; `->` denotes sequence):
+Thin caller examples live under `examples/`, with a GitHub-native and
+a Gerrit-wrapped variant per workflow.
+
+## Job Graph
+
+`build-test.yaml` (`->` denotes sequence; `{ }` runs in parallel):
 
 ```text
-build -> { tests | audit | sbom -> grype }
+gerrit-validate -> { repository-metadata | docker-metadata }
+docker-metadata -> { audit | build }
+build -> { tests | sbom -> grype }
 ```
 
-The release skeleton wraps this with `tag-validate` up front and a
-release-promotion chain at the end. It also **defers `tests` until
-`audit` and `grype` have both passed**, so a failing audit skips the
-test suite and never reaches release promotion:
+The audit (hadolint) job gates on docker-metadata rather than build:
+Dockerfile lint needs no built image, so lint findings surface even
+when the build itself fails.
 
-```text
-tag-validate -> build -> { audit | sbom -> grype } -> tests
-  -> attach-artefacts -> promote-release
-```
+## Image Discovery
 
-The merge skeleton implements the Jenkins-heritage LF/Gerrit model:
+With no `images` input, the docker-metadata job walks `path_prefix`
+for Dockerfiles at the locations observed across the LF project
+estate:
 
-```text
-{ resolve-version | build } -> snapshot-publish
-check-release -> release-publish (when a release file merged)
-```
+1. `Dockerfile` (repository root)
+2. `docker/Dockerfile`
+3. `src/main/docker/Dockerfile` (Maven convention)
+4. `<dir>/Dockerfile` (one-level per-image directories)
 
-## Dual release models
+Image names derive from the repository or directory name. Pass the
+`images` JSON input to override discovery; its array order is the
+build order, which also serves same-repository FROM chains (an image
+can build `FROM <earlier-image>:verify`). Each entry takes `name` and
+`context` (required), plus optional `dockerfile`, `target` and
+`build_args` (a list of KEY=VALUE strings).
 
-Repositories built from this template support **both** release models
-so consumers can adopt either — or migrate between them — without
-divergent behaviour:
+The build job exports every built image as a docker archive, so the
+test, SBOM and scan jobs consume the exact bits built. Verify-lane
+builds run single-platform; multi-architecture builds belong to the
+publish lanes.
 
-- **Model A — tag-driven** (`build-test-release.yaml`): the version
-  comes from a validated, signed semver tag; a GitHub release carries
-  the attested artefacts. Canonical for GitHub-native projects and
-  Gerrit projects whose tags replicate to the mirror.
-- **Model B — merge-driven** (`merge.yaml`): every merge publishes a
-  snapshot (version from committed metadata such as
-  `version.properties` → `X.Y.Z-SNAPSHOT`); a release triggers from a
-  committed release file (`releases/*.yaml`) in the merged change.
-  Canonical for Jenkins-heritage LF/Gerrit projects publishing to
-  Nexus.
+## Inputs
+
+### build-test.yaml
+
+<!-- markdownlint-disable MD013 -->
+
+| Input                         | Type    | Default    | Description                                                          |
+| ----------------------------- | ------- | ---------- | -------------------------------------------------------------------- |
+| `repository`                  | string  | `''`       | Repository to check out (owner/name); empty uses the caller          |
+| `ref`                         | string  | `''`       | Branch/tag/SHA to check out (empty = default branch)                 |
+| `path_prefix`                 | string  | `'.'`      | Path to the project root directory                                   |
+| `images`                      | string  | `''`       | JSON image list (see Image Discovery); empty string auto-discovers   |
+| `image_namespace`             | string  | `''`       | Namespace prefixed to image names (e.g. `onap` -> `onap/<name>`)     |
+| `build_command`               | string  | `''`       | Escape hatch: project tooling builds the images (make/mvn/gradle)    |
+| `build_timeout_minutes`       | number  | `30`       | Timeout for the build job in whole minutes                           |
+| `test_command`                | string  | `''`       | Smoke-test hook; built images load first, IMAGES env carries tags    |
+| `test_permit_fail`            | boolean | `false`    | Permit test failures without failing the workflow                    |
+| `audit_permit_fail`           | boolean | `false`    | Permit hadolint findings (the NO_BLOCK pattern)                      |
+| `grype_fail_on`               | string  | `'medium'` | Severity threshold that fails the Grype scan                         |
+| `grype_permit_fail`           | boolean | `false`    | Permit Grype findings without failing the job                        |
+| `harden_runner_egress`        | string  | `'block'`  | Harden-runner egress policy: `block` or `audit`                      |
+| `harden_runner_allowlist`     | string  | (pinned)   | Out-of-band harden-runner allow-list configuration                   |
+| `build_permit_egress_traffic` | boolean | `false`    | Audit egress scoped to the build job (un-enumerable base registries) |
+| `gerrit_refspec`              | string  | `''`       | Gerrit refspec of the change under test                              |
+| `gerrit_project`              | string  | `''`       | Gerrit project name                                                  |
+| `gerrit_branch`               | string  | `''`       | Gerrit target branch                                                 |
+| `gerrit_url`                  | string  | `''`       | Gerrit server URL; empty falls back to the `GERRIT_URL` variable     |
+
+<!-- markdownlint-enable MD013 -->
+
+The workflow takes no secrets. Lint, test and scan failures honour
+the org-wide `NO_BLOCK_AUDIT_FAIL` repository variable as a runtime
+escape hatch alongside the per-call `*_permit_fail` inputs.
 
 ## Usage
 
-Copy a template from [`examples/`](examples/) into your project's
-`.github/workflows/` directory and replace the placeholder `uses:` SHA
-with a pinned release. Each workflow ships in two forms:
+### GitHub-native caller
 
-- `github.yaml` — a plain GitHub-native caller (pull-request, tag-push
-  or push-to-main triggered).
-- `gerrit.yaml` — a Gerrit-wrapped caller for projects where Gerrit is
-  the source of truth (SCM), integrating with `gerrit_to_platform`
-  voting/commenting.
-
-```text
-examples/
-  build-test/          { github.yaml, gerrit.yaml }
-  build-test-release/  { github.yaml, gerrit.yaml }
-  merge/               { github.yaml, gerrit.yaml }
+```yaml
+jobs:
+  build-test:
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: lfreleng-actions/docker-workflows/.github/workflows/build-test.yaml@main
 ```
 
-All inputs are optional and default to the canonical behaviour; see the
-`inputs:` block at the top of each workflow file for the full,
-documented list.
+Pin the `uses:` reference to a specific release SHA in production
+instead of the mutable `@main` reference. See
+`examples/build-test/` for complete callers.
 
-## How to instantiate this template
+### Gerrit-wrapped caller
 
-When creating a new `<lang>-workflows` repository from this template:
+For projects where Gerrit serves as the source of truth,
+gerrit_to_platform dispatches caller workflows through
+`workflow_dispatch` with nine `GERRIT_*` inputs. The naming contract
+requires the verify caller filename to contain both `gerrit` and
+`verify` (for example `gerrit-verify.yaml`). See the `gerrit.yaml`
+variant under `examples/build-test/`, including vote/comment
+plumbing.
 
-1. Replace every `# TEMPLATE:` placeholder step in the three skeleton
-   workflows with the real language build/test/audit/SBOM/publish
-   actions, keeping the step ids and job outputs intact. The
-   surrounding job graph, harden-runner wiring, dual checkout, Gerrit
-   validation and Grype scan are generic — keep them as-is.
-2. Wire real fixture/consumer repositories into
-   [`testing.yaml`](.github/workflows/testing.yaml) so the workflows
-   run end-to-end against real projects on every pull request.
-3. Update this README and all badge/link slugs (`workflows-template` →
-   your repository name), and record your design decisions in
-   [`docs/BRIEF.md`](docs/BRIEF.md).
-4. When new work talks to new/external endpoints, follow the central
-   allow-list process: raise a PR against `lfreleng-actions/.github`
-   adding the hosts/ports to the org harden-runner allow-list, get it
-   released, then pin the new tag's commit SHA in the
-   `harden_runner_allowlist` defaults. Reserve `harden_runner_egress:
-   'audit'` for bring-up/endpoint discovery.
-5. Keep support for **both** release models (Model A and Model B),
-   factoring version resolution so the two share building blocks.
-6. Update the `examples/` callers to reference your repository and its
-   real input surface.
+## Self-testing
 
-## Gerrit support
-
-The reusable workflows are Gerrit-aware: when a caller sets the
-`gerrit_refspec` input they check out the change with
-`checkout-gerrit-change-action` instead of `actions/checkout`. Vote and
-comment casting live in the `gerrit.yaml` caller examples (clear vote →
-run → report vote for verify; comments without votes for merge), never
-inside the reusable workflows.
-
-## Testing
-
-[`.github/workflows/testing.yaml`](.github/workflows/testing.yaml)
-exercises the build-test skeleton against fixture repositories of
-different languages by calling it via its local path. The placeholder
-steps are language-agnostic, so the self-test validates the generic
-scaffolding regardless of project language — which is the point of this
-repository.
-
-## Design
-
-See [`docs/BRIEF.md`](docs/BRIEF.md) for the design decisions behind the
-template: what stays generic versus placeholder, the three skeleton
-contracts, the dual release-model rationale and the instantiation
-checklist.
-
-[pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/workflows-template/main
-[pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/workflows-template/main.svg
+`.github/workflows/testing.yaml` exercises `build-test.yaml` on pull
+requests against pinned fixture releases:
+[test-docker-project](https://github.com/lfreleng-actions/test-docker-project)
+(single image under `docker/`) and
+[test-docker-monorepo](https://github.com/lfreleng-actions/test-docker-monorepo)
+(three images with a same-repository FROM chain), covering
+auto-discovery, explicit image lists with per-image build arguments,
+image namespacing, the `build_command` escape hatch and the
+`test_command` hook.
