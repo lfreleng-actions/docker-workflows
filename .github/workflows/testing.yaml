@@ -36,18 +36,21 @@ concurrency:
 permissions: {}
 
 jobs:
-  # Fixture legs exercising both image-selection modes against the
-  # deterministic test-docker-project fixture (single image, Dockerfile
-  # under docker/):
-  #   - leg 1: auto-discovery under full block-mode egress
-  #   - leg 2: explicit 'images' input, image_namespace and the
-  #     build_permit_egress_traffic hatch plumbing
-  # ONAP's sdc-sdc-docker-base was evaluated as a real-world fixture,
-  # but every image on its master is bit-rotted (Debian stretch apt
-  # repos EOL, openjdk:8-jdk-alpine withdrawn from Docker Hub, apk
-  # ruby=2.7.5-r0 pin unsatisfiable), so no leg can gate on it. A
-  # multi-image test-docker-monorepo fixture (see docs/BRIEF.md)
-  # replaces leg 2 once created.
+  # Fixture legs exercising every image-selection mode against the two
+  # deterministic fixtures:
+  #   - leg 1: test-docker-project (single image, Dockerfile under
+  #     docker/) — auto-discovery under full block-mode egress
+  #   - leg 2: test-docker-monorepo — auto-discovery of three per-image
+  #     directories, building the same-repository FROM chain in
+  #     directory-sort order, plus the test_command hook (the smoke
+  #     script verifies the chain markers)
+  #   - leg 3: test-docker-monorepo — explicit 'images' input with
+  #     per-image build_args (BASE_IMAGE override for the namespaced
+  #     chain), image_namespace, and the build_permit_egress_traffic
+  #     hatch plumbing
+  #   - leg 4: test-docker-monorepo — the build_command escape hatch
+  #     ('make images' builds via project tooling; the workflow
+  #     enumerates what it created), plus the test_command hook
   # Lint and Grype findings in fixture CONTENT soft-fail: the
   # self-test validates that the machinery executes, not the hygiene
   # of fixture Dockerfiles.
@@ -58,22 +61,46 @@ jobs:
       matrix:
         include:
           - repository: 'lfreleng-actions/test-docker-project'
+            ref: 'v0.1.0'
             images: ''
             image_namespace: ''
+            build_command: ''
+            test_command: ''
             build_permit_egress_traffic: false
-          - repository: 'lfreleng-actions/test-docker-project'
+          - repository: 'lfreleng-actions/test-docker-monorepo'
+            ref: 'v0.0.1'
+            images: ''
+            image_namespace: ''
+            build_command: ''
+            test_command: 'TAG=verify tests/scripts/test_images.sh'
+            build_permit_egress_traffic: false
+          - repository: 'lfreleng-actions/test-docker-monorepo'
+            ref: 'v0.0.1'
             # yamllint disable-line rule:line-length
-            images: '[{"name": "hello-nginx", "context": "docker"}]'
+            images: '[{"name": "base-alpine", "context": "base-alpine"}, {"name": "chain-child", "context": "chain-child", "build_args": ["BASE_IMAGE=lfreleng/base-alpine:verify"]}, {"name": "util-echo", "context": "util-echo"}]'
             image_namespace: 'lfreleng'
+            build_command: ''
+            # yamllint disable-line rule:line-length
+            test_command: 'NAMESPACE=lfreleng TAG=verify tests/scripts/test_images.sh'
             build_permit_egress_traffic: true
+          - repository: 'lfreleng-actions/test-docker-monorepo'
+            ref: 'v0.0.1'
+            images: ''
+            image_namespace: ''
+            build_command: 'make images TAG=verify'
+            test_command: 'TAG=verify tests/scripts/test_images.sh'
+            build_permit_egress_traffic: false
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
     uses: ./.github/workflows/build-test.yaml
     with:
       repository: ${{ matrix.repository }}
+      ref: ${{ matrix.ref }}
       images: ${{ matrix.images }}
       image_namespace: ${{ matrix.image_namespace }}
+      build_command: ${{ matrix.build_command }}
+      test_command: ${{ matrix.test_command }}
       build_permit_egress_traffic: ${{ matrix.build_permit_egress_traffic }}
       audit_permit_fail: true
       grype_permit_fail: true
