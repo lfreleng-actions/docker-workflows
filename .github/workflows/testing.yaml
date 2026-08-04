@@ -51,6 +51,10 @@ jobs:
   #   - leg 4: test-docker-monorepo — the build_command escape hatch
   #     ('make images' builds via project tooling; the workflow
   #     enumerates what it created), plus the test_command hook
+  #   - leg 5: test-docker-monorepo — build_permit_fail, with one
+  #     buildable image and one declaring a stage the Dockerfile does
+  #     not define. The build job reports the failure and succeeds,
+  #     and the image that did build carries on to SBOM/Grype.
   # Lint and Grype findings in fixture CONTENT soft-fail: the
   # self-test validates that the machinery executes, not the hygiene
   # of fixture Dockerfiles.
@@ -67,6 +71,7 @@ jobs:
             build_command: ''
             test_command: ''
             build_permit_egress_traffic: false
+            build_permit_fail: false
           - repository: 'lfreleng-actions/test-docker-monorepo'
             ref: 'v0.0.1'
             images: ''
@@ -74,6 +79,7 @@ jobs:
             build_command: ''
             test_command: 'TAG=verify tests/scripts/test_images.sh'
             build_permit_egress_traffic: false
+            build_permit_fail: false
           - repository: 'lfreleng-actions/test-docker-monorepo'
             ref: 'v0.0.1'
             # yamllint disable-line rule:line-length
@@ -83,6 +89,7 @@ jobs:
             # yamllint disable-line rule:line-length
             test_command: 'NAMESPACE=lfreleng TAG=verify tests/scripts/test_images.sh'
             build_permit_egress_traffic: true
+            build_permit_fail: false
           - repository: 'lfreleng-actions/test-docker-monorepo'
             ref: 'v0.0.1'
             images: ''
@@ -90,6 +97,16 @@ jobs:
             build_command: 'make images TAG=verify'
             test_command: 'TAG=verify tests/scripts/test_images.sh'
             build_permit_egress_traffic: false
+            build_permit_fail: false
+          - repository: 'lfreleng-actions/test-docker-monorepo'
+            ref: 'v0.0.1'
+            # yamllint disable-line rule:line-length
+            images: '[{"name": "util-echo", "context": "util-echo"}, {"name": "absent-stage", "context": "base-alpine", "target": "no-such-stage"}]'
+            image_namespace: ''
+            build_command: ''
+            test_command: ''
+            build_permit_egress_traffic: false
+            build_permit_fail: true
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
@@ -102,5 +119,6 @@ jobs:
       build_command: ${{ matrix.build_command }}
       test_command: ${{ matrix.test_command }}
       build_permit_egress_traffic: ${{ matrix.build_permit_egress_traffic }}
+      build_permit_fail: ${{ matrix.build_permit_fail }}
       audit_permit_fail: true
       grype_permit_fail: true
