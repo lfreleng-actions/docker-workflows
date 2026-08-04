@@ -88,6 +88,7 @@ publish lanes.
 | `image_namespace`             | string  | `''`       | Namespace prefixed to image names (e.g. `onap` -> `onap/<name>`)     |
 | `build_command`               | string  | `''`       | Escape hatch: project tooling builds the images (make/mvn/gradle)    |
 | `build_timeout_minutes`       | number  | `30`       | Timeout for the build job in whole minutes                           |
+| `build_permit_fail`           | boolean | `false`    | Permit image build failures; images that build carry on downstream   |
 | `test_command`                | string  | `''`       | Smoke-test hook; built images load first, IMAGES env carries tags    |
 | `test_permit_fail`            | boolean | `false`    | Permit test failures without failing the workflow                    |
 | `audit_permit_fail`           | boolean | `false`    | Permit hadolint findings (the NO_BLOCK pattern)                      |

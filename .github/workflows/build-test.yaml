@@ -91,6 +91,21 @@ on:
         required: false
         type: number
         default: 30
+      build_permit_fail:
+        description: >-
+          Permit image build failures without failing the workflow.
+          Intended for repositories whose Dockerfiles predate the
+          current state of their upstream bases and package feeds:
+          the lane still lints every Dockerfile and reports which
+          images build, without gating review on breakage that
+          predates the change under test. Images that do build carry
+          on to the test, SBOM and scan jobs. Unlike the audit
+          toggles this input has no repository variable fallback, so
+          nothing can disable build gating across an organisation by
+          accident.
+        required: false
+        type: boolean
+        default: false
 
       # --- Tests ---
       test_command:
@@ -517,6 +532,7 @@ jobs:
           IMAGES_JSON: ${{ needs.docker-metadata.outputs.images_json }}
           IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
           BUILD_COMMAND: ${{ inputs.build_command }}
+          PERMIT_FAIL: ${{ inputs.build_permit_fail }}
         run: |
           # Build every image, then export each to a docker archive so
           # the test/SBOM jobs can consume the exact bits built here.
@@ -530,6 +546,7 @@ jobs:
             exit 1
           fi
           declare -a tags=()
+          declare -a failures=()
           if [ -n "${BUILD_COMMAND}" ]; then
             # Escape hatch: the project's own tooling builds the
             # images; enumerate what it created by diffing the image
@@ -541,8 +558,13 @@ jobs:
             docker image ls --format '{{.Repository}}:{{.Tag}}' \
               | sort -u > /tmp/images-before.txt
             echo "::group::build_command"
-            bash -e -c "${BUILD_COMMAND}"
+            command_status=0
+            bash -e -c "${BUILD_COMMAND}" || command_status=$?
             echo "::endgroup::"
+            if [ "${command_status}" -ne 0 ]; then
+              echo "::error::build_command exited ${command_status}"
+              failures+=("build_command")
+            fi
             docker image ls --format '{{.Repository}}:{{.Tag}}' \
               | sort -u > /tmp/images-after.txt
             while IFS= read -r candidate; do
@@ -556,10 +578,13 @@ jobs:
               fi
             done < <(comm -13 /tmp/images-before.txt \
               /tmp/images-after.txt | grep -v '<none>' || true)
-            if [ "${#tags[@]}" -eq 0 ]; then
+            # A command that exits zero yet leaves nothing behind has
+            # not done its job; report that once, not twice.
+            if [ "${#tags[@]}" -eq 0 ] && [ "${#failures[@]}" -eq 0 ]
+            then
               echo "::error::build_command completed but created no" \
                 "new images"
-              exit 1
+              failures+=("build_command")
             fi
           else
             while IFS= read -r spec; do
@@ -581,9 +606,22 @@ jobs:
                   args+=(--build-arg "${build_arg}")
               done < <(jq -r '.build_args[]? // empty' <<< "${spec}")
               echo "::group::Build ${tag}"
-              docker buildx build "${args[@]}" "${ctx}"
+              build_status=0
+              docker buildx build "${args[@]}" "${ctx}" ||
+                build_status=$?
               echo "::endgroup::"
-              tags+=("${tag}")
+              # Every image gets an attempt: a later image can build
+              # when an earlier one does not, and a full picture of
+              # what breaks beats stopping at the first failure. An
+              # image whose same-repository base failed fails in
+              # turn, which is the accurate signal.
+              if [ "${build_status}" -eq 0 ]; then
+                tags+=("${tag}")
+              else
+                echo "::error::Build failed for ${tag} (exit" \
+                  "${build_status})"
+                failures+=("${tag}")
+              fi
             done < <(jq -c '.[]' <<< "${IMAGES_JSON}")
           fi
           mkdir -p /tmp/docker-archives
@@ -592,7 +630,11 @@ jobs:
             docker save "${tag}" \
               -o "/tmp/docker-archives/${safe}.tar"
           done
-          built=$(printf '%s\n' "${tags[@]}" | jq -cnR '[inputs]')
+          if [ "${#tags[@]}" -gt 0 ]; then
+            built=$(printf '%s\n' "${tags[@]}" | jq -cnR '[inputs]')
+          else
+            built='[]'
+          fi
           echo "Built ${#tags[@]} image(s): ${built}"
           echo "images=${built}" >> "$GITHUB_OUTPUT"
           echo "image_count=${#tags[@]}" >> "$GITHUB_OUTPUT"
@@ -601,11 +643,39 @@ jobs:
             echo ""
             echo "Built **${#tags[@]}** image(s):"
             echo ""
-            printf -- '- %s\n' "${tags[@]}"
+            if [ "${#tags[@]}" -gt 0 ]; then
+              printf -- '- %s\n' "${tags[@]}"
+            else
+              echo "- (none)"
+            fi
             echo ""
+            if [ "${#failures[@]}" -gt 0 ]; then
+              # Entries are image tags, or the literal 'build_command'
+              # when the escape hatch fails, so the wording stays
+              # neutral rather than claiming every entry is an image.
+              echo "Failed **${#failures[@]}** build(s):"
+              echo ""
+              printf -- '- %s\n' "${failures[@]}"
+              echo ""
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
+          # Outputs and the summary land before the gate, so whatever
+          # did build stays visible either way.
+          if [ "${#failures[@]}" -gt 0 ]; then
+            if [ "${PERMIT_FAIL}" != "true" ]; then
+              exit 1
+            fi
+            echo "::warning::${#failures[@]} build(s) failed;" \
+              "permitted by build_permit_fail"
+            echo "⚠️ Build failures permitted by build_permit_fail" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: 'Upload image archives'
+        # Nothing to upload when every image failed under
+        # build_permit_fail; if-no-files-found stays 'error' so a
+        # genuine export failure still surfaces.
+        if: steps.build.outputs.image_count != '0'
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -618,7 +688,11 @@ jobs:
     name: 'Tests'
     runs-on: ubuntu-latest
     needs: ['build', 'docker-metadata']
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # Under build_permit_fail the build job can succeed having built
+    # nothing, in which case no image archive exists to test.
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success'
+          && needs.build.outputs.image_count != '0' }}
     permissions:
       contents: read
     timeout-minutes: 15
@@ -792,10 +866,13 @@ jobs:
           exit 1
 
   sbom:
-    name: 'Generate SBOM'
+    name: 'Image SBOM'
     runs-on: ubuntu-latest
     needs: ['build', 'docker-metadata']
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # As for the tests job: no images built means no archive to scan.
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success'
+          && needs.build.outputs.image_count != '0' }}
     timeout-minutes: 15
     permissions:
       contents: read
