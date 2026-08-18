@@ -3,18 +3,23 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # =============================================================================
-# EXAMPLE: Plain GitHub-native caller for the reusable merge workflow
+# EXAMPLE: Plain GitHub-native caller for the reusable Docker merge workflow
 # =============================================================================
 # Model B (merge-driven snapshots + releases/ file-triggered releases) is
 # PRIMARILY a Gerrit pattern, generalising the Jenkins-heritage LF flow —
 # see gerrit.yaml in this directory for the canonical caller. This
 # GitHub-native variant serves projects that adopt the same model on a
-# plain GitHub repository: every push (merge) to a main branch publishes
-# a snapshot, and a merged release file under releases/ triggers a
-# release publish.
+# plain GitHub repository: every push (merge) to a main branch builds the
+# repository's images and publishes the snapshot/staging tag set, and a
+# merged container release file under releases/ triggers a registry-side
+# release promotion.
+#
+# The version comes from version.properties at the repository root
+# (major=/minor=/patch=), the Jenkins-heritage LF version source.
 #
 # Copy this file into your project's .github/workflows/ directory (for
-# example as merge.yaml) and adjust the `uses:` ref to suit your project.
+# example as merge.yaml) and adjust the `uses:` ref, the registry inputs
+# and the optional overrides to suit your project.
 # =============================================================================
 name: 'Merge/Publish'
 
@@ -25,6 +30,13 @@ on:
       - main
       - master
 
+# Merge publishes serialize per branch: concurrent runs could
+# otherwise finish out of order and regress the rolling
+# SNAPSHOT-latest/STAGING-latest tags. cancel-in-progress stays false
+# so an in-flight publish completes. GitHub keeps a single pending
+# slot per group, so a rapid merge burst can supersede an
+# intermediate pending run; if that run carried a container release
+# file, re-run it from the Actions UI to publish the promotion.
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: false
@@ -36,15 +48,22 @@ jobs:
     name: 'Merge/Publish'
     permissions:
       contents: read
-    # REPLACE the pinned SHA below with a workflows-template release SHA
-    # (or your instantiated workflows repository's release SHA).
+    # REPLACE the pinned SHA below with a docker-workflows release SHA.
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/workflows-template/.github/workflows/merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
-    # All inputs are optional; uncomment to tune.
-    # with:
-    #   path_prefix: '.'              # project root (monorepo subdir, etc.)
-    #   harden_runner_egress: 'block' # 'block' (default) or 'audit'
+    uses: lfreleng-actions/docker-workflows/.github/workflows/merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    with:
+      # Registry endpoints are project/organisation specific; the ONAP
+      # values below illustrate the expected host:port form.
+      snapshot_registry: 'nexus3.onap.org:10003'
+      release_registry: 'nexus3.onap.org:10002'
+      # Optional Docker tuning; empty values auto-discover Dockerfiles:
+      # image_namespace: 'onap'       # publish as <registry>/onap/<name>
+      # images: ''                    # JSON image list + build order
+      # build_command: ''             # escape hatch: project tooling builds
+      # push_latest: false            # tag promoted releases as 'latest'
+      # dry_run: false                # exercise the lane without pushing
+      # build_permit_egress_traffic: false  # audit egress for build job
     secrets:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       VAULT_MAPPING_JSON: ${{ secrets.VAULT_MAPPING_JSON }}

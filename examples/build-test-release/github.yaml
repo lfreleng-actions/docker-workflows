@@ -3,23 +3,23 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # =============================================================================
-# EXAMPLE: Plain GitHub-native caller for the build-test-release workflow
+# EXAMPLE: Plain GitHub-native caller for the Docker build-test-release
+# workflow
 # =============================================================================
 # Copy this file into your project's .github/workflows/ directory (for
 # example as release.yaml) and adjust the `uses:` ref and the optional
 # `with:` overrides to suit your project.
 #
 # This is Model A: the TAG-DRIVEN release model. The version comes from a
-# validated, signed semver tag; the reusable workflow builds, tests,
-# audits, attaches artefacts to a draft GitHub release and promotes it.
+# validated, signed semver tag; the reusable workflow builds the images
+# (multi-platform capable), pushes them to GHCR (and optionally Docker
+# Hub), signs each pushed image with Sigstore cosign, attests SLSA build
+# provenance, lints/scans/SBOMs the images, attaches the SBOMs and digest
+# manifest to a draft GitHub release and promotes it.
 #
-# REGISTRY PUBLISHING MAY NEED TO LIVE HERE, CALLER-SIDE. Registry-native
-# OIDC/trusted-publishing mechanisms (e.g. PyPI trusted publishing) match
-# the OIDC job_workflow_ref claim against THIS repository, so a reusable
-# workflow cannot always act as the trusted publisher. The reusable
-# workflow exposes a `tag` output and leaves the run-scoped build
-# artefact in place, so caller-side publish jobs (stacked after the
-# `release` job below) have everything they need.
+# GHCR publishing authenticates with GITHUB_TOKEN, so the caller grants
+# packages: write below. Docker Hub publishing additionally needs the
+# DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD secrets forwarded.
 # =============================================================================
 name: 'Build/Test/Release'
 
@@ -42,21 +42,28 @@ jobs:
     if: "!github.event.deleted"
     permissions:
       contents: write       # Create the GitHub release / attach assets
-      id-token: write       # OIDC for build provenance attestations
+      id-token: write       # OIDC for cosign signing and attestations
       attestations: write   # Build provenance attestations
-    # REPLACE the pinned SHA below with a workflows-template release SHA
-    # (or your instantiated workflows repository's release SHA).
+      packages: write       # Push images to GHCR
+    # REPLACE the pinned SHA below with a docker-workflows release SHA.
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/workflows-template/.github/workflows/build-test-release.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    uses: lfreleng-actions/docker-workflows/.github/workflows/build-test-release.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
     # All inputs are optional. Uncomment and tune only what your project
     # needs; everything else falls back to sensible defaults.
     # with:
     #   path_prefix: '.'              # project root (monorepo subdir, etc.)
-    #   attestations: true            # build provenance attestations
-    #   sigstore_sign: true           # Sigstore-sign build artefacts
-
-# Caller-side registry publish jobs go here, stacked after the release
-# job, consuming `needs.release.outputs.tag` and the run-scoped build
-# artefact. See the python-workflows release examples for a complete
-# trusted-publishing precedent.
+    #   images: ''                    # JSON image list; empty auto-discovers
+    #   platforms: 'linux/amd64'      # csv; add linux/arm64 for multi-arch
+    #   ghcr_publish: true            # ghcr.io/<owner>/<name>
+    #   dockerhub_publish: false      # docker.io/<image_namespace>/<name>
+    #   image_namespace: ''           # Docker Hub namespace (org/user)
+    #   push_latest: false            # additionally push the latest tag
+    #   test_command: ''              # smoke-test hook (IMAGES env = tags)
+    #   attestations: true            # SLSA build provenance per image
+    #   sigstore_sign: true           # cosign keyless signing per image
+    #   build_permit_egress_traffic: false  # audit egress for build job
+    # Forward the Docker Hub secrets when dockerhub_publish is true:
+    # secrets:
+    #   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    #   DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}

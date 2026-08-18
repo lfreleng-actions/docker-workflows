@@ -2,25 +2,42 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Reusable build/test/release pipeline SKELETON (Model A: tag-driven).
+# Reusable Docker build/test/release pipeline (Model A: tag-driven).
 #
-# Reproduces the canonical Linux Foundation release pipeline shape. The
-# repository-metadata job runs in parallel as an informational step.
-# After build the audit jobs in { } run in parallel; the tests then gate
-# on ALL of them (gating inversion: on releases the audits gate the
-# expensive test matrix), and publishing runs at the end:
-#   tag-validate -> build -> { audit | sbom -> grype } -> tests
+# Reproduces the canonical Linux Foundation release pipeline shape for
+# container images: a validated, signed semver tag drives the version,
+# the images build (multi-platform capable) and push to GHCR and/or
+# Docker Hub, each pushed image signs with Sigstore cosign (keyless)
+# and gains SLSA build provenance, and the audits gate the release:
+#   tag-validate -> build -> sign
+#   docker-metadata -> { audit | build }
+#   build -> { sbom -> grype } -> tests
 #     -> attach-artefacts -> promote-release
 #
-# Steps marked "# TEMPLATE:" are placeholders. When instantiating this
-# template for a language, replace them with the real build/test/audit/
-# SBOM actions; the tag validation, release plumbing, harden-runner
-# wiring, dual checkout and Grype scan are generic and transfer as-is.
+# Registries:
+#   * GHCR: ghcr.io/<owner>/<name>, authenticated with GITHUB_TOKEN
+#     (callers grant packages: write)
+#   * Docker Hub: docker.io/<image_namespace>/<name>, authenticated
+#     with the optional DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD secrets;
+#     skips with a warning when unset
+#
+# Platform strategy: the default single-platform build uses the
+# buildx docker driver, so images build in array order against the
+# daemon and same-repository FROM chains resolve exactly as in the
+# verify lane. Passing more than one platform switches to the
+# docker-container driver with QEMU emulation and pushes manifest
+# lists directly; same-repository chains must then reference
+# registry-resolvable images (or use build_args).
+#
+# The build_command escape hatch is deliberately absent from this
+# lane: project-tooling builds cannot produce multi-platform
+# manifests or per-registry digests reliably. Repositories needing it
+# release through merge.yaml (Model B).
 #
 # Call this from a thin caller workflow on a tag push; see
-# examples/build-test-release/ for both a plain GitHub-native caller and
-# a Gerrit-wrapped caller.
-name: '[R] Build/Test/Release (Template)'
+# examples/build-test-release/ for both a plain GitHub-native caller
+# and a Gerrit-sourced caller.
+name: '[R] Docker Build/Test/Release'
 
 # yamllint disable-line rule:truthy
 on:
@@ -33,7 +50,12 @@ on:
         type: string
         default: ''
       ref:
-        description: 'Branch/tag/SHA to check out (empty = default branch)'
+        description: >-
+          Branch/tag/SHA to check out for the metadata/housekeeping
+          jobs (empty = default branch). The jobs that discover,
+          build, lint and test content always check out the validated
+          release tag, so published images match the tag regardless
+          of this input.
         required: false
         type: string
         default: ''
@@ -45,16 +67,85 @@ on:
         type: string
         default: '.'
 
+      # --- Image selection/build ---
+      images:
+        description: >-
+          JSON array describing the images to build; an empty string
+          (the default) auto-discovers Dockerfiles under path_prefix.
+          When provided, the array must be non-empty; each entry takes
+          name and context (required), dockerfile (default
+          context/Dockerfile), target and build_args (optional list of
+          KEY=VALUE strings). Array order is the build order.
+        required: false
+        type: string
+        default: ''
+      image_namespace:
+        description: >-
+          Docker Hub namespace (organisation/user) images publish
+          under; required when dockerhub_publish is true. GHCR images
+          always publish under the calling repository owner.
+        required: false
+        type: string
+        default: ''
+      platforms:
+        description: >-
+          Comma-separated target platforms (e.g.
+          'linux/amd64,linux/arm64'). More than one platform engages
+          QEMU emulation and pushes a manifest list per image.
+        required: false
+        type: string
+        default: 'linux/amd64'
+      build_timeout_minutes:
+        description: 'Timeout for the build job in whole minutes'
+        required: false
+        type: number
+        default: 30
+
+      # --- Registry publishing ---
+      ghcr_publish:
+        description: 'Publish images to GHCR (ghcr.io/<owner>/<name>)'
+        required: false
+        type: boolean
+        default: true
+      dockerhub_publish:
+        description: >-
+          Publish images to Docker Hub
+          (docker.io/<image_namespace>/<name>). Requires the
+          DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD secrets; skips with a
+          warning when they are unavailable.
+        required: false
+        type: boolean
+        default: false
+      push_latest:
+        description: >-
+          Additionally publish the 'latest' tag per image. The tag
+          applies registry-side during release promotion, after every
+          gate (lint, scan, tests, signing) has passed, so a failed
+          release never moves 'latest'.
+        required: false
+        type: boolean
+        default: false
+
       # --- Tests ---
+      test_command:
+        description: >-
+          Shell command run from path_prefix after the built images
+          load into the Docker daemon (a smoke/integration hook, e.g.
+          'make test'). The IMAGES environment variable carries a JSON
+          array of the built image tags. Empty skips the test step
+          with a notice.
+        required: false
+        type: string
+        default: ''
       test_permit_fail:
         description: 'Permit test failures without failing the workflow'
         required: false
         type: boolean
         default: false
 
-      # --- Audit ---
+      # --- Audit (Dockerfile lint) ---
       audit_permit_fail:
-        description: 'Permit dependency audit failures (the NO_BLOCK pattern)'
+        description: 'Permit hadolint findings (the NO_BLOCK pattern)'
         required: false
         type: boolean
         default: false
@@ -85,6 +176,17 @@ on:
         type: string
         # yamllint disable-line rule:line-length
         default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@bf6642f68d58c1b81bbe993e676d6cc339ac3654'  # v0.12.2
+      build_permit_egress_traffic:
+        description: >-
+          Run harden-runner in audit mode for the build job only,
+          permitting unrestricted egress. Use when base images or
+          build-time dependencies come from registries/CDNs that are
+          impractical to enumerate in the allow-list. Other jobs stay
+          governed by harden_runner_egress; left unset, the build job
+          follows it too.
+        required: false
+        type: boolean
+        default: false
 
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
@@ -113,28 +215,46 @@ on:
       # --- Release-only inputs ---
       attestations:
         description: >-
-          Generate build provenance attestations. Placeholder wiring in
-          this template: pass it to your build action (or enable the
-          commented attest-build-provenance example in the build job)
-          when instantiating. Keep it toggleable for air-gapped or
-          Gerrit-mirrored consumers that cannot reach Sigstore.
+          Generate SLSA build provenance attestations for every pushed
+          image (by digest; pushed to the registry for GHCR images).
+          Keep it toggleable for air-gapped or Gerrit-mirrored
+          consumers that cannot reach Sigstore.
         required: false
         type: boolean
         default: true
       sigstore_sign:
         description: >-
-          Sign build artefacts with Sigstore (keyless/OIDC). Placeholder
-          wiring in this template: pass it to your build action when
-          instantiating. Keep it toggleable for air-gapped or
+          Sign every pushed image with Sigstore cosign (keyless/OIDC,
+          by digest). Keep it toggleable for air-gapped or
           Gerrit-mirrored consumers that cannot reach Sigstore.
         required: false
         type: boolean
         default: true
 
+    secrets:
+      DOCKERHUB_USERNAME:
+        description: >-
+          Docker Hub username used when dockerhub_publish is true. The
+          build job skips Docker Hub publishing with a warning when
+          unset, so PR/self-test contexts still work.
+        required: false
+      DOCKERHUB_PASSWORD:
+        description: >-
+          Docker Hub password or access token used when
+          dockerhub_publish is true. The build job skips Docker Hub
+          publishing with a warning when unset, so PR/self-test
+          contexts still work.
+        required: false
+
     outputs:
       tag:
         description: 'Validated release tag/version string'
         value: ${{ jobs.tag-validate.outputs.tag }}
+      pushed:
+        description: >-
+          JSON array of pushed images as {name, image, digest}
+          objects, one entry per image per registry
+        value: ${{ jobs.build.outputs.pushed }}
 
 permissions: {}
 
@@ -145,12 +265,29 @@ jobs:
     # the project/branch the Gerrit checkout path also requires. The
     # build-chain root job depends on this, so invalid Gerrit inputs stop
     # the pipeline early and cleanly. This job always runs (only the
-    # validation step is conditional), so gating dependents on it does
-    # not trip GitHub's "skipped need skips dependents" behaviour.
+    # Gerrit validation step is conditional), so gating dependents on it
+    # does not trip GitHub's "skipped need skips dependents" behaviour.
     runs-on: ubuntu-latest
     permissions: {}
     timeout-minutes: 2
     steps:
+      - name: 'Validate platforms input'
+        shell: bash
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          # Require a comma-separated list of os/arch[/variant]
+          # platform specifiers; the value reaches docker buildx
+          # --platform and must not carry hostile content
+          pattern='^[a-z0-9]+(/[a-z0-9]+){1,2}'
+          pattern+='(,[a-z0-9]+(/[a-z0-9]+){1,2})*$'
+          if [[ ! "${PLATFORMS}" =~ ${pattern} ]]; then
+            echo "::error::Invalid platforms input: ${PLATFORMS}" \
+              "(expected csv of os/arch[/variant] specifiers)"
+            exit 1
+          fi
+          echo "Platforms input validated ✅"
+
       - name: 'Require Gerrit project, branch and URL'
         if: inputs.gerrit_refspec != ''
         shell: bash
@@ -320,18 +457,19 @@ jobs:
               --notes "Automated release for $TAG"
           fi
 
-  build:
-    name: 'Build'
-    needs: 'tag-validate'
-    runs-on: 'ubuntu-latest'
+  docker-metadata:
+    name: 'Docker Metadata'
+    needs:
+      - 'gerrit-validate'
+      - 'tag-validate'
+    runs-on: ubuntu-latest
     outputs:
-      artefact_name: ${{ steps.build.outputs.artefact_name }}
-      artefact_path: ${{ steps.build.outputs.artefact_path }}
+      images_json: ${{ steps.discover.outputs.images_json }}
+      image_count: ${{ steps.discover.outputs.image_count }}
+      build_id: ${{ steps.discover.outputs.build_id }}
     permissions:
       contents: read
-      id-token: write       # Needed for attestations
-      attestations: write   # Needed for attestations
-    timeout-minutes: 12
+    timeout-minutes: 5
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -365,67 +503,585 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          # Pin to the validated tag: the published/audited content
+          # must match the release tag, not a caller-chosen ref
+          ref: ${{ needs.tag-validate.outputs.tag }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language build
-      # action, passing the sigstore_sign/attestations inputs through
-      # where the action supports them, e.g.:
-      #   - name: 'Build project'
-      #     id: build
-      #     uses: lfreleng-actions/<lang>-build-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       sigstore_sign: ${{ inputs.sigstore_sign }}
-      #       attestations: ${{ inputs.attestations }}
-      - name: 'Build project (placeholder)'
+      - name: 'Discover images'
+        id: discover
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          IMAGES_INPUT: ${{ inputs.images }}
+          TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
+          IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          # Resolve the image list: an explicit 'images' input wins;
+          # otherwise walk the estate-observed Dockerfile locations.
+          cd "${PATH_PREFIX}"
+          if [ -n "${IMAGES_INPUT}" ]; then
+            if ! jq -e 'type == "array" and length > 0 and
+                all(.[]; (.name | type == "string") and
+                         (.context | type == "string") and
+                         ((.dockerfile // "") | type == "string") and
+                         ((.target // "") | type == "string") and
+                         ((.build_args // []) | type == "array" and
+                           all(.[]; type == "string")))' \
+                >/dev/null 2>&1 <<< "${IMAGES_INPUT}"; then
+              echo "::error::images input must be a non-empty JSON" \
+                "array of objects with string 'name' and 'context'" \
+                "keys; optional 'dockerfile'/'target' take strings" \
+                "and 'build_args' a list of KEY=VALUE strings. Pass" \
+                "an empty string (not []) for auto-discovery"
+              exit 1
+            fi
+            images=$(jq -c . <<< "${IMAGES_INPUT}")
+          else
+            repo_name="${TARGET_REPOSITORY##*/}"
+            if [ "${PATH_PREFIX}" != "." ]; then
+              repo_name=$(basename "${PATH_PREFIX}")
+            fi
+            images='[]'
+            add_image() {
+              images=$(jq -c \
+                --arg n "$1" --arg d "$2" --arg c "$3" \
+                '. + [{name: $n, dockerfile: $d, context: $c}]' \
+                <<< "${images}")
+            }
+            if [ -f Dockerfile ]; then
+              add_image "${repo_name}" "Dockerfile" "."
+            fi
+            if [ -f docker/Dockerfile ]; then
+              add_image "${repo_name}" "docker/Dockerfile" "docker"
+            fi
+            if [ -f src/main/docker/Dockerfile ]; then
+              add_image "${repo_name}" \
+                "src/main/docker/Dockerfile" "src/main/docker"
+            fi
+            for df in */Dockerfile; do
+              [ -f "${df}" ] || continue
+              dir="${df%/Dockerfile}"
+              case "${dir}" in
+                docker|src) continue ;;
+              esac
+              add_image "${dir}" "${df}" "${dir}"
+            done
+          fi
+          # Sanitise names to the docker repository character set
+          images=$(jq -c \
+            '[.[] | .name |= (ascii_downcase |
+              gsub("[^a-z0-9._-]"; "-"))]' \
+            <<< "${images}")
+          if [ -n "${IMAGES_INPUT}" ]; then
+            # Explicit entries whose names collide after
+            # normalisation (e.g. API and api) must reject: silently
+            # dropping one would publish only part of the caller's
+            # requested image set
+            dupes=$(jq -r '[.[].name] | group_by(.) |
+              map(select(length > 1) | .[0]) | .[]' \
+              <<< "${images}")
+            if [ -n "${dupes}" ]; then
+              echo "::error::Duplicate image name(s) after" \
+                "normalisation in the images input: ${dupes}"
+              exit 1
+            fi
+          else
+            # Auto-discovery drops duplicates (e.g. a root Dockerfile
+            # plus docker/ both mapping to the repository name). The
+            # de-duplication preserves array order — order is the
+            # build order, which same-repository FROM chains rely on
+            # — keeping the first occurrence of each name.
+            images=$(jq -c \
+              'reduce .[] as $img ([];
+                if any(.[]; .name == $img.name) then .
+                else . + [$img] end)' \
+              <<< "${images}")
+          fi
+          count=$(jq 'length' <<< "${images}")
+          if [ "${count}" -eq 0 ]; then
+            echo "::error::No Dockerfiles found under" \
+              "'${PATH_PREFIX}' and no images input provided"
+            exit 1
+          fi
+          # Post-sanitisation validation: every name must be a valid
+          # Docker repository component (start and end alphanumeric),
+          # so reference construction fails here with a clear message
+          # rather than at build/push time.
+          bad=$(jq -r '.[] | .name |
+            select(test("^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$") | not)' \
+            <<< "${images}")
+          if [ -n "${bad}" ]; then
+            echo "::error::Invalid image name(s) after sanitisation:" \
+              "${bad} (names must start/end with a-z or 0-9)"
+            exit 1
+          fi
+          echo "Discovered ${count} image(s):"
+          jq -r '.[] | "  \(.name)  (\(.dockerfile //
+            (.context + "/Dockerfile")))"' <<< "${images}"
+          echo "images_json=${images}" >> "$GITHUB_OUTPUT"
+          echo "image_count=${count}" >> "$GITHUB_OUTPUT"
+          # Artifact names must be unique per workflow-call invocation:
+          # matrix legs calling this workflow in parallel would
+          # otherwise overwrite each other's docker-archives/sbom-files
+          # artifacts (upload-artifact overwrites duplicate names) and
+          # downstream jobs would consume another leg's images. Hash
+          # the distinguishing inputs into a stable per-leg id.
+          build_id=$(printf '%s|%s|%s|%s|%s' \
+            "${TARGET_REPOSITORY}" "${PATH_PREFIX}" "${IMAGES_INPUT}" \
+            "${IMAGE_NAMESPACE}" "${PLATFORMS}" \
+            | sha256sum | cut -c1-12)
+          echo "build_id=${build_id}" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Docker Images"
+            echo ""
+            echo "| Image | Dockerfile | Context |"
+            echo "| ----- | ---------- | ------- |"
+            jq -r '.[] | "| \(.name) | \(.dockerfile //
+              (.context + "/Dockerfile")) | \(.context) |"' \
+              <<< "${images}"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: 'Docker Build/Push'
+    needs:
+      - 'tag-validate'
+      - 'docker-metadata'
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.build.outputs.images }}
+      image_count: ${{ steps.build.outputs.image_count }}
+      pushed: ${{ steps.build.outputs.pushed }}
+      pushed_count: ${{ steps.build.outputs.pushed_count }}
+    permissions:
+      contents: read
+      packages: write  # Push images to GHCR
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
+    steps:
+      # The build job can opt into audit egress independently of the
+      # other jobs via build_permit_egress_traffic, for base images and
+      # build-time dependencies from registries/CDNs impractical to
+      # enumerate in the allow-list. Left unset it follows
+      # harden_runner_egress like every other job.
+      #
+      # One harden-runner step with the policy computed, rather than
+      # two selected by condition: harden-runner declares a 'pre'
+      # entry point and no 'pre-if', so its pre-phase runs whatever a
+      # step-level 'if:' says. Both would engage the agent, the first
+      # would win, and audit mode would be unreachable.
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40  # v2.20.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ (inputs.build_permit_egress_traffic || inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@f87b90a3370e62dad310797fedc7fd3700c75832  # v1.0.2
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          # Pin to the validated tag: the published/audited content
+          # must match the release tag, not a caller-chosen ref
+          ref: ${{ needs.tag-validate.outputs.tag }}
+          persist-credentials: false
+
+      # The Docker Hub secrets stay optional so PR/self-test contexts
+      # can exercise the pipeline; when absent the Docker Hub leg
+      # skips with a warning rather than failing. GHCR authenticates
+      # with GITHUB_TOKEN, which always exists.
+      - name: 'Resolve target registries'
+        id: registries
+        shell: bash
+        env:
+          GHCR_PUBLISH: ${{ inputs.ghcr_publish }}
+          DOCKERHUB_PUBLISH: ${{ inputs.dockerhub_publish }}
+          # yamllint disable-line rule:line-length
+          HAS_DOCKERHUB_CREDS: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_PASSWORD != '' }}
+          IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
+        run: |
+          # Gate each registry on its configuration/credentials
+          dockerhub='false'
+          if [ "${DOCKERHUB_PUBLISH}" = 'true' ]; then
+            if [ "${HAS_DOCKERHUB_CREDS}" != 'true' ]; then
+              echo "::warning::DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD" \
+                "unavailable; skipping Docker Hub publish"
+            elif [ -z "${IMAGE_NAMESPACE}" ]; then
+              echo "::error::dockerhub_publish requires the" \
+                "image_namespace input (the Docker Hub organisation" \
+                "or user the images publish under)"
+              exit 1
+            elif [[ ! "${IMAGE_NAMESPACE}" =~ ^[a-z0-9._-]+$ ]]; then
+              echo "::error::Invalid image_namespace" \
+                "'${IMAGE_NAMESPACE}' (lowercase alphanumerics," \
+                "dots, dashes and underscores)"
+              exit 1
+            else
+              dockerhub='true'
+            fi
+          fi
+          if [ "${GHCR_PUBLISH}" != 'true' ] &&
+            [ "${dockerhub}" != 'true' ]; then
+            echo "::warning::No target registries resolved; images" \
+              "will build and archive but nothing will publish"
+          fi
+          echo "dockerhub=${dockerhub}" >> "$GITHUB_OUTPUT"
+
+      - name: 'Login to GHCR'
+        if: inputs.ghcr_publish
+        # yamllint disable-line rule:line-length
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 'Login to Docker Hub'
+        if: steps.registries.outputs.dockerhub == 'true'
+        # yamllint disable-line rule:line-length
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: 'Set up QEMU'
+        if: inputs.platforms != 'linux/amd64'
+        # yamllint disable-line rule:line-length
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
+
+      - name: 'Set up Docker buildx'
+        # yamllint disable-line rule:line-length
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
+        with:
+          # Single-platform (the default) builds with the docker
+          # driver against the daemon's image store, so images build
+          # in array order and same-repository FROM chains resolve as
+          # in the verify lane. Multi-platform requires the
+          # docker-container driver (the docker driver cannot build
+          # manifest lists); chains must then reference
+          # registry-resolvable images.
+          # yamllint disable-line rule:line-length
+          driver: ${{ inputs.platforms == 'linux/amd64' && 'docker' || 'docker-container' }}
+
+      - name: 'Build and push images'
         id: build
         shell: bash
         env:
           PATH_PREFIX: ${{ inputs.path_prefix }}
+          IMAGES_JSON: ${{ needs.docker-metadata.outputs.images_json }}
+          IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
+          PLATFORMS: ${{ inputs.platforms }}
+          TAG: ${{ needs.tag-validate.outputs.tag }}
+          GHCR_PUBLISH: ${{ inputs.ghcr_publish }}
+          DOCKERHUB: ${{ steps.registries.outputs.dockerhub }}
+          OWNER: ${{ github.repository_owner }}
         run: |
-          # TEMPLATE: placeholder build step; produces a trivial text
-          # artefact so the artifact/release plumbing can be exercised.
+          # Build every image, push it to the resolved registries and
+          # capture the per-registry manifest digest (the subject the
+          # sign job signs/attests). Each image also exports as a
+          # docker archive so the test, SBOM and scan jobs consume
+          # the published bits. The local working tag is the
+          # lane-neutral <name>:verify alias, so same-repository FROM
+          # chains resolve exactly as in the verify lane (local tags
+          # never publish). Any failure fails the job: a release must
+          # never publish a partial image set.
           cd "${PATH_PREFIX}"
-          mkdir -p dist
+          # Require the v prefix (the LF release convention): the
+          # semver gate accepts both v1.2.3 and 1.2.3, and stripping
+          # an optional v would let two distinct git tags publish the
+          # same supposedly immutable registry tag
+          if [[ ! "${TAG}" =~ ^v ]]; then
+            echo "::error::Release tags must carry the 'v' prefix" \
+              "(got '${TAG}'); accepting both v1.2.3 and 1.2.3" \
+              "would alias the same registry tag"
+            exit 1
+          fi
+          version="${TAG#v}"
+          # Docker tags cannot carry SemVer build metadata ('+');
+          # normalise it to '_' — collision-safe because SemVer
+          # forbids '_' — so a valid signed tag such as
+          # v1.2.3+build.5 still releases
+          version="${version//+/_}"
+          if [[ ! "${version}" =~ ^[0-9A-Za-z._-]+$ ]]; then
+            echo "::error::Invalid release version: ${version}"
+            exit 1
+          fi
+          owner=$(tr '[:upper:]' '[:lower:]' <<< "${OWNER}")
+          multi='false'
+          if [ "${PLATFORMS}" != 'linux/amd64' ]; then
+            multi='true'
+          fi
+          # The platform whose image feeds the test/SBOM/scan jobs:
+          # the runner's native platform when the build targets it,
+          # otherwise the first requested platform (Syft and Grype
+          # analyse archives statically, so a foreign-architecture
+          # archive still scans)
+          scan_platform='linux/amd64'
+          case ",${PLATFORMS}," in
+            *,linux/amd64,*) ;;
+            *) scan_platform="${PLATFORMS%%,*}" ;;
+          esac
+          mkdir -p /tmp/docker-archives
+          declare -a local_tags=()
+          pushed='[]'
+          while IFS= read -r spec; do
+            name=$(jq -r '.name' <<< "${spec}")
+            ctx=$(jq -r '.context' <<< "${spec}")
+            df=$(jq -r '.dockerfile //
+              (.context + "/Dockerfile")' <<< "${spec}")
+            target=$(jq -r '.target // empty' <<< "${spec}")
+            declare -a common=(-f "${df}")
+            if [ -n "${target}" ]; then
+              common+=(--target "${target}")
+            fi
+            while IFS= read -r build_arg; do
+              [ -n "${build_arg}" ] &&
+                common+=(--build-arg "${build_arg}")
+            done < <(jq -r '.build_args[]? // empty' <<< "${spec}")
+            declare -a repos=()
+            if [ "${GHCR_PUBLISH}" = 'true' ]; then
+              repos+=("ghcr.io/${owner}/${name}")
+            fi
+            if [ "${DOCKERHUB}" = 'true' ]; then
+              repos+=("docker.io/${IMAGE_NAMESPACE}/${name}")
+            fi
+            declare -a refs=()
+            for repo in "${repos[@]}"; do
+              refs+=("${repo}:${version}")
+            done
+            declare -a tag_args=()
+            for ref in "${refs[@]}"; do
+              tag_args+=(-t "${ref}")
+            done
+            local_tag="${name}:verify"
+            # The pushed digest captures from the push operation
+            # itself (buildx metadata / the local daemon's post-push
+            # record), never re-read through the mutable version tag:
+            # a concurrent writer moving the tag cannot desynchronise
+            # what the sign job signs from what this run pushed
+            image_digest=''
+            if [ "${multi}" = 'true' ]; then
+              if [ "${#repos[@]}" -gt 0 ]; then
+                # Manifest-list build pushed straight to the
+                # registries; buildx SBOM/provenance stay off — the
+                # sign job attests provenance by digest instead
+                echo "::group::Build/push ${name} (${PLATFORMS})"
+                docker buildx build --platform "${PLATFORMS}" \
+                  --push --provenance=false --sbom=false \
+                  --metadata-file /tmp/build-meta.json \
+                  "${tag_args[@]}" "${common[@]}" "${ctx}"
+                echo "::endgroup::"
+                # One build pushes the same manifest list to every
+                # repo, so the emitted digest covers them all
+                image_digest=$(jq -r \
+                  '."containerimage.digest" // empty' \
+                  /tmp/build-meta.json)
+                # The archive the test/SBOM/scan jobs consume pulls
+                # back from the pushed manifest by its immutable
+                # digest, so downstream jobs audit the published bits
+                echo "::group::Pull ${name} (${scan_platform})"
+                docker pull --platform "${scan_platform}" \
+                  "${repos[0]}@${image_digest}"
+                docker tag "${repos[0]}@${image_digest}" \
+                  "${local_tag}"
+                echo "::endgroup::"
+              else
+                # Nothing publishes: build a native-platform image
+                # locally so the downstream jobs still have bits to
+                # audit
+                echo "::group::Build ${local_tag} (native)"
+                docker buildx build --load -t "${local_tag}" \
+                  "${common[@]}" "${ctx}"
+                echo "::endgroup::"
+              fi
+            else
+              echo "::group::Build ${local_tag}"
+              docker buildx build --load -t "${local_tag}" \
+                "${tag_args[@]}" "${common[@]}" "${ctx}"
+              echo "::endgroup::"
+              for ref in "${refs[@]}"; do
+                echo "::group::Push ${ref}"
+                docker push "${ref}"
+                echo "::endgroup::"
+              done
+            fi
+            for repo in "${repos[@]}"; do
+              digest="${image_digest}"
+              if [ -z "${digest}" ]; then
+                # Single-platform path: the daemon records
+                # repo@digest locally when it pushes, so this reads
+                # the digest of our own push, not the registry's
+                # current tag state
+                digest=$(docker image inspect \
+                  --format \
+                  '{{range .RepoDigests}}{{println .}}{{end}}' \
+                  "${local_tag}" \
+                  | awk -F'@' -v repo="${repo}" \
+                    '$1 == repo {print $2; exit}')
+              fi
+              if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "::error::Failed to resolve digest for" \
+                  "${repo}:${version} (got: ${digest})"
+                exit 1
+              fi
+              echo "${repo}@${digest}"
+              pushed=$(jq -c \
+                --arg n "${name}" --arg i "${repo}" \
+                --arg d "${digest}" \
+                '. + [{name: $n, image: $i, digest: $d}]' \
+                <<< "${pushed}")
+            done
+            local_tags+=("${local_tag}")
+            safe=$(tr '/:' '__' <<< "${local_tag}")
+            docker save "${local_tag}" \
+              -o "/tmp/docker-archives/${safe}.tar"
+          done < <(jq -c '.[]' <<< "${IMAGES_JSON}")
+          built=$(printf '%s\n' "${local_tags[@]}" | jq -cnR '[inputs]')
+          pushed_count=$(jq 'length' <<< "${pushed}")
+          echo "Built ${#local_tags[@]} image(s): ${built}"
+          echo "Pushed ${pushed_count} image reference(s)"
           {
-            echo "workflows-template placeholder build artefact"
-            echo "repository: ${GITHUB_REPOSITORY}"
-            echo "ref: ${GITHUB_REF}"
-            echo "sha: ${GITHUB_SHA}"
-            echo "run_id: ${GITHUB_RUN_ID}"
-          } > dist/template-artefact.txt
-          echo "artefact_name=template-build" >> "$GITHUB_OUTPUT"
-          echo "artefact_path=${PATH_PREFIX}/dist" >> "$GITHUB_OUTPUT"
+            echo "images=${built}"
+            echo "image_count=${#local_tags[@]}"
+            echo "pushed=${pushed}"
+            echo "pushed_count=${pushed_count}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Docker Build/Push"
+            echo ""
+            echo "Built **${#local_tags[@]}** image(s);" \
+              "pushed **${pushed_count}** reference(s):"
+            echo ""
+            if [ "${pushed_count}" -gt 0 ]; then
+              jq -r '.[] | "- `\(.image)@\(.digest)`"' \
+                <<< "${pushed}"
+            else
+              echo "- (nothing pushed)"
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      # TEMPLATE: When your build action does NOT handle attestations
-      # itself, uncomment this step to generate SLSA build provenance
-      # for real artefacts (verifiable with `gh attestation verify`).
-      # It ships commented out because attesting the trivial placeholder
-      # artefact provides no value:
-      #   - name: 'Attest build provenance'
-      #     if: inputs.attestations
-      # yamllint disable-line rule:line-length
-      #     uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
-      #     with:
-      #       subject-path: 'dist/*'
-
-      - name: 'Upload build artefact'
+      - name: 'Upload image archives'
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ steps.build.outputs.artefact_name }}
-          path: ${{ steps.build.outputs.artefact_path }}
+          name: docker-archives-${{ needs.docker-metadata.outputs.build_id }}
+          path: /tmp/docker-archives/
+          retention-days: 1
           if-no-files-found: error
 
-  audit:
-    name: 'Audit'
+  # Signs and attests every pushed image by digest: cosign keyless
+  # (Sigstore) plus SLSA build provenance via GitHub attestations,
+  # matching the verification story of the other workflow families.
+  # Provenance pushes to the registry for GHCR images; Docker Hub
+  # lacks dependable OCI referrers support, so its attestations live
+  # in the GitHub attestation store (gh attestation verify).
+  sign:
+    name: 'Sign & Attest'
     runs-on: ubuntu-latest
     needs: 'build'
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.build.outputs.pushed_count != '0' && (inputs.sigstore_sign || inputs.attestations) }}
     permissions:
       contents: read
+      id-token: write       # Sigstore OIDC + provenance signing
+      attestations: write   # GitHub attestation store
+      packages: write       # Push signatures/attestations to GHCR
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.build.outputs.pushed) }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40  # v2.20.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Login to GHCR'
+        if: startsWith(matrix.image, 'ghcr.io/')
+        # yamllint disable-line rule:line-length
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 'Login to Docker Hub'
+        if: startsWith(matrix.image, 'docker.io/')
+        # yamllint disable-line rule:line-length
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: 'Install cosign'
+        if: inputs.sigstore_sign
+        # yamllint disable-line rule:line-length
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+
+      - name: 'Sign image with cosign (keyless)'
+        if: inputs.sigstore_sign
+        shell: bash
+        env:
+          IMAGE: ${{ matrix.image }}
+          DIGEST: ${{ matrix.digest }}
+        run: |
+          # Keyless signature over the immutable digest; verification:
+          #   cosign verify <image>@<digest> \
+          #     --certificate-identity-regexp <workflow ref> \
+          #     --certificate-oidc-issuer \
+          #       https://token.actions.githubusercontent.com
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: 'Attest build provenance'
+        if: inputs.attestations
+        # yamllint disable-line rule:line-length
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-name: ${{ matrix.image }}
+          subject-digest: ${{ matrix.digest }}
+          push-to-registry: ${{ startsWith(matrix.image, 'ghcr.io/') }}
+
+  audit:
+    name: 'Dockerfile Lint'
+    runs-on: ubuntu-latest
+    needs:
+      - 'docker-metadata'
+      - 'tag-validate'
+    if: ${{ !cancelled() && needs.docker-metadata.result == 'success' }}
+    permissions:
+      contents: read
+    timeout-minutes: 5
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -459,43 +1115,59 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          # Pin to the validated tag: the published/audited content
+          # must match the release tag, not a caller-chosen ref
+          ref: ${{ needs.tag-validate.outputs.tag }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language dependency
-      # audit action, e.g.:
-      #   - name: 'Audit dependencies'
-      #     uses: lfreleng-actions/<lang>-audit-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       permit_fail: ${{ inputs.audit_permit_fail }}
-      - name: 'Audit dependencies (placeholder)'
+      - name: 'Lint Dockerfiles (hadolint)'
         shell: bash
         env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          IMAGES_JSON: ${{ needs.docker-metadata.outputs.images_json }}
+          # Digest-pinned hadolint container; docker.io serves it and
+          # sits in the egress allow-list.
+          # yamllint disable-line rule:line-length
+          HADOLINT_IMAGE: 'hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d'
           # The NO_BLOCK/soft-fail pattern: the audit_permit_fail input
           # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
           # variable) disables failure propagation.
           # yamllint disable-line rule:line-length
           NO_BLOCK: ${{ inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
         run: |
-          # TEMPLATE: placeholder audit step; replace with real audit.
+          # Lint exactly the Dockerfiles the build consumes (from the
+          # resolved image list), so per-image dockerfile overrides
+          # and non-standard filenames stay covered. The resolved
+          # paths are relative to path_prefix (discovery runs there).
+          cd "${PATH_PREFIX}"
           status=0
-          echo "Placeholder dependency audit executed"
-          if [ "${status}" != "0" ]; then
-            if [ "${NO_BLOCK}" = "true" ]; then
-              echo "::warning::Audit failed, but failures are" \
-                "permitted so the job will not fail."
-              exit 0
-            fi
-            exit "${status}"
+          while IFS= read -r dockerfile; do
+            echo "::group::hadolint ${dockerfile}"
+            docker run --rm \
+              -v "${PWD}:/mnt:ro" -w /mnt \
+              "${HADOLINT_IMAGE}" \
+              hadolint "${dockerfile}" || status=1
+            echo "::endgroup::"
+          done < <(jq -r '.[] | .dockerfile //
+            (.context + "/Dockerfile")' <<< "${IMAGES_JSON}")
+          if [ "${status}" = "0" ]; then
+            echo "Dockerfile lint passed ✅"
+            exit 0
           fi
+          if [ "${NO_BLOCK}" = "true" ]; then
+            echo "::warning::hadolint reported findings, but failures" \
+              "are permitted so the job will not fail."
+            exit 0
+          fi
+          echo "::error::hadolint reported findings"
+          exit 1
 
   sbom:
-    name: 'Generate SBOM'
+    name: 'Image SBOM'
     runs-on: ubuntu-latest
-    needs: 'build'
+    needs: ['build', 'docker-metadata']
     if: ${{ !cancelled() && needs.build.result == 'success' }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -513,76 +1185,68 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
+      - name: 'Download image archives'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@f87b90a3370e62dad310797fedc7fd3700c75832  # v1.0.2
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
+          name: docker-archives-${{ needs.docker-metadata.outputs.build_id }}
+          path: /tmp/docker-archives
 
-      # TEMPLATE: Replace this placeholder with your language SBOM
-      # action. It MUST emit sbom-cyclonedx.json at the workspace root
-      # (the Grype job contract), e.g.:
-      #   - name: 'Generate SBOM'
-      #     uses: lfreleng-actions/<lang>-sbom-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      # The placeholder writes a minimal VALID empty CycloneDX document
-      # so the downstream Grype scan stays fully functional.
-      - name: 'Generate SBOM (placeholder)'
+      - name: 'Install Syft'
+        id: syft
+        # yamllint disable-line rule:line-length
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+
+      - name: 'Generate image SBOMs'
         shell: bash
+        env:
+          SYFT_CMD: ${{ steps.syft.outputs.cmd }}
         run: |
-          # TEMPLATE: placeholder SBOM step; replace with a real SBOM
-          # generator emitting sbom-cyclonedx.json.
-          cat > sbom-cyclonedx.json <<'EOF'
+          # One CycloneDX SBOM per image archive; the Grype job scans
+          # every sbom-cyclonedx-*.json this step produces. nullglob:
+          # a missing/empty artifact must fail with a clear message,
+          # not a literal-glob Syft error.
+          shopt -s nullglob
+          archives=(/tmp/docker-archives/*.tar)
+          if [ "${#archives[@]}" -eq 0 ]; then
+            echo "::error::No image archives found to scan"
+            exit 1
+          fi
+          total=0
+          for archive in "${archives[@]}"; do
+            base=$(basename "${archive}" .tar)
+            out="sbom-cyclonedx-${base}.json"
+            echo "::group::SBOM ${base}"
+            "${SYFT_CMD}" scan "docker-archive:${archive}" \
+              -o "cyclonedx-json=${out}"
+            echo "::endgroup::"
+            count=$(jq '.components | length' "${out}")
+            echo "${base}: ${count} components"
+            total=$((total + count))
+          done
           {
-            "bomFormat": "CycloneDX",
-            "specVersion": "1.5",
-            "version": 1,
-            "components": []
-          }
-          EOF
-          echo "Wrote placeholder CycloneDX SBOM (0 components)"
+            echo "## SBOM Summary"
+            echo ""
+            echo "CycloneDX SBOM per image;" \
+              "**${total}** components in total"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'Upload SBOM artifacts'
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: sbom-files
-          # Glob matches whichever SBOM formats the generator produced
-          path: sbom-cyclonedx.*
+          name: sbom-files-${{ needs.docker-metadata.outputs.build_id }}
+          path: sbom-cyclonedx-*.json
           retention-days: 45
           # Fail fast: the downstream Grype job requires this artifact,
           # so a missing/misnamed SBOM must surface here, not later
           if-no-files-found: error
 
-      - name: 'SBOM summary'
-        shell: bash
-        run: |
-          # SBOM summary
-          {
-            echo "## SBOM Summary"
-            echo "Placeholder CycloneDX SBOM (0 components)"
-          } >> "$GITHUB_STEP_SUMMARY"
-
   grype:
     name: 'Grype Audit SBOM'
     runs-on: ubuntu-latest
-    needs: 'sbom'
+    needs: ['sbom', 'docker-metadata']
     if: ${{ !cancelled() && needs.sbom.result == 'success' }}
     timeout-minutes: 10
     permissions:
@@ -606,7 +1270,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: sbom-files
+          name: sbom-files-${{ needs.docker-metadata.outputs.build_id }}
 
       - name: 'Install Grype'
         id: grype
@@ -616,10 +1280,10 @@ jobs:
           cache-db: 'true'
 
       # The grype_permit_fail input (or, when unset, the NO_BLOCK_AUDIT_FAIL
-      # repository variable) disables failure propagation so pull requests
-      # can proceed when blocked by newly discovered CVEs in transitive
-      # dependencies.
-      - name: 'Grype audit SBOM'
+      # repository variable) disables failure propagation so releases
+      # can proceed when blocked by newly discovered CVEs in base images
+      # or transitive dependencies.
+      - name: 'Grype audit SBOMs'
         id: grype-audit
         env:
           GRYPE_CMD: ${{ steps.grype.outputs.cmd }}
@@ -628,74 +1292,80 @@ jobs:
           NO_BLOCK_AUDIT_FAIL: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
         shell: bash
         run: |
-          # The audit scans the JSON CycloneDX SBOM, which the sbom step
-          # always generates. Guard anyway so the step still emits a
-          # summary (and honours grype_permit_fail) if it is missing.
-          if [ ! -f sbom-cyclonedx.json ]; then
-            echo "::warning::No JSON SBOM found; Grype scan skipped"
+          # Scan every per-image SBOM the sbom job produced; the worst
+          # result across images decides the job outcome.
+          shopt -s nullglob
+          sboms=(sbom-cyclonedx-*.json)
+          if [ "${#sboms[@]}" -eq 0 ]; then
+            echo "::warning::No JSON SBOMs found; Grype scan skipped"
             {
               echo "## Grype Vulnerability Scan"
               echo ""
-              echo "No JSON SBOM available to scan."
+              echo "No JSON SBOMs available to scan."
             } >> "$GITHUB_STEP_SUMMARY"
             if [ "${NO_BLOCK_AUDIT_FAIL}" = "true" ]; then
               exit 0
             fi
-            echo "::error::No JSON SBOM available for the Grype audit"
+            echo "::error::No JSON SBOMs available for the Grype audit"
             exit 1
           fi
 
-          # Run grype once, emitting all three output formats
-          set +e
-          "${GRYPE_CMD}" \
-            -o "sarif=grype-results.sarif" \
-            -o "json=grype-results.json" \
-            -o "table=grype-results.txt" \
-            --fail-on "${GRYPE_FAIL_ON}" \
-            "sbom:sbom-cyclonedx.json"
-          grype_exit=$?
-          set -e
+          worst=0
+          for sbom in "${sboms[@]}"; do
+            base="${sbom#sbom-cyclonedx-}"
+            base="${base%.json}"
+            echo "::group::Grype ${base}"
+            set +e
+            "${GRYPE_CMD}" \
+              -o "sarif=grype-results-${base}.sarif" \
+              -o "json=grype-results-${base}.json" \
+              -o "table=grype-results-${base}.txt" \
+              --fail-on "${GRYPE_FAIL_ON}" \
+              "sbom:${sbom}"
+            grype_exit=$?
+            set -e
+            if [ -f "grype-results-${base}.txt" ]; then
+              cat "grype-results-${base}.txt"
+            fi
+            echo "::endgroup::"
+            # grype returns 2 when it finds vulnerabilities at or
+            # above the --fail-on threshold; any other non-zero exit
+            # is a grype failure and fails the job outright.
+            if [ "${grype_exit}" != "0" ] &&
+              [ "${grype_exit}" != "2" ]; then
+              echo "::error::Grype exited with code ${grype_exit}" \
+                "for ${base}"
+              exit "${grype_exit}"
+            fi
+            if [ "${grype_exit}" -gt "${worst}" ]; then
+              worst="${grype_exit}"
+            fi
+          done
 
-          echo "--- Grype scan results ---"
-          if [ -f grype-results.txt ]; then
-            cat grype-results.txt
-          else
-            echo "No table output produced"
-          fi
-
-          # grype returns 2 when it finds vulnerabilities at or above the
-          # configured --fail-on threshold; any other non-zero exit is
-          # treated as a grype failure.
-          if [ "${grype_exit}" = "0" ]; then
+          if [ "${worst}" = "0" ]; then
             echo "No vulnerabilities at or above '${GRYPE_FAIL_ON}'"
             exit 0
           fi
-          if [ "${grype_exit}" != "2" ]; then
-            echo "::error::Grype exited with code ${grype_exit}"
-            exit "${grype_exit}"
-          fi
-
           if [ "${NO_BLOCK_AUDIT_FAIL}" = "true" ]; then
-            echo "::warning::Grype found vulnerabilities at or above the" \
-              "'${GRYPE_FAIL_ON}' threshold, but failures are permitted" \
-              "so the job will not fail."
+            echo "::warning::Grype found vulnerabilities at or above" \
+              "the '${GRYPE_FAIL_ON}' threshold, but failures are" \
+              "permitted so the job will not fail."
             exit 0
           fi
           echo "::error::Grype found vulnerabilities at or above the" \
-            "'${GRYPE_FAIL_ON}' severity threshold. See the table above" \
-            "for the offending packages and CVEs."
+            "'${GRYPE_FAIL_ON}' threshold"
           exit 1
 
-      - name: 'Upload Grype scan results'
+      - name: 'Upload Grype results'
+        if: always()
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        if: always()
         with:
-          name: grype-scan-results
+          name: grype-scan-results-${{ needs.docker-metadata.outputs.build_id }}
           path: |
-            grype-results.sarif
-            grype-results.json
-            grype-results.txt
+            grype-results-*.sarif
+            grype-results-*.json
+            grype-results-*.txt
           retention-days: 90
           if-no-files-found: warn
 
@@ -703,38 +1373,37 @@ jobs:
         if: always()
         shell: bash
         run: |
-          # Render a Markdown summary of the Grype findings
+          # Per-image finding counts for the step summary
           {
             echo "## Grype Vulnerability Scan"
             echo ""
-            if [ ! -f grype-results.json ]; then
-              echo "No scan results available"
-              exit 0
-            fi
-            match_count=$(jq '.matches | length' grype-results.json)
-            if [ "${match_count}" = "0" ]; then
-              echo "No vulnerabilities found at or above the configured" \
-                "severity threshold."
-              exit 0
-            fi
-            echo "Found ${match_count} matching Grype record(s)."
+            shopt -s nullglob
+            for res in grype-results-*.json; do
+              base="${res#grype-results-}"
+              base="${base%.json}"
+              count=$(jq '.matches | length' "${res}")
+              echo "- \`${base}\`: ${count} finding(s)"
+            done
+            echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
   tests:
     name: 'Tests'
-    runs-on: 'ubuntu-latest'
-    # Deferred until the audit operations (audit and Grype) pass, so
-    # the expensive test suite is skipped when either audit step fails
+    runs-on: ubuntu-latest
+    # Deferred until the audit operations (hadolint and Grype) pass,
+    # so the expensive test hook is skipped when either audit fails
     # (gating inversion: audits gate tests on releases).
     needs:
       - 'build'
+      - 'docker-metadata'
+      - 'tag-validate'
       - 'audit'
       - 'grype'
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.build.result == 'success' && needs.audit.result == 'success' && needs.grype.result == 'success' }}
     permissions:
       contents: read
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -768,29 +1437,59 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
+          # Pin to the validated tag: the published/audited content
+          # must match the release tag, not a caller-chosen ref
+          ref: ${{ needs.tag-validate.outputs.tag }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language test
-      # action. Pass test_permit_fail through to the action's own
-      # permit_fail input where available, e.g.:
-      #   - name: 'Run tests'
-      #     uses: lfreleng-actions/<lang>-test-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       permit_fail: ${{ inputs.test_permit_fail }}
-      - name: 'Run tests (placeholder)'
+      # Foreign-architecture images (platform sets excluding the
+      # runner-native linux/amd64) need binfmt emulation to run
+      - name: 'Set up QEMU'
+        # yamllint disable-line rule:line-length
+        if: inputs.test_command != '' && inputs.platforms != 'linux/amd64'
+        # yamllint disable-line rule:line-length
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
+
+      - name: 'Download image archives'
+        if: inputs.test_command != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: docker-archives-${{ needs.docker-metadata.outputs.build_id }}
+          path: /tmp/docker-archives
+
+      - name: 'Run tests'
         shell: bash
         env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          TEST_COMMAND: ${{ inputs.test_command }}
+          IMAGES: ${{ needs.build.outputs.images }}
           # The NO_BLOCK/soft-fail pattern: the test_permit_fail input
           # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
           # variable) disables failure propagation.
           # yamllint disable-line rule:line-length
           NO_BLOCK: ${{ inputs.test_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
         run: |
-          # TEMPLATE: placeholder test step; replace with real tests.
+          # Load the built images and run the caller's test hook; the
+          # IMAGES environment variable carries the built tag list.
+          if [ -z "${TEST_COMMAND}" ]; then
+            echo "::notice::No test_command provided; nothing to run"
+            exit 0
+          fi
+          # nullglob: a missing/empty artifact must fail with a clear
+          # message, not a literal-glob docker load error.
+          shopt -s nullglob
+          archives=(/tmp/docker-archives/*.tar)
+          if [ "${#archives[@]}" -eq 0 ]; then
+            echo "::error::No image archives found to load"
+            exit 1
+          fi
+          for archive in "${archives[@]}"; do
+            docker load -i "${archive}"
+          done
+          cd "${PATH_PREFIX}"
           status=0
-          echo "Placeholder tests executed"
+          bash -e -c "${TEST_COMMAND}" || status=$?
           if [ "${status}" != "0" ]; then
             if [ "${NO_BLOCK}" = "true" ]; then
               echo "::warning::Tests failed, but failures are" \
@@ -805,6 +1504,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     needs:
       - 'tag-validate'
+      - 'docker-metadata'
       - 'build'
       - 'tests'
     permissions:
@@ -848,29 +1548,52 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      - name: '⬇ Download build artefacts'
+      - name: '⬇ Download SBOM artefacts'
         # yamllint disable-line rule:line-length
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: ${{ needs.build.outputs.artefact_name }}
-          path: ${{ needs.build.outputs.artefact_path }}
+          name: sbom-files-${{ needs.docker-metadata.outputs.build_id }}
 
-      - name: 'Attach build artefacts to release'
+      # The digest manifest records exactly what pushed where, giving
+      # consumers the immutable references to verify signatures and
+      # provenance against.
+      - name: 'Write image digest manifest'
+        shell: bash
+        env:
+          PUSHED: ${{ needs.build.outputs.pushed }}
+        run: |
+          # Pretty-print the pushed-image manifest for the release
+          jq '.' <<< "${PUSHED:-[]}" > docker-digests.json
+          cat docker-digests.json
+
+      - name: 'Attach artefacts to release'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/release-assets-action@22a6302f3d1775e4a192c45235cc7833a2781b12  # v0.1.1
         with:
-          asset_paths: '["${{ needs.build.outputs.artefact_path }}/**"]'
+          # yamllint disable-line rule:line-length
+          asset_paths: '["sbom-cyclonedx-*.json", "docker-digests.json"]'
           release_tag: ${{ needs.tag-validate.outputs.tag }}
+          # The assets are deterministic per tag, so replacing them
+          # keeps this step rerunnable when a later job (signing,
+          # promotion) fails and the workflow re-runs
+          deny_overwrite: 'false'
 
   promote-release:
     name: 'Promote Draft Release'
     needs:
       - 'tag-validate'
+      - 'build'
       - 'attach-artefacts'
+      - 'sign'
     runs-on: 'ubuntu-latest'
+    # The sign job legitimately skips (nothing pushed, or both signing
+    # toggles off); only a failed/cancelled sign blocks promotion.
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.attach-artefacts.result == 'success' && (needs.sign.result == 'success' || needs.sign.result == 'skipped') }}
     permissions:
       contents: write  # IMPORTANT: needed for draft release promotion
-    timeout-minutes: 2
+      packages: write  # Apply the latest tag to GHCR images
+    timeout-minutes: 5
     outputs:
       # yamllint disable-line rule:line-length
       release_url: ${{ steps.promote-release.outputs.release_url || steps.set-promoted-url.outputs.release_url }}
@@ -949,3 +1672,48 @@ jobs:
           # Set release URL for already promoted release
           RELEASE_URL=$(gh release view "$TAG" --json url --jq '.url')
           echo "release_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
+
+      # The GitHub release is now promoted (or already was), so the
+      # mutable consumer-facing 'latest' tag can move as the final
+      # act: crane retags the already-pushed version tag
+      # registry-side, preserving manifest lists. A failed promotion
+      # above therefore never moves 'latest'.
+      - name: 'Login to GHCR'
+        # yamllint disable-line rule:line-length
+        if: ${{ inputs.push_latest && contains(needs.build.outputs.pushed, 'ghcr.io/') }}
+        # yamllint disable-line rule:line-length
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 'Login to Docker Hub'
+        # yamllint disable-line rule:line-length
+        if: ${{ inputs.push_latest && contains(needs.build.outputs.pushed, 'docker.io/') }}
+        # yamllint disable-line rule:line-length
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: 'Set up crane'
+        # yamllint disable-line rule:line-length
+        if: ${{ inputs.push_latest && needs.build.outputs.pushed_count != '0' }}
+        # yamllint disable-line rule:line-length
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b  # v0.7
+
+      - name: 'Apply latest tags'
+        # yamllint disable-line rule:line-length
+        if: ${{ inputs.push_latest && needs.build.outputs.pushed_count != '0' }}
+        shell: bash
+        env:
+          PUSHED: ${{ needs.build.outputs.pushed }}
+        run: |
+          # Retag every pushed image as latest by the immutable
+          # digest this run scanned, signed and attested — never by
+          # the mutable version tag, which another writer could move
+          while IFS=$'\t' read -r image digest; do
+            echo "Tagging ${image}@${digest} as latest"
+            crane tag "${image}@${digest}" latest
+          done < <(jq -r '.[] | [.image, .digest] | @tsv' \
+            <<< "${PUSHED}")

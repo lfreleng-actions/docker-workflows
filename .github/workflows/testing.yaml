@@ -2,22 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# Exercises the reusable workflow SKELETONS in this repository against
-# downstream fixture repositories, in parallel, to prove the generic
-# scaffolding (job graph, harden-runner wiring, dual checkout, artifact
-# plumbing, SBOM/Grype chain) functions end-to-end. The placeholder
-# build/test/audit/SBOM steps are language-agnostic, so the matrix runs
-# against fixtures of different languages by design.
+# Exercises the reusable workflows in this repository against
+# downstream fixture repositories, in parallel, to prove the pipeline
+# (job graph, image discovery, harden-runner wiring, dual checkout,
+# artifact plumbing, SBOM/Grype chain) functions end-to-end.
 #
 # The reusable workflows are referenced by LOCAL path so this always
 # validates the current branch's workflows.
 #
-# The build-test-release and merge skeletons are NOT self-tested here:
-# build-test-release requires a signed semver tag-push context (and
-# creates/promotes GitHub releases), and merge requires a merged-commit
-# context (and would exercise publish legs); neither is available or
-# safe on a pull request. Instantiating repos validate those through
-# their own release/merge cycles.
+# The build-test-release and merge publish lanes are NOT self-tested
+# here: build-test-release requires a signed semver tag-push context
+# (and creates/promotes GitHub releases and pushes registry images),
+# and merge requires a merged-commit context plus a version.properties
+# file the fixtures lack (its dry_run input covers the no-credential
+# case once a fixture provides one). Instantiating repos validate
+# those lanes through their own release/merge cycles.
 name: 'Testing 🧪'
 
 # yamllint disable-line rule:truthy

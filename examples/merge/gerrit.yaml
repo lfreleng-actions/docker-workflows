@@ -3,15 +3,17 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # =============================================================================
-# EXAMPLE: Gerrit-wrapped caller for the reusable merge workflow
+# EXAMPLE: Gerrit-wrapped caller for the reusable Docker merge workflow
 # =============================================================================
 # Use this form when Gerrit is the source of truth (SCM) for your project.
 # gerrit_to_platform dispatches this workflow (via the GitHub API) when a
 # change is MERGED in Gerrit (change-merged event).
 #
-# This is Model B: the MERGE-DRIVEN release model. Every merge publishes
-# a snapshot; a release publish triggers when the merged commit adds a
-# release file under releases/.
+# This is Model B: the MERGE-DRIVEN release model. Every merge builds
+# the repository's images and publishes the snapshot/staging tag set
+# (version from version.properties); a registry-side release promotion
+# triggers when the merged commit adds a container release file under
+# releases/.
 #
 # DEPLOYMENT NOTES:
 #   * Copy into .github/workflows/ with a filename containing BOTH 'gerrit'
@@ -81,9 +83,17 @@ on:
         type: string
         default: ''
 
+# Merge publishes serialize per target branch: concurrent runs could
+# otherwise finish out of order and regress the rolling
+# SNAPSHOT-latest/STAGING-latest tags. cancel-in-progress stays false
+# so an in-flight publish completes. GitHub keeps a single pending
+# slot per group, so a rapid merge burst can supersede an
+# intermediate pending run; if that run carried a container release
+# file, re-trigger it (Gerrit remerge or workflow re-run) to publish
+# the promotion.
 concurrency:
-  group: ${{ github.event.inputs.GERRIT_CHANGE_ID || github.run_id }}
-  cancel-in-progress: true
+  group: "merge-${{ inputs.GERRIT_PROJECT }}-${{ inputs.GERRIT_BRANCH }}"
+  cancel-in-progress: false
 
 permissions: {}
 
@@ -116,8 +126,8 @@ jobs:
       - name: 'Allow replication'
         run: sleep 10s
 
-  # Call the reusable merge workflow, forwarding the Nexus credential
-  # secrets it needs once the publish placeholders are replaced.
+  # Call the reusable Docker merge workflow, forwarding the Nexus
+  # credential secrets the registry publish/promotion jobs need.
   merge:
     needs: notify
     if: >-
@@ -126,16 +136,30 @@ jobs:
           || needs.notify.result == 'skipped')
     permissions:
       contents: read
-    # REPLACE the pinned SHA below with a workflows-template release SHA
-    # (or your instantiated workflows repository's release SHA).
+    # REPLACE the pinned SHA below with a docker-workflows release SHA.
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/workflows-template/.github/workflows/merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    uses: lfreleng-actions/docker-workflows/.github/workflows/merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
     with:
       gerrit_refspec: ${{ inputs.GERRIT_REFSPEC }}
       gerrit_project: ${{ inputs.GERRIT_PROJECT }}
       gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
+      # The immutable merged-commit SHA: content checkouts pin to it,
+      # so a queued run still publishes the merge that dispatched it
+      # even when the branch has moved on.
+      gerrit_revision: ${{ inputs.GERRIT_PATCHSET_REVISION }}
       # gerrit_url falls back to the GERRIT_URL repository variable.
+      # Registry endpoints are project/organisation specific; the ONAP
+      # values below illustrate the expected host:port form.
+      snapshot_registry: 'nexus3.onap.org:10003'
+      release_registry: 'nexus3.onap.org:10002'
+      # Optional Docker tuning; empty values auto-discover Dockerfiles:
+      # image_namespace: 'onap'      # publish as <registry>/onap/<name>
+      # images: ''                   # JSON image list + build order
+      # build_command: ''            # escape hatch: project tooling builds
+      # push_latest: false           # tag promoted releases as 'latest'
+      # dry_run: false               # exercise the lane without pushing
+      # build_permit_egress_traffic: false  # audit egress for build job
     secrets:
       OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
       VAULT_MAPPING_JSON: ${{ secrets.VAULT_MAPPING_JSON }}
