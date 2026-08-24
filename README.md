@@ -67,6 +67,51 @@ X.Y.Z-<ts>Z              immutable, promotable tag (what container
                          release files reference)
 ```
 
+## Registry Capability
+
+Signing and provenance are registry-aware because registries differ
+in what supply-chain artefacts they accept. Model A routes around the
+gaps rather than assuming every target behaves like GHCR:
+
+<!-- markdownlint-disable MD013 -->
+
+| Registry            | OCI referrers API | cosign signature (tag scheme) | Provenance destination            |
+| ------------------- | ----------------- | ----------------------------- | --------------------------------- |
+| GHCR                | Yes               | Yes                           | Pushed to the registry            |
+| Docker Hub          | Unreliable        | Yes                           | GitHub attestation store          |
+| Nexus 3             | No (404)          | Yes (verified on 3.95.1)      | GitHub attestation store          |
+| JFrog Artifactory   | Unverified        | Unverified                    | GitHub attestation store          |
+
+<!-- markdownlint-enable MD013 -->
+
+Consequences for callers:
+
+- **Provenance** pushes to the registry for GHCR images
+  (`push-to-registry`) and nowhere else. Elsewhere the attestation
+  lives in the GitHub attestation store, which
+  `gh attestation verify` reads.
+- **Signatures** run against every pushed image. A failure against a
+  registry named in `sigstore_sign_required_registries` fails the
+  release; elsewhere the image publishes unsigned with a warning, so
+  an unproven registry cannot take a release down. Add a registry to
+  that input once testing proves it stores signatures.
+- cosign v3.0.6, which `sigstore/cosign-installer` v4.1.2 installs,
+  stores the signature under the legacy tag scheme, as
+  `sha256-<hex>.sig` beside the image. OCI 1.1 referrer storage
+  needs `--registry-referrers-mode oci-1-1`, which this lane does
+  not pass, so cleanup policies and verification tooling should
+  expect the `.sig` tag.
+
+Nexus 3 accepts a cosign signature push (the signature image
+manifest under the `sha256-<hex>.sig` tag) even with
+`strictContentTypeValidation` enabled. This lane keeps cosign's
+legacy tag scheme by design and never passes
+`--registry-referrers-mode oci-1-1`: that path writes a
+subject-bearing manifest through the referrers API instead, and
+neither Nexus 3 nor Docker Hub supports it dependably. Artifactory
+support arrives with the JFrog publish lane and stays unverified
+until then.
+
 ## Job Graph
 
 `build-test.yaml` (`->` denotes sequence; `{ }` runs in parallel):
@@ -181,6 +226,19 @@ Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 | `sigstore_sign`     | boolean | `true`          | Sigstore cosign keyless signature per pushed image (by digest)      |
 
 <!-- markdownlint-enable MD013 -->
+
+One further input governs how hard signing failures land:
+
+<!-- markdownlint-disable MD013 -->
+
+| Input                               | Type   | Default               | Description                                                                 |
+| ----------------------------------- | ------ | --------------------- | --------------------------------------------------------------------------- |
+| `sigstore_sign_required_registries` | string | `'ghcr.io docker.io'` | Registries whose signing failures fail the release (`*` = all, `''` = none) |
+
+<!-- markdownlint-enable MD013 -->
+
+See [Registry Capability](#registry-capability) for what the default
+list reflects and when to extend it.
 
 Optional secrets: `DOCKERHUB_USERNAME`/`DOCKERHUB_PASSWORD` (the
 Docker Hub leg skips with a warning when unset). Callers grant

@@ -230,6 +230,21 @@ on:
         required: false
         type: boolean
         default: true
+      sigstore_sign_required_registries:
+        description: >-
+          Space or comma separated registry hostnames whose cosign
+          signing failures must fail the release. Signing runs against
+          every pushed image regardless; this states which registries
+          are known to store cosign signature artefacts, because
+          support varies and cannot always be inferred from the
+          hostname (see the registry capability matrix in README.md).
+          A failure against a registry outside this list degrades to a
+          warning, so an unproven registry cannot take a release down.
+          Use '*' to require every registry, or '' to make signing
+          best-effort everywhere.
+        required: false
+        type: string
+        default: 'ghcr.io docker.io'
 
     secrets:
       DOCKERHUB_USERNAME:
@@ -997,6 +1012,9 @@ jobs:
   # Provenance pushes to the registry for GHCR images; Docker Hub
   # lacks dependable OCI referrers support, so its attestations live
   # in the GitHub attestation store (gh attestation verify).
+  # Signing follows the same registry-aware principle from the other
+  # end: it runs everywhere, but only failures against the registries
+  # named in sigstore_sign_required_registries fail the release.
   sign:
     name: 'Sign & Attest'
     runs-on: ubuntu-latest
@@ -1055,18 +1073,78 @@ jobs:
         env:
           IMAGE: ${{ matrix.image }}
           DIGEST: ${{ matrix.digest }}
+          # yamllint disable-line rule:line-length
+          REQUIRED_REGISTRIES: ${{ inputs.sigstore_sign_required_registries }}
         run: |
           # Keyless signature over the immutable digest; verification:
           #   cosign verify <image>@<digest> \
           #     --certificate-identity-regexp <workflow ref> \
           #     --certificate-oidc-issuer \
           #       https://token.actions.githubusercontent.com
-          cosign sign --yes "${IMAGE}@${DIGEST}"
+          #
+          # cosign-installer v4.1.2 brings cosign v3.0.6, which
+          # stores the signature under the legacy tag scheme, as
+          # sha256-<hex>.sig beside the image. OCI 1.1 referrer
+          # storage needs --registry-referrers-mode oci-1-1, which
+          # this step deliberately does not pass.
+          #
+          # Registries differ in what they accept, so a signature
+          # is only load-bearing where the caller says it is:
+          # anywhere else a failure warns and the release carries on
+          # unsigned for that image rather than failing outright.
+          # A non-zero exit does not name a culprit — the registry,
+          # Sigstore OIDC, Fulcio and Rekor can each fail this step —
+          # so the messages below point at the log rather than guess.
+          registry="${IMAGE%%/*}"
+          read -ra required_registries <<< "${REQUIRED_REGISTRIES//,/ }"
+          required='false'
+          for entry in "${required_registries[@]}"; do
+            if [ "${entry}" = '*' ] || [ "${entry}" = "${registry}" ]; then
+              required='true'
+              break
+            fi
+          done
+
+          if cosign sign --yes "${IMAGE}@${DIGEST}"; then
+            echo "Signed ${IMAGE}@${DIGEST}"
+            exit 0
+          fi
+
+          if [ "${required}" = 'true' ]; then
+            echo "::error::cosign sign failed for" \
+              "${IMAGE}@${DIGEST};" \
+              "sigstore_sign_required_registries lists ${registry}," \
+              "so this failure fails the release"
+            exit 1
+          fi
+
+          echo "::warning::cosign sign failed for" \
+            "${IMAGE}@${DIGEST}; ${registry} is absent from" \
+            "sigstore_sign_required_registries, so the release" \
+            "continues with this image unsigned. See the step log" \
+            "above for the cause"
+          {
+            echo "## Docker Signing"
+            echo ""
+            echo "⚠️ \`${IMAGE}@${DIGEST}\` published **unsigned**:" \
+              "\`cosign sign\` failed and \`${registry}\` is not a" \
+              "required registry. The step log names the cause," \
+              "which may be the registry, Sigstore OIDC, Fulcio or" \
+              "Rekor."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'Attest build provenance'
         if: inputs.attestations
+        env:
+          # Carried over from actions/attest-build-provenance, which
+          # set this on its way through to actions/attest: node's
+          # default 16KB response header limit overflows against some
+          # OCI registries on the push-to-registry path. Removing it
+          # reintroduces actions/attest-build-provenance#687.
+          NODE_OPTIONS: '--max-http-header-size=32768'
         # yamllint disable-line rule:line-length
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2
         with:
           subject-name: ${{ matrix.image }}
           subject-digest: ${{ matrix.digest }}

@@ -296,7 +296,7 @@ Vibrant, well-maintained ecosystem; pin by commit SHA as usual:
 | `aquasecurity/trivy-action`                               | image vulnerability scan (alternative/complement to house grype lane)                                           |
 | `anchore/scan-action` (grype)                             | house-standard scanner; accepts image or SBOM input                                                             |
 | `sigstore/cosign-installer`                               | keyless image signing (`cosign sign <image>@<digest>`)                                                          |
-| `actions/attest-build-provenance`                         | SLSA provenance **for images** (`subject-name: <registry>/<image>`, `subject-digest`, `push-to-registry: true`) |
+| `actions/attest`                                          | SLSA provenance **for images** (`subject-name: <registry>/<image>`, `subject-digest`, `push-to-registry: true`) |
 | GoogleContainerTools `container-structure-test`           | declarative image tests (optional test hook)                                                                    |
 | `google/go-containerregistry` (`crane`)                   | registry-side retag/copy for the promote lane (no pull/push of layers)                                          |
 
@@ -385,11 +385,14 @@ check availability and skip-with-warning (family convention).
 - **Image SBOM**: syft against the image (not just the source tree);
   attach to releases
 - **Signing/provenance** (release lanes): cosign keyless by digest +
-  `actions/attest-build-provenance` with `push-to-registry` —
-  identical verification story to the other workflow families;
-  Note: GHCR supports both cleanly; Nexus 3 OCI/cosign-artifact
-  support must be validated (older Nexus versions reject non-image
-  OCI artifacts) — flag as an integration risk
+  `actions/attest` with `push-to-registry` — identical verification
+  story to the other workflow families;
+  Registry support varies and the lane routes around it: GHCR takes
+  both cleanly, Docker Hub and Nexus 3 store cosign signatures under
+  the tag scheme but have no dependable referrers API, so their
+  provenance lives in the GitHub attestation store. Resolved by
+  testing (see question 5 below); the capability matrix lives in
+  README.md
 - **Egress**: keep block mode; all target registries already in
   allow_list v0.12.1; third-party base images are the un-enumerable
   case → document `build_permit_egress_traffic` as the sanctioned
@@ -452,7 +455,13 @@ Everything else: third-party pinned actions + existing estate.
 4. Timestamped tag format: adopt Jenkins `<ver>-SNAPSHOT-<ts>Z`
    exactly (consumer tooling may parse it) — confirm with release
    engineering
-5. Nexus 3 cosign/OCI-artifact compatibility (5.4) — test early
+5. Nexus 3 cosign/OCI-artifact compatibility (5.4) — **resolved**:
+   Nexus 3 has no referrers API (404), but accepts a cosign
+   signature pushed under the tag scheme even with
+   `strictContentTypeValidation` enabled. Provenance therefore
+   routes to the GitHub attestation store for non-GHCR registries,
+   while signing runs everywhere and only fails the release for the
+   registries a caller names in `sigstore_sign_required_registries`
 6. Does `policy/docker`-style CSIT image tooling need anything from
    us, or stay project-side?
 
