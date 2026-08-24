@@ -296,7 +296,7 @@ Vibrant, well-maintained ecosystem; pin by commit SHA as usual:
 | `aquasecurity/trivy-action`                               | image vulnerability scan (alternative/complement to house grype lane)                                           |
 | `anchore/scan-action` (grype)                             | house-standard scanner; accepts image or SBOM input                                                             |
 | `sigstore/cosign-installer`                               | keyless image signing (`cosign sign <image>@<digest>`)                                                          |
-| `actions/attest-build-provenance`                         | SLSA provenance **for images** (`subject-name: <registry>/<image>`, `subject-digest`, `push-to-registry: true`) |
+| `actions/attest`                                          | SLSA provenance **for images** (`subject-name: <registry>/<image>`, `subject-digest`, `push-to-registry: true`) |
 | GoogleContainerTools `container-structure-test`           | declarative image tests (optional test hook)                                                                    |
 | `google/go-containerregistry` (`crane`)                   | registry-side retag/copy for the promote lane (no pull/push of layers)                                          |
 
@@ -385,8 +385,8 @@ check availability and skip-with-warning (family convention).
 - **Image SBOM**: syft against the image (not just the source tree);
   attach to releases
 - **Signing/provenance** (release lanes): cosign keyless by digest +
-  `actions/attest-build-provenance` with `push-to-registry` —
-  identical verification story to the other workflow families;
+  `actions/attest` with `push-to-registry` — identical verification
+  story to the other workflow families;
   Registry support varies and the lane routes around it: GHCR takes
   both cleanly, Docker Hub and Nexus 3 store cosign signatures under
   the tag scheme but have no dependable referrers API, so their
