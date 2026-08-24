@@ -230,6 +230,21 @@ on:
         required: false
         type: boolean
         default: true
+      sigstore_sign_required_registries:
+        description: >-
+          Space or comma separated registry hostnames whose cosign
+          signing failures must fail the release. Signing runs against
+          every pushed image regardless; this states which registries
+          are known to store cosign signature artefacts, because
+          support varies and cannot always be inferred from the
+          hostname (see the registry capability matrix in README.md).
+          A failure against a registry outside this list degrades to a
+          warning, so an unproven registry cannot take a release down.
+          Use '*' to require every registry, or '' to make signing
+          best-effort everywhere.
+        required: false
+        type: string
+        default: 'ghcr.io docker.io'
 
     secrets:
       DOCKERHUB_USERNAME:
@@ -997,6 +1012,9 @@ jobs:
   # Provenance pushes to the registry for GHCR images; Docker Hub
   # lacks dependable OCI referrers support, so its attestations live
   # in the GitHub attestation store (gh attestation verify).
+  # Signing follows the same registry-aware principle from the other
+  # end: it runs everywhere, but only failures against the registries
+  # named in sigstore_sign_required_registries fail the release.
   sign:
     name: 'Sign & Attest'
     runs-on: ubuntu-latest
@@ -1055,13 +1073,56 @@ jobs:
         env:
           IMAGE: ${{ matrix.image }}
           DIGEST: ${{ matrix.digest }}
+          # yamllint disable-line rule:line-length
+          REQUIRED_REGISTRIES: ${{ inputs.sigstore_sign_required_registries }}
         run: |
           # Keyless signature over the immutable digest; verification:
           #   cosign verify <image>@<digest> \
           #     --certificate-identity-regexp <workflow ref> \
           #     --certificate-oidc-issuer \
           #       https://token.actions.githubusercontent.com
-          cosign sign --yes "${IMAGE}@${DIGEST}"
+          #
+          # cosign v3 stores the signature under the tag scheme, as
+          # sha256-<hex> beside the image; the .sig suffix belonged to
+          # cosign v2 and no longer appears.
+          #
+          # Registries differ in what they accept, so a signature
+          # push is only load-bearing where the caller says it is:
+          # anywhere else a rejection warns and the release carries on
+          # unsigned for that image rather than failing outright.
+          registry="${IMAGE%%/*}"
+          read -ra required_registries <<< "${REQUIRED_REGISTRIES//,/ }"
+          required='false'
+          for entry in "${required_registries[@]}"; do
+            if [ "${entry}" = '*' ] || [ "${entry}" = "${registry}" ]; then
+              required='true'
+              break
+            fi
+          done
+
+          if cosign sign --yes "${IMAGE}@${DIGEST}"; then
+            echo "Signed ${IMAGE}@${DIGEST}"
+            exit 0
+          fi
+
+          if [ "${required}" = 'true' ]; then
+            echo "::error::cosign could not sign ${IMAGE}@${DIGEST};" \
+              "sigstore_sign_required_registries lists ${registry}," \
+              "so this failure fails the release"
+            exit 1
+          fi
+
+          echo "::warning::cosign could not sign ${IMAGE}@${DIGEST};" \
+            "${registry} is absent from" \
+            "sigstore_sign_required_registries, so the release" \
+            "continues with this image unsigned"
+          {
+            echo "## Docker Signing"
+            echo ""
+            echo "⚠️ \`${IMAGE}@${DIGEST}\` published **unsigned**:" \
+              "cosign could not store a signature on \`${registry}\`."
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'Attest build provenance'
         if: inputs.attestations

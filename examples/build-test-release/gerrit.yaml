@@ -70,6 +70,7 @@ jobs:
     #   test_command: ''              # smoke-test hook (IMAGES env = tags)
     #   attestations: true            # SLSA build provenance per image
     #   sigstore_sign: true           # cosign keyless signing per image
+    #   sigstore_sign_required_registries: 'ghcr.io docker.io'  # hard-fail
     #   build_permit_egress_traffic: false  # audit egress for build job
     # Forward the Docker Hub secrets when dockerhub_publish is true:
     # secrets:
