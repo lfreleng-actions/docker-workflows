@@ -95,16 +95,22 @@ Consequences for callers:
   release; elsewhere the image publishes unsigned with a warning, so
   an unproven registry cannot take a release down. Add a registry to
   that input once testing proves it stores signatures.
-- cosign v3 stores the signature under the tag scheme as
-  `sha256-<hex>`, beside the image. The `.sig` suffix belonged to
-  cosign v2; tooling and cleanup policies that still expect it are
-  wrong.
+- cosign v3.0.6, which `sigstore/cosign-installer` v4.1.2 installs,
+  stores the signature under the legacy tag scheme, as
+  `sha256-<hex>.sig` beside the image. OCI 1.1 referrer storage
+  needs `--registry-referrers-mode oci-1-1`, which this lane does
+  not pass, so cleanup policies and verification tooling should
+  expect the `.sig` tag.
 
-Nexus 3 accepts a cosign signature push (an OCI image index under the
-`sha256-` tag) even with `strictContentTypeValidation` enabled, and
-`--registry-referrers-mode oci-1-1` falls back to the tag scheme
-rather than erroring. Artifactory support arrives with the JFrog
-publish lane and stays unverified until then.
+Nexus 3 accepts a cosign signature push (the signature image
+manifest under the `sha256-<hex>.sig` tag) even with
+`strictContentTypeValidation` enabled. This lane keeps cosign's
+legacy tag scheme by design and never passes
+`--registry-referrers-mode oci-1-1`: that path writes a
+subject-bearing manifest through the referrers API instead, and
+neither Nexus 3 nor Docker Hub supports it dependably. Artifactory
+support arrives with the JFrog publish lane and stays unverified
+until then.
 
 ## Job Graph
 

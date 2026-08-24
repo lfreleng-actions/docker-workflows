@@ -1082,14 +1082,19 @@ jobs:
           #     --certificate-oidc-issuer \
           #       https://token.actions.githubusercontent.com
           #
-          # cosign v3 stores the signature under the tag scheme, as
-          # sha256-<hex> beside the image; the .sig suffix belonged to
-          # cosign v2 and no longer appears.
+          # cosign-installer v4.1.2 brings cosign v3.0.6, which
+          # stores the signature under the legacy tag scheme, as
+          # sha256-<hex>.sig beside the image. OCI 1.1 referrer
+          # storage needs --registry-referrers-mode oci-1-1, which
+          # this step deliberately does not pass.
           #
           # Registries differ in what they accept, so a signature
-          # push is only load-bearing where the caller says it is:
-          # anywhere else a rejection warns and the release carries on
+          # is only load-bearing where the caller says it is:
+          # anywhere else a failure warns and the release carries on
           # unsigned for that image rather than failing outright.
+          # A non-zero exit does not name a culprit — the registry,
+          # Sigstore OIDC, Fulcio and Rekor can each fail this step —
+          # so the messages below point at the log rather than guess.
           registry="${IMAGE%%/*}"
           read -ra required_registries <<< "${REQUIRED_REGISTRIES//,/ }"
           required='false'
@@ -1106,21 +1111,26 @@ jobs:
           fi
 
           if [ "${required}" = 'true' ]; then
-            echo "::error::cosign could not sign ${IMAGE}@${DIGEST};" \
+            echo "::error::cosign sign failed for" \
+              "${IMAGE}@${DIGEST};" \
               "sigstore_sign_required_registries lists ${registry}," \
               "so this failure fails the release"
             exit 1
           fi
 
-          echo "::warning::cosign could not sign ${IMAGE}@${DIGEST};" \
-            "${registry} is absent from" \
+          echo "::warning::cosign sign failed for" \
+            "${IMAGE}@${DIGEST}; ${registry} is absent from" \
             "sigstore_sign_required_registries, so the release" \
-            "continues with this image unsigned"
+            "continues with this image unsigned. See the step log" \
+            "above for the cause"
           {
             echo "## Docker Signing"
             echo ""
             echo "⚠️ \`${IMAGE}@${DIGEST}\` published **unsigned**:" \
-              "cosign could not store a signature on \`${registry}\`."
+              "\`cosign sign\` failed and \`${registry}\` is not a" \
+              "required registry. The step log names the cause," \
+              "which may be the registry, Sigstore OIDC, Fulcio or" \
+              "Rekor."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
