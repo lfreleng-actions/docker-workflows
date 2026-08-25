@@ -59,6 +59,15 @@ jobs:
   #     buildable image and one declaring a stage the Dockerfile does
   #     not define. The build job reports the failure and succeeds,
   #     and the image that did build carries on to SBOM/Grype.
+  #   - leg 6: test-docker-monorepo — the leg 3 namespaced chain,
+  #     but referencing its base by the plain <name>:verify alias
+  #     rather than <namespace>/<name>:verify. The daemon-backed
+  #     build paths apply both aliases, so one images input travels
+  #     between them; a release build on a non-amd64 platform uses
+  #     the isolated driver and resolves neither. Without the plain
+  #     alias this leg fails to build.
+  #   - leg 7: test-docker-monorepo — build_command where discovery
+  #     finds nothing (the jib/Gradle shape); see the leg itself.
   # Lint and Grype findings in fixture CONTENT soft-fail: the
   # self-test validates that the machinery executes, not the hygiene
   # of fixture Dockerfiles.
@@ -111,6 +120,34 @@ jobs:
             test_command: ''
             build_permit_egress_traffic: false
             build_permit_fail: true
+          - repository: 'lfreleng-actions/test-docker-monorepo'
+            ref: 'v0.0.1'
+            # yamllint disable-line rule:line-length
+            images: '[{"name": "base-alpine", "context": "base-alpine"}, {"name": "chain-child", "context": "chain-child", "build_args": ["BASE_IMAGE=base-alpine:verify"]}, {"name": "util-echo", "context": "util-echo"}]'
+            image_namespace: 'lfreleng'
+            build_command: ''
+            # yamllint disable-line rule:line-length
+            test_command: 'NAMESPACE=lfreleng TAG=verify tests/scripts/test_images.sh'
+            build_permit_egress_traffic: false
+            build_permit_fail: false
+          - repository: 'lfreleng-actions/test-docker-monorepo'
+            ref: 'v0.0.1'
+            # The jib/Gradle shape: tests/ holds only scripts/, so
+            # discovery finds no Dockerfile and must report zero
+            # images without failing, leaving the build job to
+            # enumerate what the command created. The Dockerfile
+            # reaches docker build on stdin, so nothing is
+            # discoverable, and the pulled base exercises the
+            # RepoDigests filter that keeps pulled images out of the
+            # downstream jobs.
+            path_prefix: 'tests'
+            images: ''
+            image_namespace: ''
+            # yamllint disable-line rule:line-length
+            build_command: 'printf "FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce\nCOPY scripts /scripts\n" | docker build -t jibless-demo:verify -f - .'
+            test_command: ''
+            build_permit_egress_traffic: false
+            build_permit_fail: false
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
@@ -119,6 +156,8 @@ jobs:
     with:
       repository: ${{ matrix.repository }}
       ref: ${{ matrix.ref }}
+      # Legs that do not set path_prefix keep the workflow default
+      path_prefix: ${{ matrix.path_prefix || '.' }}
       images: ${{ matrix.images }}
       image_namespace: ${{ matrix.image_namespace }}
       build_command: ${{ matrix.build_command }}

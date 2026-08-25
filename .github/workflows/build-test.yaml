@@ -400,24 +400,51 @@ jobs:
               add_image "${dir}" "${df}" "${dir}"
             done
           fi
-          # Sanitise names to the docker repository character set and
-          # drop duplicates (e.g. a root Dockerfile plus docker/ both
-          # mapping to the repository name). The de-duplication
-          # preserves array order — order is the build order, which
-          # same-repository FROM chains rely on — keeping the first
-          # occurrence of each name.
+          # Sanitise names to the docker repository character set
           images=$(jq -c \
             '[.[] | .name |= (ascii_downcase |
-              gsub("[^a-z0-9._-]"; "-"))] |
-              reduce .[] as $img ([];
+              gsub("[^a-z0-9._-]"; "-"))]' \
+            <<< "${images}")
+          if [ -n "${IMAGES_INPUT}" ]; then
+            # Explicit entries whose names collide after
+            # normalisation (e.g. API and api) must reject: silently
+            # dropping one would build only part of the caller's
+            # requested image set, and the publish lanes reject the
+            # same input — verify must not pass what merge refuses
+            dupes=$(jq -r '[.[].name] | group_by(.) |
+              map(select(length > 1) | .[0]) | .[]' \
+              <<< "${images}")
+            if [ -n "${dupes}" ]; then
+              echo "::error::Duplicate image name(s) after" \
+                "normalisation in the images input: ${dupes}"
+              exit 1
+            fi
+          else
+            # Auto-discovery drops duplicates (e.g. a root Dockerfile
+            # plus docker/ both mapping to the repository name). The
+            # de-duplication preserves array order — order is the
+            # build order, which same-repository FROM chains rely on
+            # — keeping the first occurrence of each name.
+            images=$(jq -c \
+              'reduce .[] as $img ([];
                 if any(.[]; .name == $img.name) then .
                 else . + [$img] end)' \
-            <<< "${images}")
+              <<< "${images}")
+          fi
           count=$(jq 'length' <<< "${images}")
-          if [ "${count}" -eq 0 ]; then
+          if [ "${count}" -eq 0 ] && [ -z "${BUILD_COMMAND}" ]; then
             echo "::error::No Dockerfiles found under" \
               "'${PATH_PREFIX}' and no images input provided"
             exit 1
+          fi
+          if [ "${count}" -eq 0 ]; then
+            # The build_command escape hatch builds images with
+            # project tooling, and jib or a Gradle plugin synthesises
+            # an image without a Dockerfile to find, so an empty
+            # discovery result is not an error here — the build job
+            # enumerates whatever the command created
+            echo "::notice::No Dockerfiles discovered under" \
+              "'${PATH_PREFIX}'; build_command builds the images"
           fi
           # Post-sanitisation validation: every name must be a valid
           # Docker repository component (start and end alphanumeric),
@@ -620,6 +647,14 @@ jobs:
               # turn, which is the accurate signal.
               if [ "${build_status}" -eq 0 ]; then
                 tags+=("${tag}")
+                # With a namespace the alias becomes
+                # <namespace>/<name>:verify; also apply the plain
+                # <name>:verify alias so auto-discovered chains
+                # (FROM <name>:verify) resolve either way, as they
+                # already do in the merge lane
+                if [ -n "${IMAGE_NAMESPACE}" ]; then
+                  docker tag "${tag}" "${name}:verify"
+                fi
               else
                 echo "::error::Build failed for ${tag} (exit" \
                   "${build_status})"
