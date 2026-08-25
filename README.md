@@ -108,9 +108,16 @@ manifest under the `sha256-<hex>.sig` tag) even with
 legacy tag scheme by design and never passes
 `--registry-referrers-mode oci-1-1`: that path writes a
 subject-bearing manifest through the referrers API instead, and
-neither Nexus 3 nor Docker Hub supports it dependably. Artifactory
-support arrives with the JFrog publish lane and stays unverified
-until then.
+neither Nexus 3 nor Docker Hub supports it dependably.
+
+Artifactory is addressable by `merge.yaml` (Model B), which accepts
+its repository-path and subdomain forms alongside the Nexus
+port-per-repository form. Its supply-chain columns above stay
+**Unverified**: nothing has yet pushed a cosign signature to an
+Artifactory instance from this lane, and Model B does not sign at all
+(snapshot tags are transient). Model A publishes to GHCR and Docker
+Hub, so releasing to Artifactory awaits a generic registry target
+there — tracked in #26.
 
 ## Job Graph
 
@@ -281,15 +288,65 @@ Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 
 <!-- markdownlint-disable MD013 -->
 
-| Input               | Type    | Default | Description                                                                   |
-| ------------------- | ------- | ------- | ----------------------------------------------------------------------------- |
-| `snapshot_registry` | string  | (none)  | Required. Snapshot/staging registry host[:port], e.g. `nexus3.onap.org:10003` |
-| `release_registry`  | string  | (none)  | Required. Release registry host[:port], e.g. `nexus3.onap.org:10002`          |
-| `nexus_user`        | string  | `''`    | Registry username override; empty derives from the repository name            |
-| `push_latest`       | boolean | `false` | Tag promoted release images as `latest` too                                   |
-| `dry_run`           | boolean | `false` | Exercise the publish/promotion lanes without credentials or pushes            |
+| Input               | Type    | Default | Description                                                                             |
+| ------------------- | ------- | ------- | --------------------------------------------------------------------------------------- |
+| `snapshot_registry` | string  | (none)  | Required. Snapshot/staging registry, `host[:port][/path]`, e.g. `nexus3.onap.org:10003` |
+| `release_registry`  | string  | (none)  | Required. Release registry, `host[:port][/path]`, e.g. `nexus3.onap.org:10002`          |
+| `registry_user`     | string  | `''`    | Registry username override; empty derives from the repository name                      |
+| `nexus_user`        | string  | `''`    | Deprecated alias for `registry_user`                                                    |
+| `push_latest`       | boolean | `false` | Tag promoted release images as `latest` too                                             |
+| `dry_run`           | boolean | `false` | Exercise the publish/promotion lanes without credentials or pushes                      |
 
 <!-- markdownlint-enable MD013 -->
+
+The registry inputs take a host, an optional port and an optional
+repository path, which covers how the platforms in use address a
+repository:
+
+```text
+nexus3.onap.org:10003              Nexus 3, repository on a port
+acme.jfrog.io/docker-snapshot      Artifactory, repository-path method
+docker-snapshot.acme.jfrog.io      Artifactory, subdomain method
+```
+
+The path belongs to the image reference, not the login: the workflow
+authenticates to `host[:port]` and pushes to the full base, so one
+credential covers every repository on an instance. Path components
+take Docker's repository grammar — lowercase, runs of alphanumerics
+joined by a single `.` or `_`, a doubled `__`, or one or more `-` —
+because anything else fails when Docker or crane parses the
+reference, and the input check exists to catch that before a publish
+begins.
+
+### Egress allow-list
+
+Addressing a registry is half the job: under the default
+`harden_runner_egress: block`, the host must also appear in the
+allow-list `harden_runner_allowlist` pins, and that list enumerates
+hosts and ports rather than wildcards. Today it carries four JFrog
+tenants at `:443` — `aswf`, `hyperledger`, `odpi` and `zowe` —
+alongside the Nexus 3 hosts at ports 10001-10004.
+
+So a project on one of those tenants using the repository-path form
+(`aswf.jfrog.io/docker-local`) needs no extra setup, while these do:
+
+- **any other tenant**, since there is no `*.jfrog.io` entry
+- **the subdomain method**, where each repository is a distinct host
+  (`docker-snapshot.acme.jfrog.io`) and so a distinct entry
+- **any port other than 443**
+
+In those cases pass a `harden_runner_allowlist` that permits the
+endpoint, or the publish fails at the network layer before the
+registry ever answers. Preferring the repository-path form keeps the
+allow-list to one entry per instance rather than one per repository.
+
+A release file's `container_pull_registry`/`container_push_registry`
+overrides may change the port or the repository path, but not the
+host, because the promotion job authenticates there with the loaded
+credential and an arbitrary host in a merged file could exfiltrate
+it. Under Artifactory's subdomain method each repository *is* a
+host, so overrides cannot move between repositories; use the
+repository-path form where a release file needs that freedom.
 
 Optional secrets: `OP_SERVICE_ACCOUNT_TOKEN`/`VAULT_MAPPING_JSON`
 (the 1Password credential model shared across the workflow families;

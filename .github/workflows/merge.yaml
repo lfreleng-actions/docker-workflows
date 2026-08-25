@@ -101,24 +101,39 @@ on:
       # --- Registry publishing ---
       snapshot_registry:
         description: >-
-          Registry host[:port] that receives snapshot/staging
-          publishes, e.g. nexus3.onap.org:10003. Also the default
-          registry release promotion pulls staged images from (a
-          container_pull_registry field in the release file wins).
+          Registry that receives snapshot/staging publishes, as
+          host[:port] with an optional repository path. Nexus 3
+          distinguishes repositories by port
+          (nexus3.onap.org:10003); JFrog Artifactory's
+          repository-path method puts them in the path
+          (acme.jfrog.io/docker-snapshot), and its subdomain method
+          in the host (docker-snapshot.acme.jfrog.io). Also the
+          default registry release promotion pulls staged images
+          from (a container_pull_registry field in the release file
+          wins).
         required: true
         type: string
       release_registry:
         description: >-
-          Registry host[:port] that receives release promotions, e.g.
-          nexus3.onap.org:10002. A container_push_registry field in
-          the release file wins.
+          Registry that receives release promotions, as host[:port]
+          with an optional repository path, e.g.
+          nexus3.onap.org:10002 or acme.jfrog.io/docker-release. A
+          container_push_registry field in the release file wins.
         required: true
         type: string
-      nexus_user:
+      registry_user:
         description: >-
           Registry username override; empty derives the username from
           the repository name (the 1Password credential naming
           contract)
+        required: false
+        type: string
+        default: ''
+      nexus_user:
+        description: >-
+          Deprecated alias for registry_user, kept working for
+          callers written when this lane only spoke to Nexus. Set
+          registry_user instead; supplying both uses registry_user.
         required: false
         type: string
         default: ''
@@ -200,7 +215,7 @@ on:
       OP_SERVICE_ACCOUNT_TOKEN:
         description: >-
           1Password service-account token used by credential-load-action
-          to fetch the per-repository Nexus credential from the common
+          to fetch the per-repository registry credential from the common
           per-org CI/CD vault (op://<vault>/<repository-name>/password).
           The publish jobs skip credential loading and publishing with a
           warning when unset, so PR/self-test contexts still work.
@@ -235,15 +250,33 @@ jobs:
           SNAPSHOT_REGISTRY: ${{ inputs.snapshot_registry }}
           RELEASE_REGISTRY: ${{ inputs.release_registry }}
         run: |
-          # Require plain host[:port] registry references: the values
-          # compose image references and reach docker login/push and
-          # crane, so schemes, paths or hostile content must stop here
+          # Require host[:port] with an optional repository path: the
+          # values compose image references and reach docker login,
+          # docker push and crane, so schemes, credentials, query
+          # strings or hostile content must stop here. The path
+          # serves Artifactory's repository-path method, where the
+          # repository key sits below the host rather than on a port
+          # of its own as in Nexus 3.
+          #
+          # Path components take Docker's reference grammar: runs of
+          # lowercase alphanumerics joined by a single '.' or '_',
+          # exactly '__', or one or more '-'. Docker and crane reject
+          # anything else when they parse the reference, so a looser
+          # rule would accept a value here only to fail every publish
+          # later, which is what this fail-fast check exists to
+          # prevent. Verified against docker itself: 'a..b', 'a___b'
+          # and 'a-_b' are refused, 'a__b' and 'a---b' are not. The
+          # rule also excludes '.', '..' and trailing separators
+          # without needing checks of their own.
+          pattern='^[A-Za-z0-9.-]+(:[0-9]+)?'
+          pattern+='(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*$'
           for registry in "${SNAPSHOT_REGISTRY}" "${RELEASE_REGISTRY}"
           do
-            if [[ ! "${registry}" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]]
+            if [[ ! "${registry}" =~ ${pattern} ]]
             then
               echo "::error::Invalid registry input: ${registry}" \
-                "(expected host or host:port)"
+                "(expected host[:port] with an optional repository" \
+                "path of lowercase components)"
               exit 1
             fi
           done
@@ -921,39 +954,66 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 'Resolve registry username'
+      - name: 'Resolve registry username and login endpoint'
         id: publish-params
         if: steps.creds.outputs.available == 'true'
         shell: bash
         env:
+          REGISTRY_USER_INPUT: ${{ inputs.registry_user }}
           NEXUS_USER_INPUT: ${{ inputs.nexus_user }}
           # The repository actually checked out/published, which can
           # differ from GITHUB_REPOSITORY for cross-repository calls
           TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
+          SNAPSHOT_REGISTRY: ${{ inputs.snapshot_registry }}
         run: |
           # 1Password credential naming contract: the credential (and
           # username) take the name of the repository being published
           # (the checked-out repository, not necessarily the caller)
-          nexus_user="${NEXUS_USER_INPUT}"
-          if [ -z "${nexus_user}" ]; then
-            nexus_user="${TARGET_REPOSITORY##*/}"
+          registry_user="${REGISTRY_USER_INPUT}"
+          if [ -z "${registry_user}" ] &&
+            [ -n "${NEXUS_USER_INPUT}" ]; then
+            echo "::warning::The nexus_user input is deprecated;" \
+              "use registry_user instead"
+            registry_user="${NEXUS_USER_INPUT}"
+          fi
+          if [ -z "${registry_user}" ]; then
+            registry_user="${TARGET_REPOSITORY##*/}"
           fi
           # The credential item always keys on the published
-          # repository's name (nexus_user overrides the login
+          # repository's name (registry_user overrides the login
           # username only), so cross-repository calls load the
           # target's item rather than the caller's
           credential_name="${TARGET_REPOSITORY##*/}"
-          # Constrain to a safe single-line character set before the
-          # values reach $GITHUB_OUTPUT (output-file injection)
-          for value in "${nexus_user}" "${credential_name}"; do
-            if [[ ! "${value}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-              echo "::error::Invalid registry username or" \
-                "credential name: ${value}"
-              exit 1
-            fi
-          done
-          echo "nexus_user=${nexus_user}" >> "$GITHUB_OUTPUT"
-          echo "credential_name=${credential_name}" >> "$GITHUB_OUTPUT"
+          # Both values reach $GITHUB_OUTPUT, where a line break
+          # would append a record of its own, so each is constrained
+          # rather than merely escaped. The username admits '@' and
+          # '+' as well: registry accounts genuinely use them, since
+          # Artifactory SaaS identities are commonly email addresses,
+          # and the value only travels to docker login. The
+          # credential name keys a 1Password item and derives from a
+          # repository name, so it keeps the tighter set.
+          if [[ ! "${registry_user}" =~ ^[A-Za-z0-9._@+-]+$ ]]; then
+            echo "::error::Invalid registry username:" \
+              "${registry_user}"
+            exit 1
+          fi
+          if [[ ! "${credential_name}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid credential name:" \
+              "${credential_name}"
+            exit 1
+          fi
+          # docker login takes an endpoint, not an image reference. A
+          # repository path belongs to the reference and authenticates
+          # against the host serving it, which is how Artifactory's
+          # repository-path method works; Nexus 3 encodes the
+          # repository in the port, so there the whole value stays.
+          login_endpoint="${SNAPSHOT_REGISTRY%%/*}"
+          echo "Registry login endpoint: ${login_endpoint}"
+          {
+            echo "registry_user=${registry_user}"
+            echo "credential_name=${credential_name}"
+            echo "login_endpoint=${login_endpoint}"
+          } >> "$GITHUB_OUTPUT"
 
       # credential_grants_json wires the admin-managed
       # CREDENTIAL_LOAD_GRANTS repository/organisation variable in at
@@ -978,8 +1038,8 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
-          registry: ${{ inputs.snapshot_registry }}
-          username: ${{ steps.publish-params.outputs.nexus_user }}
+          registry: ${{ steps.publish-params.outputs.login_endpoint }}
+          username: ${{ steps.publish-params.outputs.registry_user }}
           password: ${{ steps.load-credential.outputs.credential }}
 
       # Snapshot publishes skip release-grade signing/provenance by
@@ -1240,11 +1300,11 @@ jobs:
             <<< "${containers}")
           # Optional per-file registry overrides (the LF self-release
           # container schema carries these). The overrides may vary
-          # the port only: the promotion job logs in to these
-          # endpoints with the loaded Nexus credential, so an
-          # arbitrary host in a merged release file could exfiltrate
-          # it. Constrain each override to the host of the
-          # corresponding workflow input.
+          # the port or repository path only: the promotion job logs
+          # in to these endpoints with the loaded registry
+          # credential, so an arbitrary host in a merged release file
+          # could exfiltrate it. Constrain each override to the host
+          # of the corresponding workflow input.
           pull_registry=$(yq -r '.container_pull_registry // ""' \
             "${release_file}")
           push_registry=$(yq -r '.container_push_registry // ""' \
@@ -1252,16 +1312,31 @@ jobs:
           check_registry() {
             local override="$1" allowed="$2" field="$3"
             [ -n "${override}" ] || return 0
-            if [[ ! "${override}" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]]
+            local pattern='^[A-Za-z0-9.-]+(:[0-9]+)?'
+            pattern+='(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*$'
+            if [[ ! "${override}" =~ ${pattern} ]]
             then
               echo "::error::Invalid ${field} in ${release_file}:" \
-                "${override} (expected host or host:port)"
+                "${override} (expected host[:port] with an optional" \
+                "repository path of lowercase components)"
               exit 1
             fi
-            if [ "${override%%:*}" != "${allowed%%:*}" ]; then
+            # Compare hosts, so a release file may still select a
+            # different port or repository path on the configured
+            # host — Nexus 3 and Artifactory both express the target
+            # repository that way, and the credential authenticates
+            # to the host either way. Strip the path before the port,
+            # because a host-only value carrying a path has no colon
+            # to cut at and would otherwise compare host and path
+            # together.
+            local override_host="${override%%/*}"
+            override_host="${override_host%%:*}"
+            local allowed_host="${allowed%%/*}"
+            allowed_host="${allowed_host%%:*}"
+            if [ "${override_host}" != "${allowed_host}" ]; then
               echo "::error::${field} in ${release_file}" \
                 "(${override}) must stay on the configured" \
-                "registry host (${allowed%%:*}); the promotion" \
+                "registry host (${allowed_host}); the promotion" \
                 "credential only ever authenticates there"
               exit 1
             fi
@@ -1335,39 +1410,73 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 'Resolve registry username'
+      - name: 'Resolve registry username and login endpoints'
         id: publish-params
         if: steps.creds.outputs.available == 'true'
         shell: bash
         env:
+          REGISTRY_USER_INPUT: ${{ inputs.registry_user }}
           NEXUS_USER_INPUT: ${{ inputs.nexus_user }}
           # The repository actually checked out/published, which can
           # differ from GITHUB_REPOSITORY for cross-repository calls
           TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
+          # yamllint disable-line rule:line-length
+          PULL_REGISTRY: ${{ needs.check-release.outputs.pull_registry || inputs.snapshot_registry }}
+          # yamllint disable-line rule:line-length
+          PUSH_REGISTRY: ${{ needs.check-release.outputs.push_registry || inputs.release_registry }}
         run: |
           # 1Password credential naming contract: the credential (and
           # username) take the name of the repository being published
           # (the checked-out repository, not necessarily the caller)
-          nexus_user="${NEXUS_USER_INPUT}"
-          if [ -z "${nexus_user}" ]; then
-            nexus_user="${TARGET_REPOSITORY##*/}"
+          registry_user="${REGISTRY_USER_INPUT}"
+          if [ -z "${registry_user}" ] &&
+            [ -n "${NEXUS_USER_INPUT}" ]; then
+            echo "::warning::The nexus_user input is deprecated;" \
+              "use registry_user instead"
+            registry_user="${NEXUS_USER_INPUT}"
+          fi
+          if [ -z "${registry_user}" ]; then
+            registry_user="${TARGET_REPOSITORY##*/}"
           fi
           # The credential item always keys on the published
-          # repository's name (nexus_user overrides the login
+          # repository's name (registry_user overrides the login
           # username only), so cross-repository calls load the
           # target's item rather than the caller's
           credential_name="${TARGET_REPOSITORY##*/}"
-          # Constrain to a safe single-line character set before the
-          # values reach $GITHUB_OUTPUT (output-file injection)
-          for value in "${nexus_user}" "${credential_name}"; do
-            if [[ ! "${value}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-              echo "::error::Invalid registry username or" \
-                "credential name: ${value}"
-              exit 1
-            fi
-          done
-          echo "nexus_user=${nexus_user}" >> "$GITHUB_OUTPUT"
-          echo "credential_name=${credential_name}" >> "$GITHUB_OUTPUT"
+          # Both values reach $GITHUB_OUTPUT, where a line break
+          # would append a record of its own, so each is constrained
+          # rather than merely escaped. The username admits '@' and
+          # '+' as well: registry accounts genuinely use them, since
+          # Artifactory SaaS identities are commonly email addresses,
+          # and the value only travels to docker login. The
+          # credential name keys a 1Password item and derives from a
+          # repository name, so it keeps the tighter set.
+          if [[ ! "${registry_user}" =~ ^[A-Za-z0-9._@+-]+$ ]]; then
+            echo "::error::Invalid registry username:" \
+              "${registry_user}"
+            exit 1
+          fi
+          if [[ ! "${credential_name}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid credential name:" \
+              "${credential_name}"
+            exit 1
+          fi
+          # docker login takes an endpoint, not an image reference. A
+          # repository path belongs to the reference and authenticates
+          # against the host serving it, which is how Artifactory's
+          # repository-path method works; Nexus 3 encodes the
+          # repository in the port, so there the whole value stays.
+          # crane reads the docker config these logins write.
+          pull_endpoint="${PULL_REGISTRY%%/*}"
+          push_endpoint="${PUSH_REGISTRY%%/*}"
+          echo "Pull login endpoint: ${pull_endpoint}"
+          echo "Push login endpoint: ${push_endpoint}"
+          {
+            echo "registry_user=${registry_user}"
+            echo "credential_name=${credential_name}"
+            echo "pull_endpoint=${pull_endpoint}"
+            echo "push_endpoint=${push_endpoint}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: 'Load registry credential'
         id: load-credential
@@ -1383,30 +1492,29 @@ jobs:
           credential_grants_json: ${{ vars.CREDENTIAL_LOAD_GRANTS }}
           export_env: 'false'
 
-      # The same per-repository Nexus credential authenticates both
+      # The same per-repository credential authenticates both
       # registries (the LF Nexus 3 snapshot/release registries share
-      # a credential realm); crane reads the docker config both
-      # logins write. Release-file registry overrides must stay
-      # within that credential realm — promotion to registries with
-      # separate credentials (e.g. docker.io) remains with the LF
-      # release-engineering tooling for now.
+      # a credential realm, as do the repositories of one Artifactory
+      # instance); crane reads the docker config both logins write.
+      # Release-file registry overrides must stay within that realm —
+      # promotion to registries with separate credentials (e.g.
+      # docker.io) remains with the LF release-engineering tooling
+      # for now.
       - name: 'Login to pull registry'
         if: steps.creds.outputs.available == 'true'
         # yamllint disable-line rule:line-length
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
-          # yamllint disable-line rule:line-length
-          registry: ${{ needs.check-release.outputs.pull_registry || inputs.snapshot_registry }}
-          username: ${{ steps.publish-params.outputs.nexus_user }}
+          registry: ${{ steps.publish-params.outputs.pull_endpoint }}
+          username: ${{ steps.publish-params.outputs.registry_user }}
           password: ${{ steps.load-credential.outputs.credential }}
       - name: 'Login to push registry'
         if: steps.creds.outputs.available == 'true'
         # yamllint disable-line rule:line-length
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
-          # yamllint disable-line rule:line-length
-          registry: ${{ needs.check-release.outputs.push_registry || inputs.release_registry }}
-          username: ${{ steps.publish-params.outputs.nexus_user }}
+          registry: ${{ steps.publish-params.outputs.push_endpoint }}
+          username: ${{ steps.publish-params.outputs.registry_user }}
           password: ${{ steps.load-credential.outputs.credential }}
 
       - name: 'Set up crane'
