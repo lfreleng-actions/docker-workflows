@@ -163,7 +163,32 @@ Image names derive from the repository or directory name. Pass the
 build order, which also serves same-repository FROM chains (an image
 can build `FROM <earlier-image>:verify`). Each entry takes `name` and
 `context` (required), plus optional `dockerfile`, `target` and
-`build_args` (a list of KEY=VALUE strings).
+`build_args` (a list of KEY=VALUE strings). Names in an explicit
+`images` input must stay distinct once normalised to the Docker
+repository character set; auto-discovery instead keeps the first of
+any duplicate pair.
+
+With `image_namespace` set, the Dockerfile build path in every lane
+tags each built image both as `<namespace>/<name>:verify` and as
+`<name>:verify`, so a chain resolves whichever form it references and
+one `images` input travels between the verify, merge and release
+lanes unchanged. Two cases sit outside that guarantee:
+`build_command` hands back whatever tags the project's own tooling
+created, and a release build whose `platforms` input is anything
+other than `linux/amd64` — one foreign architecture as readily as a
+list of them — runs on the isolated `docker-container` driver, which
+cannot see daemon-local tags at all. Chains in either case must
+reference registry-resolvable images or take the base as a
+`build_args` value.
+
+The release lane skips the namespaced alias when `image_namespace`
+is not a usable reference prefix (`-team` or `team.`, say), rather
+than failing a release over a value it never publishes under.
+
+Where `build_command` builds the images, discovery finding no
+Dockerfile is not an error: jib and Gradle plugins synthesise images
+without one, and the build job enumerates whatever the command
+created.
 
 The build job exports every built image as a docker archive, so the
 test, SBOM and scan jobs consume the exact bits built. Verify-lane

@@ -857,6 +857,35 @@ jobs:
             *,linux/amd64,*) ;;
             *) scan_platform="${PLATFORMS%%,*}" ;;
           esac
+          # The verify and merge lanes prefix local tags with
+          # image_namespace, so a caller whose chain references
+          # <namespace>/<base>:verify through build_args builds there
+          # and would fail here. Aliasing each image under the
+          # namespace as well lets one images input travel between
+          # the lanes unchanged.
+          #
+          # Whether to alias is decided once, here, against Docker's
+          # reference grammar: runs of lowercase alphanumerics joined
+          # by a single '.' or '_', exactly '__', or one or more '-',
+          # in slash-separated components. Multi-component namespaces
+          # such as team/project qualify, because this is a local
+          # reference rather than a Docker Hub organisation, and that
+          # gate enforces its own narrower shape separately. Anything
+          # docker tag would reject, such as '-team' or 'team.',
+          # yields no alias rather than failing a release that
+          # publishes nowhere near Docker Hub.
+          namespace_component='[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*'
+          alias_namespace='false'
+          if [ -n "${IMAGE_NAMESPACE}" ] &&
+            [[ "${IMAGE_NAMESPACE}" =~ \
+              ^${namespace_component}(/${namespace_component})*$ ]]
+          then
+            alias_namespace='true'
+          elif [ -n "${IMAGE_NAMESPACE}" ]; then
+            echo "::notice::image_namespace '${IMAGE_NAMESPACE}'" \
+              "is not a usable local reference prefix; skipping the" \
+              "namespaced :verify aliases"
+          fi
           mkdir -p /tmp/docker-archives
           declare -a local_tags=()
           pushed='[]'
@@ -968,6 +997,23 @@ jobs:
                 <<< "${pushed}")
             done
             local_tags+=("${local_tag}")
+            if [ "${alias_namespace}" = 'true' ]; then
+              alias_repo="${IMAGE_NAMESPACE}/${name}"
+              # Docker caps a repository name at 255 characters, so
+              # a long namespace can carry a grammatical alias past
+              # the limit even though every component is well
+              # formed. Checking the assembled name keeps the
+              # promise above: an alias this daemon would refuse is
+              # skipped, never a reason for a release to fail.
+              if [ "${#alias_repo}" -le 255 ]; then
+                docker tag "${local_tag}" "${alias_repo}:verify"
+              else
+                echo "::notice::Skipping the namespaced alias for" \
+                  "${name}: the assembled repository name is" \
+                  "${#alias_repo} characters, over Docker's limit" \
+                  "of 255"
+              fi
+            fi
             safe=$(tr '/:' '__' <<< "${local_tag}")
             docker save "${local_tag}" \
               -o "/tmp/docker-archives/${safe}.tar"
