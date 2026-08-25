@@ -1329,6 +1329,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      issues: read  # Read maintainer-approved CVE bypass issues
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -1350,120 +1351,22 @@ jobs:
         with:
           name: sbom-files-${{ needs.docker-metadata.outputs.build_id }}
 
-      - name: 'Install Grype'
-        id: grype
-        # yamllint disable-line rule:line-length
-        uses: anchore/scan-action/download-grype@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2  # v7.4.0
-        with:
-          cache-db: 'true'
-
       # The grype_permit_fail input (or, when unset, the NO_BLOCK_AUDIT_FAIL
       # repository variable) disables failure propagation so releases
       # can proceed when blocked by newly discovered CVEs in base images
       # or transitive dependencies.
       - name: 'Grype audit SBOMs'
         id: grype-audit
-        env:
-          GRYPE_CMD: ${{ steps.grype.outputs.cmd }}
-          GRYPE_FAIL_ON: ${{ inputs.grype_fail_on }}
-          # yamllint disable-line rule:line-length
-          NO_BLOCK_AUDIT_FAIL: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
-        shell: bash
-        run: |
-          # Scan every per-image SBOM the sbom job produced; the worst
-          # result across images decides the job outcome.
-          shopt -s nullglob
-          sboms=(sbom-cyclonedx-*.json)
-          if [ "${#sboms[@]}" -eq 0 ]; then
-            echo "::warning::No JSON SBOMs found; Grype scan skipped"
-            {
-              echo "## Grype Vulnerability Scan"
-              echo ""
-              echo "No JSON SBOMs available to scan."
-            } >> "$GITHUB_STEP_SUMMARY"
-            if [ "${NO_BLOCK_AUDIT_FAIL}" = "true" ]; then
-              exit 0
-            fi
-            echo "::error::No JSON SBOMs available for the Grype audit"
-            exit 1
-          fi
-
-          worst=0
-          for sbom in "${sboms[@]}"; do
-            base="${sbom#sbom-cyclonedx-}"
-            base="${base%.json}"
-            echo "::group::Grype ${base}"
-            set +e
-            "${GRYPE_CMD}" \
-              -o "sarif=grype-results-${base}.sarif" \
-              -o "json=grype-results-${base}.json" \
-              -o "table=grype-results-${base}.txt" \
-              --fail-on "${GRYPE_FAIL_ON}" \
-              "sbom:${sbom}"
-            grype_exit=$?
-            set -e
-            if [ -f "grype-results-${base}.txt" ]; then
-              cat "grype-results-${base}.txt"
-            fi
-            echo "::endgroup::"
-            # grype returns 2 when it finds vulnerabilities at or
-            # above the --fail-on threshold; any other non-zero exit
-            # is a grype failure and fails the job outright.
-            if [ "${grype_exit}" != "0" ] &&
-              [ "${grype_exit}" != "2" ]; then
-              echo "::error::Grype exited with code ${grype_exit}" \
-                "for ${base}"
-              exit "${grype_exit}"
-            fi
-            if [ "${grype_exit}" -gt "${worst}" ]; then
-              worst="${grype_exit}"
-            fi
-          done
-
-          if [ "${worst}" = "0" ]; then
-            echo "No vulnerabilities at or above '${GRYPE_FAIL_ON}'"
-            exit 0
-          fi
-          if [ "${NO_BLOCK_AUDIT_FAIL}" = "true" ]; then
-            echo "::warning::Grype found vulnerabilities at or above" \
-              "the '${GRYPE_FAIL_ON}' threshold, but failures are" \
-              "permitted so the job will not fail."
-            exit 0
-          fi
-          echo "::error::Grype found vulnerabilities at or above the" \
-            "'${GRYPE_FAIL_ON}' threshold"
-          exit 1
-
-      - name: 'Upload Grype results'
-        if: always()
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: lfreleng-actions/grype-scan-action@23c78fc938e68fa1ff804ca07abad4937c8aabbf  # v0.0.1
         with:
-          name: grype-scan-results-${{ needs.docker-metadata.outputs.build_id }}
-          path: |
-            grype-results-*.sarif
-            grype-results-*.json
-            grype-results-*.txt
-          retention-days: 90
-          if-no-files-found: warn
-
-      - name: 'Grype summary'
-        if: always()
-        shell: bash
-        run: |
-          # Per-image finding counts for the step summary
-          {
-            echo "## Grype Vulnerability Scan"
-            echo ""
-            shopt -s nullglob
-            for res in grype-results-*.json; do
-              base="${res#grype-results-}"
-              base="${base%.json}"
-              count=$(jq '.matches | length' "${res}")
-              echo "- \`${base}\`: ${count} finding(s)"
-            done
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
+          sbom: 'sbom-cyclonedx-*.json'
+          fail-on: ${{ inputs.grype_fail_on }}
+          # yamllint disable-line rule:line-length
+          permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+          # yamllint disable-line rule:line-length
+          artifact-name: grype-scan-results-${{ needs.docker-metadata.outputs.build_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
   tests:
     name: 'Tests'
