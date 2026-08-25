@@ -662,20 +662,21 @@ jobs:
               fi
             done < <(jq -c '.[]' <<< "${IMAGES_JSON}")
           fi
-          mkdir -p /tmp/docker-archives
-          for tag in "${tags[@]}"; do
-            safe=$(tr '/:' '__' <<< "${tag}")
-            docker save "${tag}" \
-              -o "/tmp/docker-archives/${safe}.tar"
-          done
           if [ "${#tags[@]}" -gt 0 ]; then
             built=$(printf '%s\n' "${tags[@]}" | jq -cnR '[inputs]')
           else
             built='[]'
           fi
           echo "Built ${#tags[@]} image(s): ${built}"
-          echo "images=${built}" >> "$GITHUB_OUTPUT"
-          echo "image_count=${#tags[@]}" >> "$GITHUB_OUTPUT"
+          {
+            echo "images=${built}"
+            echo "image_count=${#tags[@]}"
+            # docker-save-images-action takes a space-separated list.
+            # An image reference cannot contain whitespace, so the
+            # join stays unambiguous, and an empty array yields an
+            # empty string, which the action reads as nothing to save
+            echo "images_list=${tags[*]}"
+          } >> "$GITHUB_OUTPUT"
           {
             echo "## Docker Build"
             echo ""
@@ -709,18 +710,26 @@ jobs:
               >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: 'Upload image archives'
-        # Nothing to upload when every image failed under
-        # build_permit_fail; if-no-files-found stays 'error' so a
-        # genuine export failure still surfaces.
-        if: steps.build.outputs.image_count != '0'
+      - name: 'Save and upload image archives'
+        # One archive per image, because the SBOM job runs syft per
+        # image and Grype scans the per-image SBOMs; a single
+        # combined tar could not be separated again. The artifact
+        # name carries build_id so parallel workflow_call legs cannot
+        # overwrite each other, and overwrite stays false so a
+        # collision fails loudly rather than silently taking the last
+        # writer. fail-on-empty is false because build_permit_fail
+        # makes building nothing a legitimate outcome.
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: lfreleng-actions/docker-save-images-action@fd148182fc22be846b343f92404f4104d8d049f1  # v0.2.0
         with:
-          name: docker-archives-${{ needs.docker-metadata.outputs.build_id }}
-          path: /tmp/docker-archives/
-          retention-days: 1
-          if-no-files-found: error
+          docker-artifacts-to-save: ${{ steps.build.outputs.images_list }}
+          mode: 'per-image'
+          # yamllint disable-line rule:line-length
+          artifact-name: docker-archives-${{ needs.docker-metadata.outputs.build_id }}
+          output-directory: 'docker-archives'
+          overwrite: 'false'
+          retention-days: '1'
+          fail-on-empty: 'false'
 
   tests:
     name: 'Tests'

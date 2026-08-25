@@ -886,7 +886,6 @@ jobs:
               "is not a usable local reference prefix; skipping the" \
               "namespaced :verify aliases"
           fi
-          mkdir -p /tmp/docker-archives
           declare -a local_tags=()
           pushed='[]'
           while IFS= read -r spec; do
@@ -1014,9 +1013,6 @@ jobs:
                   "of 255"
               fi
             fi
-            safe=$(tr '/:' '__' <<< "${local_tag}")
-            docker save "${local_tag}" \
-              -o "/tmp/docker-archives/${safe}.tar"
           done < <(jq -c '.[]' <<< "${IMAGES_JSON}")
           built=$(printf '%s\n' "${local_tags[@]}" | jq -cnR '[inputs]')
           pushed_count=$(jq 'length' <<< "${pushed}")
@@ -1025,6 +1021,10 @@ jobs:
           {
             echo "images=${built}"
             echo "image_count=${#local_tags[@]}"
+            # docker-save-images-action takes a space-separated list;
+            # an image reference cannot contain whitespace, so the
+            # join stays unambiguous
+            echo "images_list=${local_tags[*]}"
             echo "pushed=${pushed}"
             echo "pushed_count=${pushed_count}"
           } >> "$GITHUB_OUTPUT"
@@ -1043,14 +1043,24 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 'Upload image archives'
+      - name: 'Save and upload image archives'
+        # One archive per image, because the SBOM job runs syft per
+        # image and Grype scans the per-image SBOMs. The artifact
+        # name carries build_id so parallel workflow_call legs cannot
+        # overwrite each other, and overwrite stays false so a
+        # collision fails loudly. fail-on-empty keeps its default of
+        # true: this lane has no permit-fail hatch, so a release that
+        # built nothing must stop here.
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: lfreleng-actions/docker-save-images-action@fd148182fc22be846b343f92404f4104d8d049f1  # v0.2.0
         with:
-          name: docker-archives-${{ needs.docker-metadata.outputs.build_id }}
-          path: /tmp/docker-archives/
-          retention-days: 1
-          if-no-files-found: error
+          docker-artifacts-to-save: ${{ steps.build.outputs.images_list }}
+          mode: 'per-image'
+          # yamllint disable-line rule:line-length
+          artifact-name: docker-archives-${{ needs.docker-metadata.outputs.build_id }}
+          output-directory: 'docker-archives'
+          overwrite: 'false'
+          retention-days: '1'
 
   # Signs and attests every pushed image by digest: cosign keyless
   # (Sigstore) plus SLSA build provenance via GitHub attestations,
