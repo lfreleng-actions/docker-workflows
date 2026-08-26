@@ -1595,7 +1595,7 @@ jobs:
 
       - name: 'Attach artefacts to release'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/release-assets-action@22a6302f3d1775e4a192c45235cc7833a2781b12  # v0.1.1
+        uses: lfreleng-actions/release-assets-action@cf7ed4ee51c80643c6075e41ffdbca7d301e43e8  # v0.1.2
         with:
           # yamllint disable-line rule:line-length
           asset_paths: '["sbom-cyclonedx-*.json", "docker-digests.json"]'
