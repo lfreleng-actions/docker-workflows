@@ -304,6 +304,8 @@ schema, including its optional `container_pull_registry`/
 
 ### GitHub-native caller
 
+<!-- markdownlint-disable MD013 -->
+
 ```yaml
 jobs:
   build-test:
@@ -311,12 +313,16 @@ jobs:
       contents: read
       pull-requests: read
       issues: read  # Grype scan reads approved CVE bypass issues
-    uses: lfreleng-actions/docker-workflows/.github/workflows/build-test.yaml@main
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/docker-workflows/.github/workflows/build-test.yaml@<SHA>  # vX.Y.Z
 ```
 
-Pin the `uses:` reference to a specific release SHA in production
-instead of the mutable `@main` reference. See
-`examples/build-test/` for complete callers.
+<!-- markdownlint-enable MD013 -->
+
+Pin the `uses:` reference to the commit SHA of a docker-workflows
+release. Never use a mutable ref such as `@main`, which follows
+whatever lands upstream without review. See `examples/build-test/`
+for complete callers.
 
 ### Gerrit-wrapped caller
 
