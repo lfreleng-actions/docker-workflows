@@ -639,10 +639,12 @@ jobs:
           echo "image_count=${count}" >> "$GITHUB_OUTPUT"
           # Artifact names must be unique per workflow-call invocation:
           # matrix legs calling this workflow in parallel would
-          # otherwise overwrite each other's docker-archives/sbom-files
-          # artifacts (upload-artifact overwrites duplicate names) and
-          # downstream jobs would consume another leg's images. Hash
-          # the distinguishing inputs into a stable per-leg id.
+          # otherwise collide on the docker-archives/sbom-files names.
+          # Duplicates are not rejected or merged: each upload is kept
+          # as its own artifact and download-artifact resolves a name
+          # to the newest match, so a downstream job would silently
+          # consume another leg's images. Hash the distinguishing
+          # inputs into a stable per-leg id.
           build_id=$(printf '%s|%s|%s|%s|%s' \
             "${TARGET_REPOSITORY}" "${PATH_PREFIX}" "${IMAGES_INPUT}" \
             "${IMAGE_NAMESPACE}" "${PLATFORMS}" \
