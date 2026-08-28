@@ -153,6 +153,11 @@ jobs:
       # values below illustrate the expected host:port form.
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
+      # JFrog Artifactory instead? Give the repository in the path
+      # (or the host, for the subdomain method); the workflow logs
+      # in to the host and pushes to the full base:
+      #   snapshot_registry: 'acme.jfrog.io/docker-snapshot'
+      #   release_registry: 'acme.jfrog.io/docker-release'
       # Optional Docker tuning; empty values auto-discover Dockerfiles:
       # image_namespace: 'onap'      # publish as <registry>/onap/<name>
       # images: ''                   # JSON image list + build order
