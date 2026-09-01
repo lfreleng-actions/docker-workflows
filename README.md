@@ -125,11 +125,12 @@ there — tracked in #26.
 
 ```text
 gerrit-validate -> { repository-metadata | docker-metadata }
-docker-metadata -> { audit | build }
+docker-metadata -> { dockerfile-lint | build }
 build -> { tests | sbom -> grype }
 ```
 
-The audit (hadolint) job gates on docker-metadata rather than build:
+The dockerfile-lint (hadolint) job gates on docker-metadata rather
+than build:
 Dockerfile lint needs no built image, so lint findings surface even
 when the build itself fails.
 
@@ -138,10 +139,11 @@ when the build itself fails.
 ```text
 gerrit-validate -> { repository-metadata | tag-validate
   | docker-metadata }
-docker-metadata -> { audit | build }
+docker-metadata -> { dockerfile-lint | build }
 tag-validate -> build -> sign
 build -> sbom -> grype
-{ audit | grype } -> tests -> attach-artefacts -> promote-release
+{ dockerfile-lint | grype } -> tests -> attach-artefacts
+  -> promote-release
 ```
 
 `merge.yaml`:
@@ -221,7 +223,11 @@ platform); the release lane builds multi-platform when the
 | `build_permit_fail`           | boolean | `false`    | Permit image build failures; images that build carry on downstream   |
 | `test_command`                | string  | `''`       | Smoke-test hook; built images load first, IMAGES env carries tags    |
 | `test_permit_fail`            | boolean | `false`    | Permit test failures without failing the workflow                    |
-| `audit_permit_fail`           | boolean | `false`    | Permit hadolint findings (the NO_BLOCK pattern)                      |
+| `lint_enabled`                | boolean | `true`     | Run the Dockerfile lint job; false skips it                          |
+| `lint_permit_fail`            | boolean | `false`    | Permit hadolint findings (the NO_BLOCK pattern)                      |
+| `audit_permit_fail`           | boolean | `false`    | DEPRECATED alias for `lint_permit_fail`; removed at the next major   |
+| `sbom_enabled`                | boolean | `true`     | Generate image SBOMs; false skips generation and the Grype scan      |
+| `grype_enabled`               | boolean | `true`     | Run the Grype scan; false keeps the SBOMs but skips the scan         |
 | `grype_fail_on`               | string  | `'medium'` | Severity threshold that fails the Grype scan                         |
 | `grype_permit_fail`           | boolean | `false`    | Permit Grype findings without failing the job                        |
 | `harden_runner_egress`        | string  | `'block'`  | Harden-runner egress policy: `block` or `audit`                      |
@@ -242,8 +248,9 @@ escape hatch alongside the per-call `*_permit_fail` inputs.
 
 Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 `images`, `build_timeout_minutes`, hardening and `gerrit_*` inputs,
-`test_command`/`test_permit_fail`, `audit_permit_fail`,
-`grype_fail_on`/`grype_permit_fail`):
+`test_command`/`test_permit_fail`, `lint_enabled`/`lint_permit_fail`
+(and its deprecated `audit_permit_fail` alias), `sbom_enabled`,
+`grype_enabled`/`grype_fail_on`/`grype_permit_fail`):
 
 <!-- markdownlint-disable MD013 -->
 
