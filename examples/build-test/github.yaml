@@ -54,7 +54,10 @@ jobs:
     #   test_command: ''              # smoke-test hook; built images load
     #                                 # first, IMAGES env carries the tags
     #   test_permit_fail: false       # soft-fail tests
-    #   audit_permit_fail: false      # soft-fail Dockerfile lint (hadolint)
+    #   lint_enabled: true            # false skips the Dockerfile lint
+    #   lint_permit_fail: false       # soft-fail Dockerfile lint (hadolint)
+    #   sbom_enabled: true            # false skips image SBOM generation
+    #   grype_enabled: true           # false skips the Grype scan only
     #   grype_fail_on: 'medium'       # Grype severity gate
     #   harden_runner_egress: 'block' # 'block' (default) or 'audit'
     #   build_permit_egress_traffic: false  # audit egress for build job only

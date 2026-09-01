@@ -11,10 +11,11 @@
 #
 # Job graph (-> denotes sequence; { } runs in parallel):
 #   gerrit-validate -> { repository-metadata | docker-metadata }
-#   docker-metadata -> { audit | build }
+#   docker-metadata -> { dockerfile-lint | build }
 #   build -> { tests | sbom -> grype }
 #
-# The audit (hadolint) job gates on docker-metadata rather than build:
+# The dockerfile-lint (hadolint) job gates on docker-metadata rather
+# than build:
 # Dockerfile lint needs no built image, and surfacing lint findings
 # when the build itself fails shortens the fix cycle.
 #
@@ -99,8 +100,8 @@ on:
           the lane still lints every Dockerfile and reports which
           images build, without gating review on breakage that
           predates the change under test. Images that do build carry
-          on to the test, SBOM and scan jobs. Unlike the audit
-          toggles this input has no repository variable fallback, so
+          on to the test, SBOM and scan jobs. Unlike the lint and
+          scan toggles this input has no repository variable fallback, so
           nothing can disable build gating across an organisation by
           accident.
         required: false
@@ -124,14 +125,48 @@ on:
         type: boolean
         default: false
 
-      # --- Audit (Dockerfile lint) ---
-      audit_permit_fail:
+      # --- Dockerfile lint (hadolint) ---
+      lint_enabled:
+        description: 'Run the Dockerfile lint job (set false to skip)'
+        required: false
+        type: boolean
+        default: true
+      lint_permit_fail:
         description: 'Permit hadolint findings (the NO_BLOCK pattern)'
         required: false
         type: boolean
         default: false
+      audit_permit_fail:
+        description: >-
+          DEPRECATED alias for lint_permit_fail, retained so existing
+          callers keep working. This job lints Dockerfiles; it does not
+          audit dependencies. Elsewhere in the estate audit_* governs a
+          dependency audit, so the name is being retired here. Prefer
+          lint_permit_fail; this input is removed at the next major.
+        required: false
+        type: boolean
+        default: false
+
+      # --- SBOM ---
+      sbom_enabled:
+        description: >-
+          Generate an image SBOM (set false to skip). The Grype scan
+          reads the SBOM, so skipping generation leaves it nothing to
+          scan. To keep the SBOM but drop the scan, use grype_enabled.
+        required: false
+        type: boolean
+        default: true
 
       # --- Grype scan ---
+      grype_enabled:
+        description: >-
+          Run the Grype vulnerability scan over the generated SBOMs (set
+          false to skip). Decoupling is one-way: disabling the scan
+          keeps the SBOMs, but disabling the SBOM job also stops the
+          scan, which has nothing to read.
+        required: false
+        type: boolean
+        default: true
       grype_fail_on:
         description: 'Minimum severity that fails the Grype scan'
         required: false
@@ -830,11 +865,12 @@ jobs:
             exit "${status}"
           fi
 
-  audit:
+  dockerfile-lint:
     name: 'Dockerfile Lint'
     runs-on: ubuntu-latest
     needs: 'docker-metadata'
-    if: ${{ !cancelled() && needs.docker-metadata.result == 'success' }}
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.docker-metadata.result == 'success' && inputs.lint_enabled }}
     permissions:
       contents: read
     timeout-minutes: 5
@@ -883,11 +919,12 @@ jobs:
           # sits in the egress allow-list.
           # yamllint disable-line rule:line-length
           HADOLINT_IMAGE: 'hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d'
-          # The NO_BLOCK/soft-fail pattern: the audit_permit_fail input
+          # The NO_BLOCK/soft-fail pattern: the lint_permit_fail input
+          # (or its deprecated audit_permit_fail alias)
           # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
           # variable) disables failure propagation.
           # yamllint disable-line rule:line-length
-          NO_BLOCK: ${{ inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+          NO_BLOCK: ${{ inputs.lint_permit_fail || inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
         run: |
           # Lint exactly the Dockerfiles the build consumes (from the
           # resolved image list), so per-image dockerfile overrides
@@ -923,7 +960,8 @@ jobs:
     # As for the tests job: no images built means no archive to scan.
     if: >-
       ${{ !cancelled() && needs.build.result == 'success'
-          && needs.build.outputs.image_count != '0' }}
+          && needs.build.outputs.image_count != '0'
+          && inputs.sbom_enabled }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -1004,7 +1042,8 @@ jobs:
     name: 'Grype Audit SBOM'
     runs-on: ubuntu-latest
     needs: ['sbom', 'docker-metadata']
-    if: ${{ !cancelled() && needs.sbom.result == 'success' }}
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.sbom.result == 'success' && inputs.grype_enabled }}
     timeout-minutes: 10
     permissions:
       contents: read

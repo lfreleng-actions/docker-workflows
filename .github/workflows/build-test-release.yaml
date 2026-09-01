@@ -10,7 +10,7 @@
 # Docker Hub, each pushed image signs with Sigstore cosign (keyless)
 # and gains SLSA build provenance, and the audits gate the release:
 #   tag-validate -> build -> sign
-#   docker-metadata -> { audit | build }
+#   docker-metadata -> { dockerfile-lint | build }
 #   build -> { sbom -> grype } -> tests
 #     -> attach-artefacts -> promote-release
 #
@@ -143,14 +143,48 @@ on:
         type: boolean
         default: false
 
-      # --- Audit (Dockerfile lint) ---
-      audit_permit_fail:
+      # --- Dockerfile lint (hadolint) ---
+      lint_enabled:
+        description: 'Run the Dockerfile lint job (set false to skip)'
+        required: false
+        type: boolean
+        default: true
+      lint_permit_fail:
         description: 'Permit hadolint findings (the NO_BLOCK pattern)'
         required: false
         type: boolean
         default: false
+      audit_permit_fail:
+        description: >-
+          DEPRECATED alias for lint_permit_fail, retained so existing
+          callers keep working. This job lints Dockerfiles; it does not
+          audit dependencies. Elsewhere in the estate audit_* governs a
+          dependency audit, so the name is being retired here. Prefer
+          lint_permit_fail; this input is removed at the next major.
+        required: false
+        type: boolean
+        default: false
+
+      # --- SBOM ---
+      sbom_enabled:
+        description: >-
+          Generate an image SBOM (set false to skip). The Grype scan
+          reads the SBOM, so skipping generation leaves it nothing to
+          scan. To keep the SBOM but drop the scan, use grype_enabled.
+        required: false
+        type: boolean
+        default: true
 
       # --- Grype scan ---
+      grype_enabled:
+        description: >-
+          Run the Grype vulnerability scan over the generated SBOMs (set
+          false to skip). Decoupling is one-way: disabling the scan
+          keeps the SBOMs, but disabling the SBOM job also stops the
+          scan, which has nothing to read.
+        required: false
+        type: boolean
+        default: true
       grype_fail_on:
         description: 'Minimum severity that fails the Grype scan'
         required: false
@@ -1208,13 +1242,14 @@ jobs:
           subject-digest: ${{ matrix.digest }}
           push-to-registry: ${{ startsWith(matrix.image, 'ghcr.io/') }}
 
-  audit:
+  dockerfile-lint:
     name: 'Dockerfile Lint'
     runs-on: ubuntu-latest
     needs:
       - 'docker-metadata'
       - 'tag-validate'
-    if: ${{ !cancelled() && needs.docker-metadata.result == 'success' }}
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.docker-metadata.result == 'success' && inputs.lint_enabled }}
     permissions:
       contents: read
     timeout-minutes: 5
@@ -1265,11 +1300,12 @@ jobs:
           # sits in the egress allow-list.
           # yamllint disable-line rule:line-length
           HADOLINT_IMAGE: 'hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d'
-          # The NO_BLOCK/soft-fail pattern: the audit_permit_fail input
+          # The NO_BLOCK/soft-fail pattern: the lint_permit_fail input
+          # (or its deprecated audit_permit_fail alias)
           # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
           # variable) disables failure propagation.
           # yamllint disable-line rule:line-length
-          NO_BLOCK: ${{ inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+          NO_BLOCK: ${{ inputs.lint_permit_fail || inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
         run: |
           # Lint exactly the Dockerfiles the build consumes (from the
           # resolved image list), so per-image dockerfile overrides
@@ -1302,7 +1338,8 @@ jobs:
     name: 'Image SBOM'
     runs-on: ubuntu-latest
     needs: ['build', 'docker-metadata']
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.build.result == 'success' && inputs.sbom_enabled }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -1383,7 +1420,8 @@ jobs:
     name: 'Grype Audit SBOM'
     runs-on: ubuntu-latest
     needs: ['sbom', 'docker-metadata']
-    if: ${{ !cancelled() && needs.sbom.result == 'success' }}
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.sbom.result == 'success' && inputs.grype_enabled }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -1432,14 +1470,25 @@ jobs:
     # Deferred until the audit operations (hadolint and Grype) pass,
     # so the expensive test hook is skipped when either audit fails
     # (gating inversion: audits gate tests on releases).
+    #
+    # A skipped result is accepted ONLY when a toggle explains it. A
+    # bare 'skipped' is ambiguous: grype also skips when the sbom job
+    # FAILS, and treating that as acceptable would let a release run
+    # with no scan performed at all.
+    #
+    # sbom is a direct dependency for the same reason. With
+    # grype_enabled false, a genuine SBOM failure would otherwise be
+    # invisible here: grype skips either way, and the grype clause
+    # would accept that skip on the toggle alone.
     needs:
       - 'build'
       - 'docker-metadata'
       - 'tag-validate'
-      - 'audit'
+      - 'dockerfile-lint'
+      - 'sbom'
       - 'grype'
     # yamllint disable-line rule:line-length
-    if: ${{ !cancelled() && needs.build.result == 'success' && needs.audit.result == 'success' && needs.grype.result == 'success' }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.dockerfile-lint.result == 'success' || (needs.dockerfile-lint.result == 'skipped' && !inputs.lint_enabled)) && (needs.sbom.result == 'success' || (needs.sbom.result == 'skipped' && !inputs.sbom_enabled)) && (needs.grype.result == 'success' || (needs.grype.result == 'skipped' && (!inputs.grype_enabled || !inputs.sbom_enabled))) }}
     permissions:
       contents: read
     timeout-minutes: 15
@@ -1587,7 +1636,11 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
+      # Skipped along with the SBOM job when sbom_enabled is false;
+      # there is no artefact to fetch and the release carries only the
+      # digest manifest.
       - name: '⬇ Download SBOM artefacts'
+        if: ${{ inputs.sbom_enabled }}
         # yamllint disable-line rule:line-length
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
@@ -1609,8 +1662,10 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/release-assets-action@cf7ed4ee51c80643c6075e41ffdbca7d301e43e8  # v0.1.2
         with:
+          # Drop the SBOM glob when generation is disabled: the
+          # action fails on a pattern that matches no file.
           # yamllint disable-line rule:line-length
-          asset_paths: '["sbom-cyclonedx-*.json", "docker-digests.json"]'
+          asset_paths: ${{ inputs.sbom_enabled && '["sbom-cyclonedx-*.json", "docker-digests.json"]' || '["docker-digests.json"]' }}
           release_tag: ${{ needs.tag-validate.outputs.tag }}
           # The assets are deterministic per tag, so replacing them
           # keeps this step rerunnable when a later job (signing,
