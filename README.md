@@ -376,7 +376,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-      issues: read  # Grype scan reads approved CVE bypass issues
     # yamllint disable-line rule:line-length
     uses: lfreleng-actions/docker-workflows/.github/workflows/build-test.yaml@<SHA>  # vX.Y.Z
 ```
