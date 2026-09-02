@@ -375,7 +375,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -432,7 +432,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -522,7 +522,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -724,7 +724,7 @@ jobs:
       # would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -1126,7 +1126,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -1256,7 +1256,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -1346,7 +1346,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -1428,7 +1428,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -1494,7 +1494,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -1602,7 +1602,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -1693,7 +1693,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2a70c3284392b8d6ee85a509dd4e9818801a7e82  # v0.11.1
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
