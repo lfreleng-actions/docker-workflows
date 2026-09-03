@@ -41,33 +41,22 @@ permissions: {}
 
 jobs:
   # Fixture legs exercising every image-selection mode against the two
-  # deterministic fixtures:
-  #   - leg 1: test-docker-project (single image, Dockerfile under
-  #     docker/) — auto-discovery under full block-mode egress
-  #   - leg 2: test-docker-monorepo — auto-discovery of three per-image
-  #     directories, building the same-repository FROM chain in
-  #     directory-sort order, plus the test_command hook (the smoke
-  #     script verifies the chain markers)
-  #   - leg 3: test-docker-monorepo — explicit 'images' input with
-  #     per-image build_args (BASE_IMAGE override for the namespaced
-  #     chain), image_namespace, and the build_permit_egress_traffic
-  #     hatch plumbing
-  #   - leg 4: test-docker-monorepo — the build_command escape hatch
-  #     ('make images' builds via project tooling; the workflow
-  #     enumerates what it created), plus the test_command hook
-  #   - leg 5: test-docker-monorepo — build_permit_fail, with one
-  #     buildable image and one declaring a stage the Dockerfile does
-  #     not define. The build job reports the failure and succeeds,
-  #     and the image that did build carries on to SBOM/Grype.
-  #   - leg 6: test-docker-monorepo — the leg 3 namespaced chain,
-  #     but referencing its base by the plain <name>:verify alias
-  #     rather than <namespace>/<name>:verify. The daemon-backed
-  #     build paths apply both aliases, so one images input travels
-  #     between them; a release build on a non-amd64 platform uses
-  #     the isolated driver and resolves neither. Without the plain
-  #     alias this leg fails to build.
-  #   - leg 7: test-docker-monorepo — build_command where discovery
-  #     finds nothing (the jib/Gradle shape); see the leg itself.
+  # deterministic fixtures. Detail for the subtler cases sits with the
+  # leg itself:
+  #   - leg 1: test-docker-project — auto-discovery of a single
+  #     Dockerfile under docker/, under full block-mode egress
+  #   - leg 2: test-docker-monorepo — auto-discovery of three
+  #     per-image directories, building the same-repository FROM
+  #     chain in directory-sort order, plus the test_command hook
+  #   - leg 3: explicit 'images' input with per-image build_args,
+  #     image_namespace, and build_permit_egress_traffic plumbing
+  #   - leg 4: the build_command escape hatch ('make images'), with
+  #     the workflow inferring which images it created
+  #   - leg 5: build_permit_fail; one image builds, one names a
+  #     stage its Dockerfile lacks, and the survivor reaches Grype
+  #   - leg 6: the leg 3 namespaced chain by its plain alias
+  #   - leg 7: build_command where discovery finds nothing
+  #   - leg 8: the leg 4 command with its output declared
   # Lint and Grype findings in fixture CONTENT soft-fail: the
   # self-test validates that the machinery executes, not the hygiene
   # of fixture Dockerfiles.
@@ -122,6 +111,13 @@ jobs:
             build_permit_fail: true
           - repository: 'lfreleng-actions/test-docker-monorepo'
             ref: 'v0.0.1'
+            # The leg 3 chain, but referencing its base by the plain
+            # <name>:verify alias rather than the namespaced form.
+            # The daemon-backed build paths apply both aliases, so
+            # one images input travels between the lanes; a release
+            # build on a non-amd64 platform uses the isolated driver
+            # and resolves neither. Without the plain alias this leg
+            # cannot build.
             # yamllint disable-line rule:line-length
             images: '[{"name": "base-alpine", "context": "base-alpine"}, {"name": "chain-child", "context": "chain-child", "build_args": ["BASE_IMAGE=base-alpine:verify"]}, {"name": "util-echo", "context": "util-echo"}]'
             image_namespace: 'lfreleng'
@@ -148,6 +144,23 @@ jobs:
             test_command: ''
             build_permit_egress_traffic: false
             build_permit_fail: false
+          - repository: 'lfreleng-actions/test-docker-monorepo'
+            ref: 'v0.0.1'
+            images: ''
+            image_namespace: ''
+            build_command: 'make images TAG=verify'
+            # The three images leg 4 leaves the workflow to infer,
+            # named explicitly instead, so the declared branch runs
+            # in CI: parsing, validation, and checking each
+            # reference exists once the command has run. Its result
+            # must agree with what leg 4 infers. The clearing this
+            # branch also guards cannot be reached here, since a
+            # hosted runner starts with no images to clear.
+            # yamllint disable-line rule:line-length
+            build_command_images: 'base-alpine:verify chain-child:verify util-echo:verify'
+            test_command: 'TAG=verify tests/scripts/test_images.sh'
+            build_permit_egress_traffic: false
+            build_permit_fail: false
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
@@ -160,6 +173,8 @@ jobs:
       images: ${{ matrix.images }}
       image_namespace: ${{ matrix.image_namespace }}
       build_command: ${{ matrix.build_command }}
+      # Legs that do not declare their output leave it to inference
+      build_command_images: ${{ matrix.build_command_images || '' }}
       test_command: ${{ matrix.test_command }}
       build_permit_egress_traffic: ${{ matrix.build_permit_egress_traffic }}
       build_permit_fail: ${{ matrix.build_permit_fail }}
