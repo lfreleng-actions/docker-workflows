@@ -151,7 +151,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
-    uses: ./.github/workflows/build-test.yaml
+    uses: $/.github/workflows/build-test.yaml
     with:
       repository: ${{ matrix.repository }}
       ref: ${{ matrix.ref }}
