@@ -1659,7 +1659,7 @@ jobs:
 
       - name: 'Attach artefacts to release'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/release-assets-action@cf7ed4ee51c80643c6075e41ffdbca7d301e43e8  # v0.1.2
+        uses: lfreleng-actions/release-assets-action@51e2955cf9aeab3731efd7cc4605aa2847e7d8e2  # v0.1.3
         with:
           # Drop the SBOM glob when generation is disabled: the
           # action fails on a pattern that matches no file.
