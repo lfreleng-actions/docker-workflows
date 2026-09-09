@@ -10,13 +10,13 @@
 # The reusable workflows are referenced by LOCAL path so this always
 # validates the current branch's workflows.
 #
-# The build-test-release and merge publish lanes are NOT self-tested
-# here: build-test-release requires a signed semver tag-push context
-# (and creates/promotes GitHub releases and pushes registry images),
-# and merge requires a merged-commit context plus a version.properties
-# file the fixtures lack (its dry_run input covers the no-credential
-# case once a fixture provides one). Instantiating repos validate
-# those lanes through their own release/merge cycles.
+# The build-test-release lane is NOT self-tested here: it requires a
+# signed semver tag-push context, and it creates and promotes GitHub
+# releases and pushes registry images. Instantiating repositories
+# validate it through their own release cycles.
+#
+# The merge lane IS self-tested, under dry_run, by the job at the end
+# of this file.
 name: 'Testing 🧪'
 
 # yamllint disable-line rule:truthy
@@ -180,3 +180,34 @@ jobs:
       build_permit_fail: ${{ matrix.build_permit_fail }}
       audit_permit_fail: true
       grype_permit_fail: true
+
+  # The merge lane, end to end, without publishing anything.
+  #
+  # dry_run skips credential loading and registry login entirely, so
+  # the lane still discovers and builds the images, resolves the
+  # version from version.properties, computes the snapshot/staging tag
+  # set, detects the container release file and plans the promotion —
+  # while pushing nothing and needing no secrets. That makes the
+  # publish path observable in CI, which it has never been.
+  #
+  # The ref pins the fixture commit that ADDED the release descriptor,
+  # and pins it deliberately: detection compares a merged commit
+  # against its parent, so a moving branch would stop detecting the
+  # file the moment anything else merged there. v0.1.0 tags that
+  # commit, so the tag and the requirement coincide.
+  #
+  # The registries are real Linux Foundation hostnames because the
+  # release descriptor overrides the pull registry and the workflow
+  # requires an override to stay on its input's host. Nothing
+  # connects to them under dry_run.
+  merge-dry-run:
+    name: 'Merge (dry run)'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/merge.yaml
+    with:
+      repository: 'lfreleng-actions/test-docker-monorepo'
+      ref: 'v0.1.0'
+      snapshot_registry: 'nexus3.onap.org:10003'
+      release_registry: 'nexus3.onap.org:10002'
+      dry_run: true
