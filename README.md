@@ -199,6 +199,28 @@ Dockerfile is not an error: jib and Gradle plugins synthesise images
 without one, and the build job enumerates whatever the command
 created.
 
+That enumeration is inference: the workflow diffs the daemon's image
+list around the command and treats a registry digest as evidence that
+an image arrived from a registry instead of a local build. The
+evidence holds under Docker's classic image store, where a local
+build carries no digest. Under the containerd image store every image
+has one, so nothing distinguishes the two and the build stops with an
+error naming the images it could not attribute, rather than guessing
+and risking an unrelated base reaching the scan or publish jobs.
+
+Declare the output with `build_command_images` in that case, and on
+such a store when the builder stamps a reproducible creation
+timestamp — jib pins it to the Unix epoch — since the workflow then
+has nothing left to tell a fresh build from a pulled base. On the
+classic store those images need no declaring, because the absent
+digest already identifies them.
+
+Declaring skips the inference entirely. Each reference needs an
+explicit tag, a repeated reference is an error, and the workflow
+clears any existing tag of that name before running the command, so
+on a daemon reused between runs a command that builds nothing cannot
+pass its previous image off as fresh output.
+
 The build job exports every built image as a docker archive, so the
 test, SBOM and scan jobs consume the exact bits built. Verify-lane
 and merge-lane builds run single-platform (the runner's native
@@ -219,6 +241,7 @@ platform); the release lane builds multi-platform when the
 | `images`                      | string  | `''`       | JSON image list (see Image Discovery); empty string auto-discovers   |
 | `image_namespace`             | string  | `''`       | Namespace prefixed to image names (e.g. `onap` -> `onap/<name>`)     |
 | `build_command`               | string  | `''`       | Escape hatch: project tooling builds the images (make/mvn/gradle)    |
+| `build_command_images`        | string  | `''`       | Images `build_command` produces; declaring them skips inference      |
 | `build_timeout_minutes`       | number  | `30`       | Timeout for the build job in whole minutes                           |
 | `build_permit_fail`           | boolean | `false`    | Permit image build failures; images that build carry on downstream   |
 | `test_command`                | string  | `''`       | Smoke-test hook; built images load first, IMAGES env carries tags    |
@@ -291,7 +314,8 @@ repositories needing it release through `merge.yaml`.
 
 Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 `images`, `image_namespace`, `build_command`,
-`build_timeout_minutes`, hardening and `gerrit_*` inputs):
+`build_command_images`, `build_timeout_minutes`, hardening and
+`gerrit_*` inputs):
 
 <!-- markdownlint-disable MD013 -->
 
