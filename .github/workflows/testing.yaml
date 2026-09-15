@@ -74,6 +74,10 @@ jobs:
             test_command: ''
             build_permit_egress_traffic: false
             build_permit_fail: false
+            # The single writer of the Grype database cache; every
+            # other leg restores without saving. See grype_cache_db
+            # below.
+            grype_cache_db: 'true'
           - repository: 'lfreleng-actions/test-docker-monorepo'
             ref: 'v0.0.1'
             images: ''
@@ -180,6 +184,16 @@ jobs:
       build_permit_fail: ${{ matrix.build_permit_fail }}
       audit_permit_fail: true
       grype_permit_fail: true
+      # The Grype database cache rotates its key on the database build
+      # time, so exactly one job may write a given prefix. These legs
+      # run in parallel, so leg 1 keeps the entry current and the rest
+      # restore without saving. With all eight writing, creation order
+      # and build order can disagree, and a later run then restores a
+      # staler database than the newest saved. That is not a cosmetic
+      # problem: Grype refuses a database built more than five days
+      # ago.
+      # yamllint disable-line rule:line-length
+      grype_cache_db: ${{ matrix.grype_cache_db || 'restore-only' }}
 
   # The merge lane, end to end, without publishing anything.
   #

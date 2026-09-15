@@ -253,6 +253,7 @@ platform); the release lane builds multi-platform when the
 | `grype_enabled`               | boolean | `true`     | Run the Grype scan; false keeps the SBOMs but skips the scan         |
 | `grype_fail_on`               | string  | `'medium'` | Severity threshold that fails the Grype scan                         |
 | `grype_permit_fail`           | boolean | `false`    | Permit Grype findings without failing the job                        |
+| `grype_cache_db`              | string  | `'true'`   | Grype database cache mode; parallel callers need a single writer     |
 | `harden_runner_egress`        | string  | `'block'`  | Harden-runner egress policy: `block` or `audit`                      |
 | `harden_runner_allowlist`     | string  | (pinned)   | Out-of-band harden-runner allow-list configuration                   |
 | `build_permit_egress_traffic` | boolean | `false`    | Audit egress scoped to the build job (un-enumerable base registries) |
@@ -267,13 +268,27 @@ The workflow takes no secrets. Lint, test and scan failures honour
 the org-wide `NO_BLOCK_AUDIT_FAIL` repository variable as a runtime
 escape hatch alongside the per-call `*_permit_fail` inputs.
 
+`grype_cache_db` decides how the Grype scan uses the Actions cache for
+its vulnerability database. The cache keys rotate on the database
+build time, so one job at most may write a given prefix. A caller
+invoking a lane once needs nothing here. A caller invoking it in
+parallel, a matrix leg per component, should leave one call saving and
+switch the rest to restoring without saving; where two jobs save,
+creation order and build order can disagree, and a restore then
+returns an older database than the newest saved. Grype rejects a
+database built more than five days ago, so a cache that drifts stale
+fails the scan rather than slowing it.
+
+The input's own description names the three modes, and
+`examples/build-test/` shows the parallel arrangement.
+
 ### build-test-release.yaml
 
 Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 `images`, `build_timeout_minutes`, hardening and `gerrit_*` inputs,
 `test_command`/`test_permit_fail`, `lint_enabled`/`lint_permit_fail`
 (and its deprecated `audit_permit_fail` alias), `sbom_enabled`,
-`grype_enabled`/`grype_fail_on`/`grype_permit_fail`):
+`grype_enabled`/`grype_fail_on`/`grype_permit_fail`/`grype_cache_db`):
 
 <!-- markdownlint-disable MD013 -->
 
