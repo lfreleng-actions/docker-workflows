@@ -3,6 +3,25 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # Path-specific configurations.
-# (No ignore rules currently required; add path-scoped ignores here as
-# needed when instantiating this template.)
-paths: {}
+#
+# GitHub added a self-repository reference in July 2026: a 'uses:'
+# value beginning '$/' resolves to the workflow's own repository at
+# the commit already running, with no checkout, and is now the
+# recommended way to compose actions and reusable workflows within a
+# repository.
+#
+#   https://github.blog/changelog/
+#   2026-07-30-reference-same-repository-actions-with-self-repository-syntax/
+#
+# actionlint does not know the form yet and rejects it as malformed.
+# The pattern below suppresses that one message, and only for a value
+# that actually starts '$/': anything else malformed at 'uses:' still
+# fails, so this buys compatibility with the new syntax rather than
+# switching the check off. Remove it once actionlint learns the form.
+#
+# zizmor needs no equivalent: it parses the form from v1.29.0.
+paths:
+  .github/workflows/*.yaml:
+    ignore:
+      # yamllint disable-line rule:line-length
+      - 'reusable workflow call "\$/.+" at "uses" is not following the format'
