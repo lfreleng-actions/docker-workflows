@@ -193,6 +193,21 @@ on:
         required: false
         type: boolean
         default: false
+      grype_cache_db:
+        description: >-
+          How the Grype scan uses the Actions cache for the
+          vulnerability database: 'true' restores and saves,
+          'restore-only' restores but never saves, 'false' disables
+          caching. Cache entries rotate on the database build time, so
+          exactly one job may write a given prefix; where a caller
+          invokes this workflow several times in parallel, give one
+          call 'true' and the rest 'restore-only'. With several
+          writers, creation order and build order can disagree, and a
+          restore then returns an older database than the newest
+          saved.
+        required: false
+        type: string
+        default: 'true'
 
       # --- Runner hardening ---
       harden_runner_egress:
@@ -1405,7 +1420,7 @@ jobs:
       - name: 'Grype audit SBOMs'
         id: grype-audit
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/grype-scan-action@87fd7bdad7f0809af58108e65f60debc244df348  # v0.0.2
+        uses: lfreleng-actions/grype-scan-action@ee8d637c2324bbb84ae583abc95b56c9c4d078ee  # v0.1.0
         with:
           sbom: 'sbom-cyclonedx-*.json'
           fail-on: ${{ inputs.grype_fail_on }}
@@ -1414,4 +1429,5 @@ jobs:
           # yamllint disable-line rule:line-length
           artifact-name: grype-scan-results-${{ needs.docker-metadata.outputs.build_id }}
           retention-days: '45'
+          cache-db: ${{ inputs.grype_cache_db }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
