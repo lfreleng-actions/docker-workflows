@@ -58,6 +58,17 @@ jobs:
     #   sbom_enabled: true            # false skips image SBOM generation
     #   grype_enabled: true           # false skips the Grype scan only
     #   grype_fail_on: 'medium'       # Grype severity gate
+    #   grype_cache_db: 'true'        # Grype database cache: 'true'
+    #                                 # restores and saves, 'restore-only'
+    #                                 # restores but never saves, 'false'
+    #                                 # disables it. Calling this workflow
+    #                                 # more than once in parallel? Give one
+    #                                 # call 'true' and the rest
+    #                                 # 'restore-only': the cache key rotates
+    #                                 # on the database build time, and two
+    #                                 # writers can leave a restore returning
+    #                                 # an older database than the newest
+    #                                 # saved.
     #   harden_runner_egress: 'block' # 'block' (default) or 'audit'
     #   build_permit_egress_traffic: false  # audit egress for build job only
     #                                 # (third-party base image registries)
