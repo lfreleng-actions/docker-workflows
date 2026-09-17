@@ -414,6 +414,9 @@ jobs:
           IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
           BUILD_COMMAND: ${{ inputs.build_command }}
           BUILD_COMMAND_IMAGES: ${{ inputs.build_command_images }}
+          # This lane builds for the runner's platform only; declared
+          # so the step body stays identical across the three lanes
+          PLATFORMS: ''
         run: |
           # Resolve the image list: an explicit 'images' input wins;
           # otherwise walk the estate-observed Dockerfile locations.
@@ -504,11 +507,14 @@ jobs:
             exit 1
           fi
           if [ "${count}" -eq 0 ]; then
-            # The build_command escape hatch builds images with
-            # project tooling, and jib or a Gradle plugin synthesises
-            # an image without a Dockerfile to find, so an empty
-            # discovery result is not an error here — the build job
-            # enumerates whatever the command created
+            # Reached in the lanes offering the build_command escape
+            # hatch, when the caller supplied one. Project tooling
+            # such as jib or a Gradle plugin synthesises an image
+            # with no Dockerfile to find, so an empty discovery
+            # result is not an error there; the build job enumerates
+            # whatever the command created. A lane without the hatch
+            # passes an empty BUILD_COMMAND and has already exited
+            # above.
             echo "::notice::No Dockerfiles discovered under" \
               "'${PATH_PREFIX}'; build_command builds the images"
           fi
@@ -537,10 +543,15 @@ jobs:
           # to the newest match, so a downstream job would silently
           # consume another leg's images. Hash the distinguishing
           # inputs into a stable per-leg id.
-          build_id=$(printf '%s|%s|%s|%s|%s|%s' \
+          # Every lane hashes the same field set so this block stays
+          # identical across them; a lane lacking an input passes it
+          # empty. Adding a field can only increase distinctness, and
+          # the id names artifacts within a run rather than keying a
+          # cache across runs, so the values may change freely.
+          build_id=$(printf '%s|%s|%s|%s|%s|%s|%s' \
             "${TARGET_REPOSITORY}" "${PATH_PREFIX}" "${IMAGES_INPUT}" \
             "${IMAGE_NAMESPACE}" "${BUILD_COMMAND}" \
-            "${BUILD_COMMAND_IMAGES}" \
+            "${BUILD_COMMAND_IMAGES}" "${PLATFORMS}" \
             | sha256sum | cut -c1-12)
           echo "build_id=${build_id}" >> "$GITHUB_OUTPUT"
           {

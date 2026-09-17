@@ -583,6 +583,13 @@ jobs:
           TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
           IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
           PLATFORMS: ${{ inputs.platforms }}
+          # This lane deliberately omits the build_command escape
+          # hatch (see the workflow header); the empty values keep
+          # the step body identical across the three lanes, and an
+          # empty BUILD_COMMAND makes an empty discovery an error
+          # here, exactly as before.
+          BUILD_COMMAND: ''
+          BUILD_COMMAND_IMAGES: ''
         run: |
           # Resolve the image list: an explicit 'images' input wins;
           # otherwise walk the estate-observed Dockerfile locations.
@@ -643,8 +650,9 @@ jobs:
           if [ -n "${IMAGES_INPUT}" ]; then
             # Explicit entries whose names collide after
             # normalisation (e.g. API and api) must reject: silently
-            # dropping one would publish only part of the caller's
-            # requested image set
+            # dropping one would build only part of the caller's
+            # requested image set, and the publish lanes reject the
+            # same input — verify must not pass what merge refuses
             dupes=$(jq -r '[.[].name] | group_by(.) |
               map(select(length > 1) | .[0]) | .[]' \
               <<< "${images}")
@@ -666,15 +674,27 @@ jobs:
               <<< "${images}")
           fi
           count=$(jq 'length' <<< "${images}")
-          if [ "${count}" -eq 0 ]; then
+          if [ "${count}" -eq 0 ] && [ -z "${BUILD_COMMAND}" ]; then
             echo "::error::No Dockerfiles found under" \
               "'${PATH_PREFIX}' and no images input provided"
             exit 1
           fi
+          if [ "${count}" -eq 0 ]; then
+            # Reached in the lanes offering the build_command escape
+            # hatch, when the caller supplied one. Project tooling
+            # such as jib or a Gradle plugin synthesises an image
+            # with no Dockerfile to find, so an empty discovery
+            # result is not an error there; the build job enumerates
+            # whatever the command created. A lane without the hatch
+            # passes an empty BUILD_COMMAND and has already exited
+            # above.
+            echo "::notice::No Dockerfiles discovered under" \
+              "'${PATH_PREFIX}'; build_command builds the images"
+          fi
           # Post-sanitisation validation: every name must be a valid
           # Docker repository component (start and end alphanumeric),
-          # so reference construction fails here with a clear message
-          # rather than at build/push time.
+          # so tag construction fails here with a clear message rather
+          # than at build time.
           bad=$(jq -r '.[] | .name |
             select(test("^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$") | not)' \
             <<< "${images}")
@@ -696,9 +716,15 @@ jobs:
           # to the newest match, so a downstream job would silently
           # consume another leg's images. Hash the distinguishing
           # inputs into a stable per-leg id.
-          build_id=$(printf '%s|%s|%s|%s|%s' \
+          # Every lane hashes the same field set so this block stays
+          # identical across them; a lane lacking an input passes it
+          # empty. Adding a field can only increase distinctness, and
+          # the id names artifacts within a run rather than keying a
+          # cache across runs, so the values may change freely.
+          build_id=$(printf '%s|%s|%s|%s|%s|%s|%s' \
             "${TARGET_REPOSITORY}" "${PATH_PREFIX}" "${IMAGES_INPUT}" \
-            "${IMAGE_NAMESPACE}" "${PLATFORMS}" \
+            "${IMAGE_NAMESPACE}" "${BUILD_COMMAND}" \
+            "${BUILD_COMMAND_IMAGES}" "${PLATFORMS}" \
             | sha256sum | cut -c1-12)
           echo "build_id=${build_id}" >> "$GITHUB_OUTPUT"
           {

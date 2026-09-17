@@ -450,6 +450,9 @@ jobs:
           IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
           BUILD_COMMAND: ${{ inputs.build_command }}
           BUILD_COMMAND_IMAGES: ${{ inputs.build_command_images }}
+          # This lane builds for the runner's platform only; declared
+          # so the step body stays identical across the three lanes
+          PLATFORMS: ''
         run: |
           # Resolve the image list: an explicit 'images' input wins;
           # otherwise walk the estate-observed Dockerfile locations.
@@ -510,8 +513,9 @@ jobs:
           if [ -n "${IMAGES_INPUT}" ]; then
             # Explicit entries whose names collide after
             # normalisation (e.g. API and api) must reject: silently
-            # dropping one would publish only part of the caller's
-            # requested image set
+            # dropping one would build only part of the caller's
+            # requested image set, and the publish lanes reject the
+            # same input — verify must not pass what merge refuses
             dupes=$(jq -r '[.[].name] | group_by(.) |
               map(select(length > 1) | .[0]) | .[]' \
               <<< "${images}")
@@ -539,11 +543,14 @@ jobs:
             exit 1
           fi
           if [ "${count}" -eq 0 ]; then
-            # The build_command escape hatch builds images with
-            # project tooling (possibly from nonstandard/generated
-            # Dockerfiles), so an empty discovery result is not an
-            # error — the build job enumerates what the command
-            # creates
+            # Reached in the lanes offering the build_command escape
+            # hatch, when the caller supplied one. Project tooling
+            # such as jib or a Gradle plugin synthesises an image
+            # with no Dockerfile to find, so an empty discovery
+            # result is not an error there; the build job enumerates
+            # whatever the command created. A lane without the hatch
+            # passes an empty BUILD_COMMAND and has already exited
+            # above.
             echo "::notice::No Dockerfiles discovered under" \
               "'${PATH_PREFIX}'; build_command builds the images"
           fi
@@ -566,16 +573,21 @@ jobs:
           echo "image_count=${count}" >> "$GITHUB_OUTPUT"
           # Artifact names must be unique per workflow-call invocation:
           # matrix legs calling this workflow in parallel would
-          # otherwise collide on the docker-archives name. Duplicates
-          # are not rejected or merged: each upload is kept as its own
-          # artifact and download-artifact resolves a name to the
-          # newest match, so a downstream job would silently consume
-          # another leg's images. Hash the distinguishing inputs into
-          # a stable per-leg id.
-          build_id=$(printf '%s|%s|%s|%s|%s|%s' \
+          # otherwise collide on the docker-archives/sbom-files names.
+          # Duplicates are not rejected or merged: each upload is kept
+          # as its own artifact and download-artifact resolves a name
+          # to the newest match, so a downstream job would silently
+          # consume another leg's images. Hash the distinguishing
+          # inputs into a stable per-leg id.
+          # Every lane hashes the same field set so this block stays
+          # identical across them; a lane lacking an input passes it
+          # empty. Adding a field can only increase distinctness, and
+          # the id names artifacts within a run rather than keying a
+          # cache across runs, so the values may change freely.
+          build_id=$(printf '%s|%s|%s|%s|%s|%s|%s' \
             "${TARGET_REPOSITORY}" "${PATH_PREFIX}" "${IMAGES_INPUT}" \
             "${IMAGE_NAMESPACE}" "${BUILD_COMMAND}" \
-            "${BUILD_COMMAND_IMAGES}" \
+            "${BUILD_COMMAND_IMAGES}" "${PLATFORMS}" \
             | sha256sum | cut -c1-12)
           echo "build_id=${build_id}" >> "$GITHUB_OUTPUT"
           {
