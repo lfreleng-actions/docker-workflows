@@ -13,13 +13,17 @@
 # branch defines, independently of what any checkout puts in the
 # workspace.
 #
-# The build-test-release lane is NOT self-tested here: it requires a
-# signed semver tag-push context, and it creates and promotes GitHub
-# releases and pushes registry images. Instantiating repositories
-# validate it through their own release cycles.
+# Both publish lanes ARE self-tested here, under dry_run, by the two
+# jobs at the end of this file. Neither publishes: they build, audit
+# and test the fixture images, then report the tags, assets and
+# promotion a real run would produce.
 #
-# The merge lane IS self-tested, under dry_run, by the job at the end
-# of this file.
+# What the dry runs cannot reach is the part that only exists once
+# images push: cosign signing, SLSA provenance and per-registry
+# digest capture. Multi-platform assembly is out of reach for the
+# same reason, since a manifest list needs a registry to hold it.
+# Instantiating repositories still prove those through their own
+# release cycles.
 name: 'Testing 🧪'
 
 # yamllint disable-line rule:truthy
@@ -228,3 +232,108 @@ jobs:
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
       dry_run: true
+
+  # The release lane, end to end, without publishing anything.
+  #
+  # dry_run resolves no target registry, so the lane discovers and
+  # builds the fixture images, lints them, generates the image SBOMs,
+  # runs the Grype audit and the tests, then reports the release
+  # assets and the promotion plan -- while creating no draft release,
+  # pushing no image and moving no tag.
+  #
+  # The ref names the tag to validate and release from, because a dry
+  # run has no tag-push context to infer one from. v0.1.0 is not an
+  # arbitrary choice: the lane demands a semver, non-development,
+  # signed tag whose key is registered to a GitHub account, and the
+  # fixture's v0.1.0 is an annotated tag carrying a GitHub-verified
+  # SSH signature. Tag validation therefore runs at full strength
+  # rather than being relaxed for the self-test.
+  #
+  # The sign job skips here by construction: nothing pushed, so there
+  # is no digest to sign or attest. That leaves cosign and SLSA
+  # provenance unproven by this job, which is inherent to a dry run
+  # and noted in the header above.
+  release-dry-run:
+    name: 'Release (dry run)'
+    # GitHub validates a called workflow's job permissions against the
+    # caller's grant before any job starts, and rejects the entire run
+    # when the callee declares more -- a startup failure with no job
+    # and no annotation to explain it. build-test-release.yaml is the
+    # only lane whose jobs declare writes, so this caller has to grant
+    # their union even though a dry run exercises none of it.
+    # 'permissions' accepts no expression, so those declarations
+    # cannot vary with dry_run.
+    #
+    # Every scope below is therefore minted and left unused: the lane
+    # resolves no registry, performs no write, and skips the sign job
+    # for want of a pushed digest. The job does build fixture content
+    # while holding them, which is why the fixture is an org-owned
+    # repository pinned to a signed tag and egress stays in block
+    # mode. Narrowing this needs the lane split into produce and
+    # publish halves; see #28.
+    permissions:
+      # Each scope belongs to a step this dry run skips; see above.
+      # yamllint disable-line rule:line-length
+      contents: write  # tag-validate drafts, attach edits, promote publishes
+      packages: write  # build pushes to GHCR; promote retags 'latest'
+      id-token: write  # sign requests a Sigstore OIDC token
+      attestations: write  # sign attaches SLSA build provenance
+    uses: $/.github/workflows/build-test-release.yaml
+    with:
+      repository: 'lfreleng-actions/test-docker-monorepo'
+      ref: 'v0.1.0'
+      dry_run: true
+      test_command: 'TAG=verify tests/scripts/test_images.sh'
+      # Lint and Grype findings in fixture CONTENT soft-fail, as in
+      # the build-test legs above: this job validates that the
+      # machinery executes, not the hygiene of fixture Dockerfiles.
+      audit_permit_fail: true
+      grype_permit_fail: true
+      # Leg 1 of build-test is the single writer of the Grype
+      # database cache; this job restores without saving. See the
+      # grype_cache_db note there.
+      grype_cache_db: 'restore-only'
+
+  # The same lane on a foreign architecture, to cover the build path
+  # the job above cannot reach.
+  #
+  # The lane picks its buildx driver from the platform count AND from
+  # whether anything publishes. A publishing multi-platform build
+  # needs the docker-container driver to assemble a manifest list,
+  # and its chains resolve through the registry each image just
+  # pushed to. A dry run publishes nowhere, so it builds one platform
+  # and uses the daemon-backed docker driver instead -- otherwise
+  # containerised BuildKit could not see the --load'ed
+  # base-alpine:verify that chain-child builds FROM, and the dry run
+  # would fail for a reason a real release never hits.
+  #
+  # The leg above leaves platforms at the linux/amd64 default and so
+  # never exercises that selection. This one sets linux/arm64: a
+  # single foreign architecture, which takes the same branch a
+  # multi-platform dry run does while costing one emulated build
+  # rather than several.
+  #
+  # Deliberately narrow. Lint, SBOM, Grype and the test command are
+  # off because the leg above already covers them and they are
+  # architecture-independent; what needs proving here is that the
+  # images build under emulation and the FROM chain resolves. The
+  # fixture's chain is the assertion, so it must keep auto-discovery
+  # rather than an explicit image list.
+  release-dry-run-foreign-arch:
+    name: 'Release (dry run, arm64)'
+    permissions:
+      # Matches the grant above; see the rationale on that job.
+      # yamllint disable-line rule:line-length
+      contents: write  # tag-validate drafts, attach edits, promote publishes
+      packages: write  # build pushes to GHCR; promote retags 'latest'
+      id-token: write  # sign requests a Sigstore OIDC token
+      attestations: write  # sign attaches SLSA build provenance
+    uses: $/.github/workflows/build-test-release.yaml
+    with:
+      repository: 'lfreleng-actions/test-docker-monorepo'
+      ref: 'v0.1.0'
+      dry_run: true
+      platforms: 'linux/arm64'
+      lint_enabled: false
+      sbom_enabled: false
+      grype_enabled: false

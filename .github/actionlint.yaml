@@ -21,4 +21,6 @@ paths:
       # yamllint disable-line rule:line-length
       - 'reusable workflow call "\$/\.github/workflows/build\-test\.yaml" at "uses" is not following the format'
       # yamllint disable-line rule:line-length
+      - 'reusable workflow call "\$/\.github/workflows/build\-test\-release\.yaml" at "uses" is not following the format'
+      # yamllint disable-line rule:line-length
       - 'reusable workflow call "\$/\.github/workflows/merge\.yaml" at "uses" is not following the format'
