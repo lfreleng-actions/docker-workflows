@@ -1618,6 +1618,27 @@ jobs:
       - 'docker-metadata'
       - 'build'
       - 'tests'
+    # A skipped job taints everything downstream of it, however far
+    # away, and an intermediate job that rescues itself does not
+    # clear the taint for its own dependents. So when lint_enabled,
+    # sbom_enabled or grype_enabled is false, this job is skipped
+    # even though all four jobs it needs have succeeded: tests
+    # survives the skip with !cancelled() and passes, and this job
+    # is skipped anyway.
+    #
+    # Without this guard a release with any audit disabled published
+    # its images and then stopped: no artefacts attached, and
+    # promote-release skipped in turn on its attach-artefacts
+    # result, leaving the release a draft with every job green.
+    #
+    # Checking build and tests explicitly keeps the gating intact.
+    # tests is skipped rather than failed when an audit it requires
+    # fails, so requiring success here still blocks a release whose
+    # audits did not pass, while allowing one whose audits were
+    # never asked for. tag-validate and docker-metadata need no
+    # check of their own: build cannot succeed unless both did.
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.tests.result == 'success' }}
     permissions:
       contents: write  # IMPORTANT: needed to edit release, attach artefacts
     timeout-minutes: 5
