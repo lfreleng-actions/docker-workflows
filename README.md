@@ -183,12 +183,19 @@ tags each built image both as `<namespace>/<name>:verify` and as
 one `images` input travels between the verify, merge and release
 lanes unchanged. Two cases sit outside that guarantee:
 `build_command` hands back whatever tags the project's own tooling
-created, and a release build whose `platforms` input is anything
-other than `linux/amd64` — one foreign architecture as readily as a
-list of them — runs on the isolated `docker-container` driver, which
-cannot see daemon-local tags at all. Chains in either case must
-reference registry-resolvable images or take the base as a
+created, and a **publishing** release build whose `platforms` input
+is anything other than `linux/amd64` — one foreign architecture as
+readily as a list of them — runs on the isolated `docker-container`
+driver, which cannot see daemon-local tags at all. Chains in either
+case must reference registry-resolvable images or take the base as a
 `build_args` value.
+
+The qualifier matters for dry runs. A release build that publishes
+nowhere produces one platform rather than a manifest list, so it
+runs on the daemon-backed `docker` driver whatever `platforms`
+asks for, and daemon-local chains resolve as they do elsewhere. A
+dry run of a non-native project thus behaves like the verify lane
+rather than like a publishing multi-platform release.
 
 The release lane skips the namespaced alias when `image_namespace`
 is not a usable reference prefix (`-team` or `team.`, say), rather
@@ -299,6 +306,7 @@ Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 | `dockerhub_publish` | boolean | `false`         | Publish to Docker Hub as `docker.io/<image_namespace>/<name>`       |
 | `image_namespace`   | string  | `''`            | Docker Hub namespace (required when `dockerhub_publish` is true)    |
 | `push_latest`       | boolean | `false`         | Apply the `latest` tag per image at promotion, after all gates pass |
+| `dry_run`           | boolean | `false`         | Run the lane without publishing: no push, release, promotion or tag |
 | `attestations`      | boolean | `true`          | SLSA build provenance per pushed image (by digest)                  |
 | `sigstore_sign`     | boolean | `true`          | Sigstore cosign keyless signature per pushed image (by digest)      |
 
@@ -448,9 +456,26 @@ auto-discovery, explicit image lists with per-image build arguments,
 image namespacing, the `build_command` escape hatch and the
 `test_command` hook.
 
-The publish lanes are not self-tested on pull requests:
-`build-test-release.yaml` requires a signed tag-push context (and
-pushes registry images), and `merge.yaml` requires a merged-commit
-context plus a `version.properties` file the fixtures lack.
-Instantiating repositories exercise those lanes through their own
-release/merge cycles.
+Both publish lanes are also self-tested, under `dry_run`. Neither
+publishes: they build, audit and test the fixture images, then
+report the tags, assets and promotion a real run would produce.
+`merge.yaml` runs against the fixture commit that adds a release
+descriptor, and `build-test-release.yaml` against its signed `v0.1.0`
+tag, so tag validation applies at full strength.
+
+A dry run cannot reach the behaviour that appears after images
+push: cosign signing, SLSA provenance, per-registry digest capture,
+the crane promotion itself, and multi-platform manifest assembly,
+which needs a registry to hold the list. Instantiating repositories
+still prove those through their own release and merge cycles.
+
+One consequence worth knowing before calling `build-test-release.yaml`
+with `dry_run`, self-test or otherwise: GitHub checks a called
+workflow's job permissions against the caller's grant before any job
+starts, and rejects the whole run when the callee asks for more.
+Because `permissions:` takes no expression, the lane's declarations
+cannot shrink for a dry run, so a caller must grant `contents`,
+`packages`, `id-token` and `attestations` write even though a dry run
+uses none of them. `merge.yaml` needs no more than `contents: read`,
+because it authenticates to registries with a loaded credential
+rather than `GITHUB_TOKEN`.
