@@ -1223,13 +1223,32 @@ jobs:
                 # Single-platform path: the daemon records
                 # repo@digest locally when it pushes, so this reads
                 # the digest of our own push, not the registry's
-                # current tag state
+                # current tag state.
+                #
+                # Docker reports RepoDigests in familiar form: Docker
+                # Hub's docker.io/ or index.docker.io/ prefix dropped,
+                # then library/ for a single-component name, so
+                # docker.io/onap/x reads onap/x and
+                # docker.io/library/x reads x. Both sides normalise
+                # before comparing, or no Docker Hub push would ever
+                # resolve. Other registries (ghcr.io, or docker.io
+                # with a port) keep their names and match exactly.
                 digest=$(docker image inspect \
                   --format \
                   '{{range .RepoDigests}}{{println .}}{{end}}' \
                   "${local_tag}" \
-                  | awk -F'@' -v repo="${repo}" \
-                    '$1 == repo {print $2; exit}')
+                  | awk -F'@' -v repo="${repo}" '
+                    function familiar(r) {
+                      if (index(r, "docker.io/") == 1)
+                        r = substr(r, 11)
+                      else if (index(r, "index.docker.io/") == 1)
+                        r = substr(r, 17)
+                      if (index(r, "library/") == 1 &&
+                        index(substr(r, 9), "/") == 0)
+                        r = substr(r, 9)
+                      return r
+                    }
+                    familiar($1) == familiar(repo) {print $2; exit}')
               fi
               if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
                 echo "::error::Failed to resolve digest for" \
