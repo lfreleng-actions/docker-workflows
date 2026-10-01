@@ -469,6 +469,11 @@ the crane promotion itself, and multi-platform manifest assembly,
 which needs a registry to hold the list. Instantiating repositories
 still prove those through their own release and merge cycles.
 
+The single-platform digest capture is also tested in isolation:
+`tests/test_release_digest.sh` extracts the release lane's build
+script and runs it against a fake `docker`, checking that each
+pushed repository resolves its own digest, Docker Hub's included.
+
 One consequence worth knowing before calling `build-test-release.yaml`
 with `dry_run`, self-test or otherwise: GitHub checks a called
 workflow's job permissions against the caller's grant before any job

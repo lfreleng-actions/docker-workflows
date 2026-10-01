@@ -13,17 +13,18 @@
 # branch defines, independently of what any checkout puts in the
 # workspace.
 #
-# Both publish lanes ARE self-tested here, under dry_run, by the two
-# jobs at the end of this file. Neither publishes: they build, audit
-# and test the fixture images, then report the tags, assets and
-# promotion a real run would produce.
+# Both publish lanes ARE self-tested here, under dry_run, by the
+# merge-dry-run and release-dry-run jobs. Neither publishes: they
+# build, audit and test the fixture images, then report the tags,
+# assets and promotion a real run would produce.
 #
 # What the dry runs cannot reach is the part that only exists once
 # images push: cosign signing, SLSA provenance and per-registry
 # digest capture. Multi-platform assembly is out of reach for the
 # same reason, since a manifest list needs a registry to hold it.
 # Instantiating repositories still prove those through their own
-# release cycles.
+# release cycles. The single-platform digest capture is also tested
+# in isolation, against a fake docker, by the last job in this file.
 name: 'Testing 🧪'
 
 # yamllint disable-line rule:truthy
@@ -337,3 +338,35 @@ jobs:
       lint_enabled: false
       sbom_enabled: false
       grype_enabled: false
+
+  # The release lane's single-platform digest capture, which the dry
+  # runs above cannot reach because nothing pushes. The test extracts
+  # the build step's script from the workflow and runs it against a
+  # fake docker, checking that each pushed repository resolves its
+  # own digest from RepoDigests: Docker Hub in the familiar form
+  # docker prints it (#96), other registries matched exactly.
+  release-digest:
+    name: 'Release digest resolution'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
+        with:
+          config: '@ec0736244fc776e326283c6af6840e30f316f63c'  # v0.16.1
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Test release digest resolution'
+        run: tests/test_release_digest.sh
