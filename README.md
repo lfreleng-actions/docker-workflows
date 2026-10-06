@@ -158,9 +158,10 @@ check-release -> release-publish
 
 ## Image Discovery
 
-With no `images` input, the docker-metadata job walks `path_prefix`
-for Dockerfiles at the locations observed across the LF project
-estate:
+The docker-metadata job resolves the image list with
+[docker-build-matrix-action](https://github.com/lfreleng-actions/docker-build-matrix-action).
+With no `images` input it walks `path_prefix` for Dockerfiles at the
+locations observed across the LF project estate:
 
 1. `Dockerfile` (repository root)
 2. `docker/Dockerfile`
@@ -197,9 +198,10 @@ asks for, and daemon-local chains resolve as they do elsewhere. A
 dry run of a non-native project thus behaves like the verify lane
 rather than like a publishing multi-platform release.
 
-The release lane skips the namespaced alias when `image_namespace`
-is not a usable reference prefix (`-team` or `team.`, say), rather
-than failing a release over a value it never publishes under.
+Every lane checks `image_namespace` against Docker's reference
+grammar during discovery, so a value Docker refuses in a tag
+(`-team` or `team.`, say) fails the docker-metadata job before
+anything builds.
 
 Where `build_command` builds the images, discovery finding no
 Dockerfile is not an error: jib and Gradle plugins synthesise images
