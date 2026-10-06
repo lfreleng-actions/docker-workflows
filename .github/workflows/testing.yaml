@@ -340,11 +340,13 @@ jobs:
       grype_enabled: false
 
   # The release lane's single-platform digest capture, which the dry
-  # runs above cannot reach because nothing pushes. The test extracts
-  # the build step's script from the workflow and runs it against a
-  # fake docker, checking that each pushed repository resolves its
-  # own digest from RepoDigests: Docker Hub in the familiar form
-  # docker prints it (#96), other registries matched exactly.
+  # runs above cannot reach because nothing pushes. The test runs the
+  # build job's version and registries step scripts, extracted from
+  # the workflow, then docker-build-images-action at the commit the
+  # workflow pins, against a fake docker, checking that each pushed
+  # repository resolves its own digest from RepoDigests: Docker Hub in
+  # the familiar form docker prints it (#96), other registries matched
+  # exactly.
   release-digest:
     name: 'Release digest resolution'
     permissions:

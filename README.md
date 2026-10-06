@@ -172,8 +172,9 @@ Image names derive from the repository or directory name. Pass the
 `images` JSON input to override discovery; its array order is the
 build order, which also serves same-repository FROM chains (an image
 can build `FROM <earlier-image>:verify`). Each entry takes `name` and
-`context` (required), plus optional `dockerfile`, `target` and
-`build_args` (a list of KEY=VALUE strings). Names in an explicit
+`context` (required), plus optional `dockerfile`, `target`,
+`build_args` (a list of KEY=VALUE strings) and `build_flags` (a list
+of extra `docker buildx build` arguments). Names in an explicit
 `images` input must stay distinct once normalised to the Docker
 repository character set; auto-discovery instead keeps the first of
 any duplicate pair.
@@ -182,21 +183,20 @@ With `image_namespace` set, the Dockerfile build path in every lane
 tags each built image both as `<namespace>/<name>:verify` and as
 `<name>:verify`, so a chain resolves whichever form it references and
 one `images` input travels between the verify, merge and release
-lanes unchanged. Two cases sit outside that guarantee:
-`build_command` hands back whatever tags the project's own tooling
-created, and a **publishing** release build whose `platforms` input
-is anything other than `linux/amd64` — one foreign architecture as
-readily as a list of them — runs on the isolated `docker-container`
-driver, which cannot see daemon-local tags at all. Chains in either
-case must reference registry-resolvable images or take the base as a
-`build_args` value.
+lanes unchanged. A **publishing** release build whose `platforms`
+input is anything other than `linux/amd64` — one foreign architecture
+as readily as a list of them — runs on the isolated
+`docker-container` driver, which cannot see daemon-local tags; there
+each later build receives the earlier images by digest through
+`--build-context`, so the same chains still resolve. The exception is
+`build_command`, which hands back whatever tags the project's own
+tooling created; chains built that way must reference
+registry-resolvable images or take the base as a `build_args` value.
 
 The qualifier matters for dry runs. A release build that publishes
 nowhere produces one platform rather than a manifest list, so it
 runs on the daemon-backed `docker` driver whatever `platforms`
-asks for, and daemon-local chains resolve as they do elsewhere. A
-dry run of a non-native project thus behaves like the verify lane
-rather than like a publishing multi-platform release.
+asks for, and daemon-local chains resolve as they do elsewhere.
 
 Every lane checks `image_namespace` against Docker's reference
 grammar during discovery, so a value Docker refuses in a tag
@@ -208,7 +208,7 @@ Dockerfile is not an error: jib and Gradle plugins synthesise images
 without one, and the build job enumerates whatever the command
 created.
 
-That enumeration is inference: the workflow diffs the daemon's image
+That enumeration is inference: the build step diffs the daemon's image
 list around the command and treats a registry digest as evidence that
 an image arrived from a registry instead of a local build. The
 evidence holds under Docker's classic image store, where a local
@@ -219,19 +219,25 @@ and risking an unrelated base reaching the scan or publish jobs.
 
 Declare the output with `build_command_images` in that case, and on
 such a store when the builder stamps a reproducible creation
-timestamp — jib pins it to the Unix epoch — since the workflow then
+timestamp — jib pins it to the Unix epoch — since the build step then
 has nothing left to tell a fresh build from a pulled base. On the
 classic store those images need no declaring, because the absent
 digest already identifies them.
 
 Declaring skips the inference entirely. Each reference needs an
-explicit tag, a repeated reference is an error, and the workflow
+explicit tag, a repeated reference is an error, and the build step
 clears any existing tag of that name before running the command, so
 on a daemon reused between runs a command that builds nothing cannot
 pass its previous image off as fresh output.
 
-The build job exports every built image as a docker archive, so the
-test, SBOM and scan jobs consume the exact bits built. Verify-lane
+The build job builds with
+[docker-build-images-action](https://github.com/lfreleng-actions/docker-build-images-action),
+which sets up buildx (and QEMU for foreign platforms) itself and
+checks every `images` entry before anything builds. It loads images
+into the runner's daemon in the verify and merge lanes, and pushes
+them in the release lane, recording each pushed digest for signing.
+The build job then exports every built image as a docker archive, so
+the test, SBOM and scan jobs consume the exact bits built. Verify-lane
 and merge-lane builds run single-platform (the runner's native
 platform); the release lane builds multi-platform when the
 `platforms` input lists more than one target.
@@ -472,9 +478,12 @@ which needs a registry to hold the list. Instantiating repositories
 still prove those through their own release and merge cycles.
 
 The single-platform digest capture is also tested in isolation:
-`tests/test_release_digest.sh` extracts the release lane's build
-script and runs it against a fake `docker`, checking that each
-pushed repository resolves its own digest, Docker Hub's included.
+`tests/test_release_digest.sh` runs the release lane's version and
+registry steps, extracted from the workflow, and then the build
+action at the commit the lane pins, against a fake `docker`. It
+checks that the steps feed the action the right tags and
+repositories, and that each pushed repository resolves its own
+digest, Docker Hub's included.
 
 One consequence worth knowing before calling `build-test-release.yaml`
 with `dry_run`, self-test or otherwise: GitHub checks a called
