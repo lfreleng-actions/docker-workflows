@@ -19,7 +19,9 @@ through to multi-image monorepos with same-repository FROM chains.
 
 The design research behind this repository, including the ONAP
 container-build census the workflows target, lives in
-[docs/BRIEF.md](docs/BRIEF.md).
+[docs/BRIEF.md](docs/BRIEF.md). A function-by-function comparison
+with the Jenkins container jobs these workflows replace lives in
+[docs/PARITY.md](docs/PARITY.md).
 
 ## Workflow Inventory
 
