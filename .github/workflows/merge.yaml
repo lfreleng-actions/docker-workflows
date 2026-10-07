@@ -73,11 +73,21 @@ on:
         required: false
         type: string
         default: ''
-      image_namespace:
+      namespace_mode:
         description: >-
-          Namespace prefixed to every image name on the registries
-          (e.g. 'onap' publishes <registry>/onap/<name>). Empty
-          applies no namespace.
+          How the namespace prefixed to every image name on the
+          registries resolves: 'none' (no namespace), 'auto' (the
+          lowercased owner of the repository built) or 'manual' (the
+          namespace input). With 'onap', snapshots publish as
+          <registry>/onap/<name> and release promotion copies
+          <registry>/onap/<release-file name>.
+        required: false
+        type: string
+        default: 'none'
+      namespace:
+        description: >-
+          Image namespace for namespace_mode 'manual' (e.g. 'onap' or
+          'onap/so'); an error with any other mode.
         required: false
         type: string
         default: ''
@@ -257,6 +267,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     timeout-minutes: 2
+    outputs:
+      # The effective image namespace; empty for namespace_mode none
+      namespace: ${{ steps.namespace.outputs.namespace }}
     steps:
       - name: 'Validate registry inputs'
         shell: bash
@@ -330,6 +343,54 @@ jobs:
             exit 1
           fi
           echo "Gerrit inputs validated ✅"
+
+      # Resolved once here, the root every job descends from; each
+      # job that names an image reads this job's namespace output
+      - name: 'Resolve image namespace'
+        id: namespace
+        shell: bash
+        env:
+          NAMESPACE_MODE: ${{ inputs.namespace_mode }}
+          NAMESPACE: ${{ inputs.namespace }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
+        run: |
+          # none: no prefix; auto: the lowercased repository owner;
+          # manual: the namespace input
+          case "${NAMESPACE_MODE}" in
+            none) namespace='' ;;
+            auto) namespace="${REPOSITORY%%/*}"; namespace="${namespace,,}" ;;
+            manual) namespace="${NAMESPACE}" ;;
+            *)
+              echo "::error::Invalid namespace_mode '${NAMESPACE_MODE}'" \
+                "(expected none, auto or manual)"
+              exit 1
+              ;;
+          esac
+          if [ "${NAMESPACE_MODE}" != 'manual' ] && [ -n "${NAMESPACE}" ]
+          then
+            echo "::error::namespace '${NAMESPACE}' is set but" \
+              "namespace_mode is '${NAMESPACE_MODE}'; set namespace_mode" \
+              "to 'manual' or clear namespace"
+            exit 1
+          fi
+          if [ "${NAMESPACE_MODE}" = 'manual' ] && [ -z "${NAMESPACE}" ]; then
+            echo "::error::namespace_mode 'manual' requires the namespace input"
+            exit 1
+          fi
+          # Docker's repository path grammar: '/'-separated components,
+          # each runs of lowercase alphanumerics joined by a single '.'
+          # or '_', exactly '__', or one or more '-'
+          component='[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*'
+          if [ -n "${namespace}" ] &&
+            [[ ! "${namespace}" =~ ^${component}(/${component})*$ ]]; then
+            echo "::error::Invalid namespace '${namespace}'" \
+              "(namespace_mode ${NAMESPACE_MODE}): expected '/'-separated" \
+              "components of lowercase alphanumerics joined by a single" \
+              "'.' or '_', exactly '__', or one or more '-'"
+            exit 1
+          fi
+          echo "namespace=${namespace}" >> "${GITHUB_OUTPUT}"
+          echo "Image namespace (${NAMESPACE_MODE}): ${namespace:-<none>} ✅"
 
   repository-metadata:
     name: 'Repository Metadata'
@@ -458,7 +519,7 @@ jobs:
           # when a caller supplies one, matching its checkout step.
           ref: ${{ inputs.gerrit_revision || inputs.ref }}
           gerrit_refspec: ${{ inputs.gerrit_refspec }}
-          image_namespace: ${{ inputs.image_namespace }}
+          image_namespace: ${{ needs.gerrit-validate.outputs.namespace }}
           # With build_command set, an empty discovery is not an
           # error: the build job enumerates what the command created
           build_command: ${{ inputs.build_command }}
@@ -553,7 +614,7 @@ jobs:
 
   build:
     name: 'Docker Build'
-    needs: docker-metadata
+    needs: ['gerrit-validate', 'docker-metadata']
     runs-on: ubuntu-latest
     outputs:
       images: ${{ steps.build.outputs.images }}
@@ -634,7 +695,7 @@ jobs:
         with:
           images: ${{ needs.docker-metadata.outputs.images_json }}
           path_prefix: ${{ inputs.path_prefix }}
-          image_namespace: ${{ inputs.image_namespace }}
+          image_namespace: ${{ needs.gerrit-validate.outputs.namespace }}
           build_command: ${{ inputs.build_command }}
           build_command_images: ${{ inputs.build_command_images }}
 
@@ -670,6 +731,7 @@ jobs:
     name: 'Publish Snapshot'
     runs-on: ubuntu-latest
     needs:
+      - 'gerrit-validate'
       - 'resolve-version'
       - 'docker-metadata'
       - 'build'
@@ -828,7 +890,7 @@ jobs:
           IMAGES: ${{ needs.build.outputs.images }}
           VERSION: ${{ needs.resolve-version.outputs.version }}
           SNAPSHOT_REGISTRY: ${{ inputs.snapshot_registry }}
-          IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
+          IMAGE_NAMESPACE: ${{ needs.gerrit-validate.outputs.namespace }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           # Retag the built images with the LF snapshot/staging tag
@@ -1140,6 +1202,7 @@ jobs:
     name: 'Promote Release'
     runs-on: ubuntu-latest
     needs:
+      - 'gerrit-validate'
       - 'check-release'
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.check-release.outputs.has_release == 'true' }}
@@ -1309,27 +1372,40 @@ jobs:
           PULL_REGISTRY: ${{ needs.check-release.outputs.pull_registry || inputs.snapshot_registry }}
           # yamllint disable-line rule:line-length
           PUSH_REGISTRY: ${{ needs.check-release.outputs.push_registry || inputs.release_registry }}
+          IMAGE_NAMESPACE: ${{ needs.gerrit-validate.outputs.namespace }}
           PUSH_LATEST: ${{ inputs.push_latest }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           # Registry-side promotion of every container named by the
-          # release file: staged name:version on the pull registry
-          # copies to name:release-tag on the push registry. The
-          # descriptor's name is the full repository path below the
-          # registry (the LF self-release schema, e.g.
-          # onap/ccsdk-odlsli-alpine-image), so no namespace applies
-          # here — re-adding image_namespace would double-prefix
-          # paths the snapshot publish already namespaced. crane
-          # copies manifests as-is, so multi-architecture manifest
-          # lists survive the promotion. Two phases: every copy
-          # completes before any mutable latest tag moves, so a
-          # failing copy never leaves a partially-latest release.
-          declare -a promoted=()
+          # release file: staged <ns>/name:version on the pull
+          # registry copies to <ns>/name:release-tag on the push
+          # registry, whichever registries the release file chose.
+          # Release-file names are relative to the namespace (ONAP's
+          # carry no onap/ prefix, some carry sub-paths such as
+          # so/sdnc-adapter), matching global-jjb's release-job.sh
+          # <registry>/<umbrella>/<name>, and the snapshot publish
+          # above namespaces the same way. crane copies manifests
+          # as-is, so multi-architecture manifest lists survive the
+          # promotion. Two phases: every copy completes before any
+          # mutable latest tag moves, so a failing copy never leaves
+          # a partially-latest release.
+          declare -a promoted=() paths=()
           while IFS= read -r container; do
             name=$(jq -r '.name' <<< "${container}")
             version=$(jq -r '.version' <<< "${container}")
-            src="${PULL_REGISTRY}/${name}:${version}"
-            dst="${PUSH_REGISTRY}/${name}:${RELEASE_TAG}"
+            path="${name}"
+            if [[ -n "${IMAGE_NAMESPACE}" &&
+              "${name}" == "${IMAGE_NAMESPACE}/"* ]]; then
+              echo "::notice::Release-file name '${name}' already" \
+                "starts with '${IMAGE_NAMESPACE}/' and is kept as-is;" \
+                "names are relative to the namespace, so it is" \
+                "probably double-prefixed"
+            elif [ -n "${IMAGE_NAMESPACE}" ]; then
+              path="${IMAGE_NAMESPACE}/${name}"
+            fi
+            paths+=("${path}")
+            src="${PULL_REGISTRY}/${path}:${version}"
+            dst="${PUSH_REGISTRY}/${path}:${RELEASE_TAG}"
             if [ "${DRY_RUN}" = 'true' ]; then
               echo "Dry run: would copy ${src} -> ${dst}"
             else
@@ -1340,15 +1416,15 @@ jobs:
             promoted+=("${dst}")
           done < <(jq -c '.[]' <<< "${CONTAINERS}")
           if [ "${PUSH_LATEST}" = 'true' ]; then
-            while IFS= read -r name; do
-              dst="${PUSH_REGISTRY}/${name}:${RELEASE_TAG}"
+            for path in "${paths[@]}"; do
+              dst="${PUSH_REGISTRY}/${path}:${RELEASE_TAG}"
               if [ "${DRY_RUN}" = 'true' ]; then
                 echo "Dry run: would tag ${dst} as latest"
               else
                 crane tag "${dst}" latest
               fi
-              promoted+=("${PUSH_REGISTRY}/${name}:latest")
-            done < <(jq -r '.[] | .name' <<< "${CONTAINERS}")
+              promoted+=("${PUSH_REGISTRY}/${path}:latest")
+            done
           fi
           {
             echo "## Release Promotion"

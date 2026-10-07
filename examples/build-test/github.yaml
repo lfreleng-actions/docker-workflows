@@ -47,7 +47,8 @@ jobs:
     #   images: ''                    # JSON image list; empty auto-discovers
     #                                 # Dockerfiles (root, docker/,
     #                                 # src/main/docker/, per-image dirs)
-    #   image_namespace: ''           # e.g. 'onap' -> onap/<name>
+    #   namespace_mode: 'none'        # none, auto (repo owner) or manual
+    #   namespace: ''                 # manual only, e.g. 'onap' -> onap/<name>
     #   build_command: ''             # escape hatch: project tooling builds
     #                                 # the images (make/mvn/gradle/script)
     #   test_command: ''              # smoke-test hook; built images load

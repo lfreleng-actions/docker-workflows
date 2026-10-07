@@ -142,7 +142,8 @@ jobs:
       # gerrit_url falls back to the GERRIT_URL repository variable.
       # Optional Docker tuning; empty values auto-discover Dockerfiles:
       # images: ''                    # JSON image list + build order
-      # image_namespace: ''           # e.g. 'onap' -> onap/<name>
+      # namespace_mode: 'none'        # none, auto (repo owner) or manual
+      # namespace: ''                 # manual only, e.g. 'onap' -> onap/<name>
       # build_command: ''             # escape hatch: project tooling builds
       # test_command: ''              # smoke-test hook (IMAGES env = tags)
       # build_permit_egress_traffic: false  # audit egress for build job

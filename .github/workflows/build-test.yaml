@@ -69,10 +69,19 @@ on:
         required: false
         type: string
         default: ''
-      image_namespace:
+      namespace_mode:
         description: >-
-          Namespace prefixed to every image name (e.g. 'onap' tags
-          images as onap/<name>). Empty applies no namespace.
+          How the namespace prefixed to every image name resolves:
+          'none' (no namespace), 'auto' (the lowercased owner of the
+          repository built) or 'manual' (the namespace input). With
+          'onap', images tag as onap/<name>.
+        required: false
+        type: string
+        default: 'none'
+      namespace:
+        description: >-
+          Image namespace for namespace_mode 'manual' (e.g. 'onap' or
+          'onap/so'); an error with any other mode.
         required: false
         type: string
         default: ''
@@ -271,6 +280,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     timeout-minutes: 2
+    outputs:
+      # The effective image namespace; empty for namespace_mode none
+      namespace: ${{ steps.namespace.outputs.namespace }}
     steps:
       - name: 'Require Gerrit project, branch and URL'
         if: inputs.gerrit_refspec != ''
@@ -299,6 +311,54 @@ jobs:
             exit 1
           fi
           echo "Gerrit inputs validated ✅"
+
+      # Resolved once here, the root every job descends from; each
+      # job that names an image reads this job's namespace output
+      - name: 'Resolve image namespace'
+        id: namespace
+        shell: bash
+        env:
+          NAMESPACE_MODE: ${{ inputs.namespace_mode }}
+          NAMESPACE: ${{ inputs.namespace }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
+        run: |
+          # none: no prefix; auto: the lowercased repository owner;
+          # manual: the namespace input
+          case "${NAMESPACE_MODE}" in
+            none) namespace='' ;;
+            auto) namespace="${REPOSITORY%%/*}"; namespace="${namespace,,}" ;;
+            manual) namespace="${NAMESPACE}" ;;
+            *)
+              echo "::error::Invalid namespace_mode '${NAMESPACE_MODE}'" \
+                "(expected none, auto or manual)"
+              exit 1
+              ;;
+          esac
+          if [ "${NAMESPACE_MODE}" != 'manual' ] && [ -n "${NAMESPACE}" ]
+          then
+            echo "::error::namespace '${NAMESPACE}' is set but" \
+              "namespace_mode is '${NAMESPACE_MODE}'; set namespace_mode" \
+              "to 'manual' or clear namespace"
+            exit 1
+          fi
+          if [ "${NAMESPACE_MODE}" = 'manual' ] && [ -z "${NAMESPACE}" ]; then
+            echo "::error::namespace_mode 'manual' requires the namespace input"
+            exit 1
+          fi
+          # Docker's repository path grammar: '/'-separated components,
+          # each runs of lowercase alphanumerics joined by a single '.'
+          # or '_', exactly '__', or one or more '-'
+          component='[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*'
+          if [ -n "${namespace}" ] &&
+            [[ ! "${namespace}" =~ ^${component}(/${component})*$ ]]; then
+            echo "::error::Invalid namespace '${namespace}'" \
+              "(namespace_mode ${NAMESPACE_MODE}): expected '/'-separated" \
+              "components of lowercase alphanumerics joined by a single" \
+              "'.' or '_', exactly '__', or one or more '-'"
+            exit 1
+          fi
+          echo "namespace=${namespace}" >> "${GITHUB_OUTPUT}"
+          echo "Image namespace (${NAMESPACE_MODE}): ${namespace:-<none>} ✅"
 
   repository-metadata:
     name: 'Repository Metadata'
@@ -421,7 +481,7 @@ jobs:
           # This lane checks out inputs.ref directly.
           ref: ${{ inputs.ref }}
           gerrit_refspec: ${{ inputs.gerrit_refspec }}
-          image_namespace: ${{ inputs.image_namespace }}
+          image_namespace: ${{ needs.gerrit-validate.outputs.namespace }}
           # With build_command set, an empty discovery is not an
           # error: the build job enumerates what the command created
           build_command: ${{ inputs.build_command }}
@@ -429,7 +489,7 @@ jobs:
 
   build:
     name: 'Docker Build'
-    needs: docker-metadata
+    needs: ['gerrit-validate', 'docker-metadata']
     runs-on: ubuntu-latest
     outputs:
       images: ${{ steps.build.outputs.images }}
@@ -504,7 +564,7 @@ jobs:
         with:
           images: ${{ needs.docker-metadata.outputs.images_json }}
           path_prefix: ${{ inputs.path_prefix }}
-          image_namespace: ${{ inputs.image_namespace }}
+          image_namespace: ${{ needs.gerrit-validate.outputs.namespace }}
           build_command: ${{ inputs.build_command }}
           build_command_images: ${{ inputs.build_command_images }}
           build_permit_fail: ${{ inputs.build_permit_fail }}

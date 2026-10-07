@@ -52,12 +52,13 @@ jobs:
   # deterministic fixtures. Detail for the subtler cases sits with the
   # leg itself:
   #   - leg 1: test-docker-project — auto-discovery of a single
-  #     Dockerfile under docker/, under full block-mode egress
+  #     Dockerfile under docker/, under full block-mode egress, with
+  #     namespace_mode auto (the lfreleng-actions owner)
   #   - leg 2: test-docker-monorepo — auto-discovery of three
   #     per-image directories, building the same-repository FROM
   #     chain in directory-sort order, plus the test_command hook
   #   - leg 3: explicit 'images' input with per-image build_args,
-  #     image_namespace, and build_permit_egress_traffic plumbing
+  #     namespace_mode manual, and build_permit_egress_traffic plumbing
   #   - leg 4: the build_command escape hatch ('make images'), with
   #     the workflow inferring which images it created
   #   - leg 5: build_permit_fail; one image builds, one names a
@@ -77,7 +78,7 @@ jobs:
           - repository: 'lfreleng-actions/test-docker-project'
             ref: 'v0.1.0'
             images: ''
-            image_namespace: ''
+            namespace_mode: 'auto'
             build_command: ''
             test_command: ''
             build_permit_egress_traffic: false
@@ -89,7 +90,7 @@ jobs:
           - repository: 'lfreleng-actions/test-docker-monorepo'
             ref: 'v0.0.1'
             images: ''
-            image_namespace: ''
+            namespace_mode: 'none'
             build_command: ''
             test_command: 'TAG=verify tests/scripts/test_images.sh'
             build_permit_egress_traffic: false
@@ -98,7 +99,8 @@ jobs:
             ref: 'v0.0.1'
             # yamllint disable-line rule:line-length
             images: '[{"name": "base-alpine", "context": "base-alpine"}, {"name": "chain-child", "context": "chain-child", "build_args": ["BASE_IMAGE=lfreleng/base-alpine:verify"]}, {"name": "util-echo", "context": "util-echo"}]'
-            image_namespace: 'lfreleng'
+            namespace_mode: 'manual'
+            namespace: 'lfreleng'
             build_command: ''
             # yamllint disable-line rule:line-length
             test_command: 'NAMESPACE=lfreleng TAG=verify tests/scripts/test_images.sh'
@@ -107,7 +109,7 @@ jobs:
           - repository: 'lfreleng-actions/test-docker-monorepo'
             ref: 'v0.0.1'
             images: ''
-            image_namespace: ''
+            namespace_mode: 'none'
             build_command: 'make images TAG=verify'
             test_command: 'TAG=verify tests/scripts/test_images.sh'
             build_permit_egress_traffic: false
@@ -116,7 +118,7 @@ jobs:
             ref: 'v0.0.1'
             # yamllint disable-line rule:line-length
             images: '[{"name": "util-echo", "context": "util-echo"}, {"name": "absent-stage", "context": "base-alpine", "target": "no-such-stage"}]'
-            image_namespace: ''
+            namespace_mode: 'none'
             build_command: ''
             test_command: ''
             build_permit_egress_traffic: false
@@ -132,7 +134,8 @@ jobs:
             # cannot build.
             # yamllint disable-line rule:line-length
             images: '[{"name": "base-alpine", "context": "base-alpine"}, {"name": "chain-child", "context": "chain-child", "build_args": ["BASE_IMAGE=base-alpine:verify"]}, {"name": "util-echo", "context": "util-echo"}]'
-            image_namespace: 'lfreleng'
+            namespace_mode: 'manual'
+            namespace: 'lfreleng'
             build_command: ''
             # yamllint disable-line rule:line-length
             test_command: 'NAMESPACE=lfreleng TAG=verify tests/scripts/test_images.sh'
@@ -150,7 +153,7 @@ jobs:
             # downstream jobs.
             path_prefix: 'tests'
             images: ''
-            image_namespace: ''
+            namespace_mode: 'none'
             # yamllint disable-line rule:line-length
             build_command: 'printf "FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce\nCOPY scripts /scripts\n" | docker build -t jibless-demo:verify -f - .'
             test_command: ''
@@ -159,7 +162,7 @@ jobs:
           - repository: 'lfreleng-actions/test-docker-monorepo'
             ref: 'v0.0.1'
             images: ''
-            image_namespace: ''
+            namespace_mode: 'none'
             build_command: 'make images TAG=verify'
             # The three images leg 4 leaves the workflow to infer,
             # named explicitly instead, so the declared branch runs
@@ -183,7 +186,9 @@ jobs:
       # Legs that do not set path_prefix keep the workflow default
       path_prefix: ${{ matrix.path_prefix || '.' }}
       images: ${{ matrix.images }}
-      image_namespace: ${{ matrix.image_namespace }}
+      namespace_mode: ${{ matrix.namespace_mode }}
+      # Only the manual legs set a namespace
+      namespace: ${{ matrix.namespace || '' }}
       build_command: ${{ matrix.build_command }}
       # Legs that do not declare their output leave it to inference
       build_command_images: ${{ matrix.build_command_images || '' }}
@@ -222,6 +227,10 @@ jobs:
   # release descriptor overrides the pull registry and the workflow
   # requires an override to stay on its input's host. Nothing
   # connects to them under dry_run.
+  #
+  # namespace_mode auto namespaces both halves under the fixture's
+  # owner, lfreleng-actions: the snapshot tags and both sides of the
+  # promotion plan, whose release-file names are relative to it.
   merge-dry-run:
     name: 'Merge (dry run)'
     permissions:
@@ -232,6 +241,7 @@ jobs:
       ref: 'v0.1.0'
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
+      namespace_mode: 'auto'
       dry_run: true
 
   # The release lane, end to end, without publishing anything.
@@ -285,6 +295,10 @@ jobs:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
       dry_run: true
+      # A manual namespace aliases the images as lfreleng/<name>;
+      # the test command checks the plain aliases still resolve
+      namespace_mode: 'manual'
+      namespace: 'lfreleng'
       test_command: 'TAG=verify tests/scripts/test_images.sh'
       # Lint and Grype findings in fixture CONTENT soft-fail, as in
       # the build-test legs above: this job validates that the
@@ -374,3 +388,33 @@ jobs:
           persist-credentials: false
       - name: 'Test release digest resolution'
         run: tests/test_release_digest.sh
+
+  # namespace_mode resolution in every lane: the gerrit-validate step
+  # script that resolves the image namespace, extracted from each
+  # workflow and run against valid and invalid mode/namespace pairs,
+  # including the release lane's Docker Hub requirements.
+  namespace-mode:
+    name: 'Namespace mode resolution'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: '@e0e35011ee145321a51d3226f044ec88dfe645b1'  # v0.16.4
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Test namespace_mode resolution'
+        run: tests/test_namespace_mode.sh

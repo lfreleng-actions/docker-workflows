@@ -148,7 +148,7 @@ Unless noted, Jenkins paths below are global-jjb paths.
 | Staging trigger          | Maven: Gerrit comment, optional cron; plain Dockerfile: every merge plus weekly                                                                                                                                                                       | Every merge                                                                                                                                                   | Partial | Decision, section 5  |
 | Tag methods              | `latest`, `stream`, `git-describe`, `yaml-file` (`shell/docker-get-container-tag.sh:27-47`); `yaml-file` reads `container-tag.yaml` from `container-tag-yaml-dir`, else `docker-root`                                                                 | None; one tag set for every repository                                                                                                                        | Gap     | #109, #31, #37       |
 | Release verify           | `gerrit-release-verify` on a change to `releases/*.yaml`: schema check, semver check, pull of each staged image, checkout of `ref`, locally signed tag; votes (`shell/release-job.sh:740-749,557-559,576-578`)                                        | None at verify time. `merge.yaml` `check-release` validates grammar, one file per commit and registry hosts at merge time                                     | Gap     | #36                  |
-| Release promotion        | `docker pull`, `docker tag`, `docker push` to `<registry>/<umbrella>/<name>:<tag>`; umbrella from `GERRIT_URL` (`shell/release-job.sh:520-571`)                                                                                                       | `crane copy` to `<registry>/<name>:<tag>`; keeps manifest lists; `name` treated as the full path                                                              | Partial | #30                  |
+| Release promotion        | `docker pull`, `docker tag`, `docker push` to `<registry>/<umbrella>/<name>:<tag>`; umbrella from `GERRIT_URL` (`shell/release-job.sh:520-571`)                                                                                                       | `crane copy` to `<registry>/<namespace>/<name>:<tag>`; keeps manifest lists; namespace from `namespace_mode`, names relative to it                            | Parity  | #30 (namespace done) |
 | Skip existing release    | Pull of the release tag first; if present, no copy, and a signature check (`shell/release-job.sh:540-556`)                                                                                                                                            | None; `crane copy` overwrites the release tag                                                                                                                 | Gap     | #30                  |
 | Registry overrides       | `container_pull_registry`, `container_push_registry` accepted as given (`shell/release-job.sh:141-151`)                                                                                                                                               | Accepted, but the host must match the workflow input, to protect the credential                                                                               | Exceeds | #36                  |
 | Image signing            | cosign key pair, by digest, on promotion; signs an existing unsigned release on re-merge (`shell/release-job.sh:546-553,567-570`)                                                                                                                     | `merge.yaml` signs nothing. `build-test-release.yaml` signs keyless (OIDC) by digest                                                                          | Gap     | #110                 |
@@ -173,13 +173,13 @@ Unless noted, Jenkins paths below are global-jjb paths.
    (14 in ONAP, plus ODL) tag by `stream`, `latest` or a per-image
    `container-tag.yaml`, and their release files reference those
    tags. The merge lane offers one fixed tag set.
-3. **Release-file names (#30).** Jenkins prepends the umbrella taken
-   from `GERRIT_URL` (`onap`, `opendaylight`) to each release-file
-   name; `merge.yaml` uses the name as the full repository path. An
-   ONAP release file promotes from the wrong path unless
-   both registry inputs end in `/onap`, and the 97 files that
-   override the registries replace that path with a bare host and
-   port.
+3. **Release-file names (#30, addressed).** Jenkins prepends the
+   umbrella taken from `GERRIT_URL` (`onap`, `opendaylight`) to each
+   release-file name. `merge.yaml` used the name as the full
+   repository path, so an ONAP release file promoted from the wrong
+   path. It now applies the lane's image namespace (`namespace_mode`)
+   to both sides of the promotion, after any release-file registry
+   override, as the snapshot publish already did.
 4. **Release verify (#36).** Jenkins rejects a bad release file
    before it merges; the GitHub lanes find out at merge time, after
    the file is on the branch. `docker-release-detect-action` (#36,
@@ -248,9 +248,9 @@ Unless noted, Jenkins paths below are global-jjb paths.
    what that tag pointed at on the day, not on the file's `ref`.
    Decide whether the GitHub lanes accept such files, warn, or
    reject them.
-5. **Release-file name semantics (#30).** Keep names relative to an
-   umbrella namespace, as every existing ONAP file assumes, or treat
-   them as full paths, as `merge.yaml` does now.
+5. **Release-file name semantics (#30, decided).** Names stay
+   relative to an umbrella namespace, as every existing ONAP file
+   assumes; `merge.yaml` applies `namespace_mode` to them.
 
 ## 6. Observed global-jjb defects
 
