@@ -44,6 +44,7 @@ jobs:
       contents: write       # Create the GitHub release / attach assets
       id-token: write       # OIDC for cosign signing and attestations
       attestations: write   # Build provenance attestations
+      artifact-metadata: write  # Attestation storage records
       packages: write       # Push images to GHCR
     # REPLACE the pinned SHA below with a docker-workflows release SHA.
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.

@@ -327,11 +327,19 @@ list reflects and when to extend it.
 
 Optional secrets: `DOCKERHUB_USERNAME`/`DOCKERHUB_PASSWORD` (the
 Docker Hub leg skips with a warning when unset). Callers grant
-`contents: write`, `id-token: write`, `attestations: write` and
-`packages: write`. The `build_command` escape hatch is absent from
+`contents: write`, `id-token: write`, `attestations: write`,
+`artifact-metadata: write` and `packages: write`. The
+`build_command` escape hatch is absent from
 this lane by design: project-tooling builds cannot produce
 multi-platform manifests or per-registry digests reliably, so
 repositories needing it release through `merge.yaml`.
+
+`artifact-metadata: write` lets the provenance step create a storage
+record for each GHCR image, labelled with the release tag, which
+lists the image on the organisation's Linked Artifacts page
+(`https://github.com/orgs/<org>/artifacts`). Storage records need
+an organisation-owned repository; elsewhere the step
+logs a warning and the attestation itself still succeeds.
 
 ### merge.yaml
 
@@ -480,7 +488,9 @@ workflow's job permissions against the caller's grant before any job
 starts, and rejects the whole run when the callee asks for more.
 Because `permissions:` takes no expression, the lane's declarations
 cannot shrink for a dry run, so a caller must grant `contents`,
-`packages`, `id-token` and `attestations` write even though a dry run
-uses none of them. `merge.yaml` needs no more than `contents: read`,
+`packages`, `id-token`, `attestations` and `artifact-metadata` write
+even though a dry run uses none of them. A caller missing any of
+them fails at startup (`startup_failure`) before a job runs.
+`merge.yaml` needs no more than `contents: read`,
 because it authenticates to registries with a loaded credential
 rather than `GITHUB_TOKEN`.

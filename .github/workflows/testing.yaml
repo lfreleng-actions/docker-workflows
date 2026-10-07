@@ -279,6 +279,7 @@ jobs:
       packages: write  # build pushes to GHCR; promote retags 'latest'
       id-token: write  # sign requests a Sigstore OIDC token
       attestations: write  # sign attaches SLSA build provenance
+      artifact-metadata: write  # sign creates attestation storage records
     uses: $/.github/workflows/build-test-release.yaml
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
@@ -329,6 +330,7 @@ jobs:
       packages: write  # build pushes to GHCR; promote retags 'latest'
       id-token: write  # sign requests a Sigstore OIDC token
       attestations: write  # sign attaches SLSA build provenance
+      artifact-metadata: write  # sign creates attestation storage records
     uses: $/.github/workflows/build-test-release.yaml
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
