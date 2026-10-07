@@ -89,7 +89,8 @@ Consequences for callers:
 - **Provenance** pushes to the registry for GHCR images
   (`push-to-registry`) and nowhere else. Elsewhere the attestation
   lives in the GitHub attestation store, which
-  `gh attestation verify` reads.
+  `gh attestation verify` reads (see
+  [Verifying Releases](#verifying-releases)).
 - **Signatures** run against every pushed image. A failure against a
   registry named in `sigstore_sign_required_registries` fails the
   release; elsewhere the image publishes unsigned with a warning, so
@@ -118,6 +119,42 @@ Artifactory instance from this lane, and Model B does not sign at all
 (snapshot tags are transient). Model A publishes to GHCR and Docker
 Hub, so releasing to Artifactory awaits a generic registry target
 there — tracked in #26.
+
+## Verifying Releases
+
+The signing certificate behind every signature and attestation this
+lane makes names the reusable workflow, not the caller, as the
+signer: its SAN (the Build Signer URI) is
+`https://github.com/lfreleng-actions/docker-workflows/.github/workflows/build-test-release.yaml@<ref>`,
+while the calling repository appears as the source repository. This
+is deliberate. A verifier can require that a release came from the
+organisation's sanctioned release lane, not from any workflow that
+happens to live in the caller's repository.
+
+Verification has to name the signer workflow.
+`gh attestation verify --owner <org>` on its own fails with
+`Error: verifying with issuer "sigstore.dev"`, because `--owner`
+also expects the signer workflow to belong to that organisation:
+
+<!-- markdownlint-disable MD013 -->
+
+```bash
+gh attestation verify oci://ghcr.io/<org>/<image>@sha256:<digest> \
+  --owner <org> \
+  --signer-workflow lfreleng-actions/docker-workflows/.github/workflows/build-test-release.yaml
+```
+
+cosign matches the same identity, accepting any ref of the workflow:
+
+```bash
+cosign verify ghcr.io/<org>/<image>@sha256:<digest> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/lfreleng-actions/docker-workflows/\.github/workflows/build-test-release\.yaml@'
+```
+
+<!-- markdownlint-enable MD013 -->
+
+`cosign verify-attestation` takes the same two certificate flags.
 
 ## Job Graph
 
