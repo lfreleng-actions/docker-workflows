@@ -908,20 +908,43 @@ jobs:
           done
           timestamp=$(date -u '+%Y%m%dT%H%M%SZ')
           major_minor="${VERSION%.*}"
-          declare -a pushed=()
+          declare -a pushed=() sources=() names=()
           declare -A seen_names=()
+          # A registry's own path counts towards the 255-character
+          # repository limit; its host does not.
+          prefix=""
+          if [[ "${SNAPSHOT_REGISTRY}" == */* ]]; then
+            prefix="${SNAPSHOT_REGISTRY#*/}/"
+          fi
+          # Two phases, as in promotion: every publish path is resolved
+          # and checked before anything is tagged or pushed, so a
+          # collision or overlong path pushes nothing.
           while IFS= read -r local_tag; do
             # Strip the tag (the last colon-suffix) rather than the
             # first colon match: build_command-produced tags can
-            # carry a registry:port prefix
+            # carry a registry:port prefix. A first component is a
+            # registry host, and dropped, by Docker's rule: it holds
+            # '.', ':' or an uppercase letter, or is localhost.
             repo="${local_tag%:*}"
-            name="${repo##*/}"
-            # Publish names derive from the repository basename, so
-            # distinct images sharing a basename (team-a/api,
-            # team-b/api) would silently overwrite each other on the
-            # snapshot registry. Deduplicate identical images (one
-            # image carrying several local tags) and fail on genuine
-            # collisions.
+            first="${repo%%/*}"
+            if [[ "${repo}" == */* && ( "${first}" == *[.:]* ||
+              "${first}" == *[[:upper:]]* ||
+              "${first}" == localhost ) ]]; then
+              repo="${repo#*/}"
+            fi
+            # The publish path keeps sub-paths and takes the namespace
+            # exactly as promotion resolves a release-file name, so
+            # so/sdnc-adapter stages at <ns>/so/sdnc-adapter, where
+            # promotion pulls it. The build action's load-mode tags
+            # already carry the namespace and stay as they are.
+            name="${repo}"
+            if [[ -n "${IMAGE_NAMESPACE}" &&
+              "${repo}" != "${IMAGE_NAMESPACE}/"* ]]; then
+              name="${IMAGE_NAMESPACE}/${repo}"
+            fi
+            # Deduplicate identical images (one image carrying several
+            # local tags) and fail on distinct images that resolve
+            # to the same publish path.
             image_id=$(docker image inspect \
               --format '{{.Id}}' "${local_tag}")
             if [ -n "${seen_names[${name}]:-}" ]; then
@@ -936,15 +959,21 @@ jobs:
               exit 1
             fi
             seen_names[${name}]="${image_id}"
-            target="${SNAPSHOT_REGISTRY}/${name}"
-            if [ -n "${IMAGE_NAMESPACE}" ]; then
-              target="${SNAPSHOT_REGISTRY}/${IMAGE_NAMESPACE}/${name}"
+            if [ $((${#prefix} + ${#name})) -gt 255 ]; then
+              echo "::error::Repository path '${prefix}${name}'" \
+                "exceeds 255 characters"
+              exit 1
             fi
+            sources+=("${local_tag}")
+            names+=("${name}")
+          done < <(jq -r '.[]' <<< "${IMAGES}")
+          for i in "${!names[@]}"; do
+            target="${SNAPSHOT_REGISTRY}/${names[i]}"
             for tag in \
               "${VERSION}-SNAPSHOT-latest" \
               "${major_minor}-STAGING-latest" \
               "${VERSION}-${timestamp}"; do
-              docker tag "${local_tag}" "${target}:${tag}"
+              docker tag "${sources[i]}" "${target}:${tag}"
               if [ "${DRY_RUN}" = 'true' ]; then
                 echo "Dry run: would push ${target}:${tag}"
               else
@@ -954,7 +983,7 @@ jobs:
               fi
               pushed+=("${target}:${tag}")
             done
-          done < <(jq -r '.[]' <<< "${IMAGES}")
+          done
           {
             echo "## Snapshot Publish"
             echo ""
@@ -1241,10 +1270,21 @@ jobs:
           # <registry>/<umbrella>/<name>, and the snapshot publish
           # above namespaces the same way. crane copies manifests
           # as-is, so multi-architecture manifest lists survive the
-          # promotion. Two phases: every copy completes before any
-          # mutable latest tag moves, so a failing copy never leaves
-          # a partially-latest release.
-          declare -a promoted=() paths=()
+          # promotion. Three phases: every final path is resolved and
+          # checked before anything copies, every copy completes
+          # before any mutable latest tag moves, so a failing copy
+          # never leaves a partially-latest release.
+          declare -a promoted=() paths=() versions=()
+          declare -A seen=()
+          # A registry's own path counts towards the 255-character
+          # repository limit; its host does not.
+          repo_prefix() {
+            if [[ "$1" == */* ]]; then echo "${1#*/}/"; fi
+          }
+          pull_prefix=$(repo_prefix "${PULL_REGISTRY}")
+          push_prefix=$(repo_prefix "${PUSH_REGISTRY}")
+          longest=$((${#pull_prefix} > ${#push_prefix} \
+            ? ${#pull_prefix} : ${#push_prefix}))
           while IFS= read -r container; do
             name=$(jq -r '.name' <<< "${container}")
             version=$(jq -r '.version' <<< "${container}")
@@ -1258,9 +1298,26 @@ jobs:
             elif [ -n "${IMAGE_NAMESPACE}" ]; then
               path="${IMAGE_NAMESPACE}/${name}"
             fi
+            # Names unique in the release file can still collide once
+            # namespaced ('foo' and '<ns>/foo'): the second copy would
+            # overwrite the first at the same release tag.
+            if [ -n "${seen[${path}]:-}" ]; then
+              echo "::error::Release-file names '${seen[${path}]}'" \
+                "and '${name}' both promote to '${path}'"
+              exit 1
+            fi
+            seen[${path}]="${name}"
+            if [ $((longest + ${#path})) -gt 255 ]; then
+              echo "::error::Repository path '${path}' exceeds 255" \
+                "characters with the registry path"
+              exit 1
+            fi
             paths+=("${path}")
-            src="${PULL_REGISTRY}/${path}:${version}"
-            dst="${PUSH_REGISTRY}/${path}:${RELEASE_TAG}"
+            versions+=("${version}")
+          done < <(jq -c '.[]' <<< "${CONTAINERS}")
+          for i in "${!paths[@]}"; do
+            src="${PULL_REGISTRY}/${paths[i]}:${versions[i]}"
+            dst="${PUSH_REGISTRY}/${paths[i]}:${RELEASE_TAG}"
             if [ "${DRY_RUN}" = 'true' ]; then
               echo "Dry run: would copy ${src} -> ${dst}"
             else
@@ -1269,7 +1326,7 @@ jobs:
               echo "::endgroup::"
             fi
             promoted+=("${dst}")
-          done < <(jq -c '.[]' <<< "${CONTAINERS}")
+          done
           if [ "${PUSH_LATEST}" = 'true' ]; then
             for path in "${paths[@]}"; do
               dst="${PUSH_REGISTRY}/${path}:${RELEASE_TAG}"

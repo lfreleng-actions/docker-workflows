@@ -321,7 +321,8 @@ FD.io (`FDio`) or Akraino (`akraino-edge-stack`), should use
 `manual`.
 
 In the merge lane the namespace applies to both halves. Snapshot and
-staging tags publish as `<snapshot_registry>/<namespace>/<name>`, and
+staging tags publish as `<snapshot_registry>/<namespace>/<name>`, where
+`<name>` is the image's full name, sub-paths included, and
 release promotion copies `<pull>/<namespace>/<name>:<version>` to
 `<push>/<namespace>/<name>:<container_release_tag>` (and `latest`),
 where the pull and push registries are the release file's overrides
@@ -331,7 +332,11 @@ sub-paths such as `so/sdnc-adapter`. That is how global-jjb's
 `release-job.sh` builds `<registry>/<umbrella>/<name>`, so the same
 release files promote the same images. A name that already starts
 with `<namespace>/` stays as written, with a notice that it looks
-double-prefixed.
+double-prefixed. Promotion resolves every path before it copies
+anything, and fails when two names resolve to the same path (`foo`
+and `<namespace>/foo`) or a path, with the registry's own path,
+exceeds 255 characters. The snapshot publish checks its paths the
+same way before it pushes anything.
 
 ## Inputs
 

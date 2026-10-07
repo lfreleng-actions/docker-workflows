@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Regression test for namespace_mode resolution. Each lane resolves
+# Regression test for namespace_mode resolution and its use by the
+# merge lane's snapshot publish and promotion. Each lane resolves
 # the image namespace once, in its gerrit-validate job, and every job
 # that names an image reads that job's 'namespace' output. The test
 # extracts that step script from each lane and runs it as GitHub runs
@@ -77,8 +78,108 @@ for lane in build-test merge build-test-release; do
   fi
 done
 
+# Merge-lane promotion: names resolve under the namespace and every
+# final path is checked before anything copies. DRY_RUN keeps crane
+# out of the test.
+# promote_case DESCRIPTION EXPECTED NAMESPACE CONTAINERS_JSON [PUSH]
+# EXPECTED is a 'would copy' line the log must hold, or 'error'
+promote_case() {
+  local status=0
+  env -i PATH="${PATH}" HOME="${work}" \
+    GITHUB_STEP_SUMMARY="${work}/summary" CONTAINERS="$4" \
+    RELEASE_TAG=1.0.0 PULL_REGISTRY=pull.example PUSH_LATEST=false \
+    PUSH_REGISTRY="${5:-push.example}" IMAGE_NAMESPACE="$3" \
+    DRY_RUN=true bash --noprofile --norc -eo pipefail \
+    "${work}/promote.sh" > "${work}/log" 2>&1 || status=$?
+  if { [ "$2" = 'error' ] && [ "${status}" -ne 0 ] &&
+    grep -q '^::error::' "${work}/log" &&
+    ! grep -q 'would copy' "${work}/log"; } ||
+    { [ "$2" != 'error' ] && [ "${status}" -eq 0 ] &&
+      grep -qxF "Dry run: would copy $2" "${work}/log"; }; then
+    echo "ok: promotion: $1"
+  else
+    echo "FAIL: promotion: $1 (exit ${status})"
+    sed 's/^/  | /' "${work}/log"
+    failures=$((failures + 1))
+  fi
+}
+
+lane=merge
+yq -r '.jobs."release-publish".steps[]
+  | select(.name == "Promote staged images") | .run' \
+  "${root}/.github/workflows/merge.yaml" > "${work}/promote.sh"
+long=$(printf 'a%.0s' $(seq 251))
+promote_case 'names resolve under the namespace' \
+  'pull.example/onap/so/api:1.2 -> push.example/onap/so/api:1.0.0' \
+  onap '[{"name":"so/api","version":"1.2"}]'
+promote_case 'a prefixed name is kept as written' \
+  'pull.example/onap/api:1.2 -> push.example/onap/api:1.0.0' \
+  onap '[{"name":"onap/api","version":"1.2"}]'
+promote_case 'names colliding once namespaced fail before copying' \
+  error onap \
+  '[{"name":"api","version":"1"},{"name":"onap/api","version":"2"}]'
+promote_case 'a path over 255 characters once namespaced fails' \
+  error onap "[{\"name\":\"${long}\",\"version\":\"1\"}]"
+promote_case 'a registry path counts towards the limit' \
+  error '' "[{\"name\":\"${long}\",\"version\":\"1\"}]" push.example/abcdef
+
+# Snapshot publish must stage each image where promotion pulls it.
+# A stub docker stands in for the daemon, and the step's archive
+# directory moves into the scratch directory.
+mkdir -p "${work}/bin" "${work}/archives"
+touch "${work}/archives/image.tar"
+cat > "${work}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = image ]; then echo "sha256:$5"; fi
+EOF
+chmod +x "${work}/bin/docker"
+yq -r '.jobs."snapshot-publish".steps[]
+  | select(.name == "Publish snapshot/staging tags") | .run' \
+  "${root}/.github/workflows/merge.yaml" |
+  sed "s|/tmp/docker-archives|${work}/archives|g" > "${work}/publish.sh"
+# publish_case DESCRIPTION EXPECTED_PATH NAMESPACE LOCAL_TAGS_JSON [REG]
+# EXPECTED_PATH is the staged path under REG, or 'error' when the step
+# must fail before pushing anything
+publish_case() {
+  local status=0 registry="${5:-snap.example}"
+  env -i PATH="${work}/bin:${PATH}" HOME="${work}" \
+    GITHUB_STEP_SUMMARY="${work}/summary" IMAGES="$4" VERSION=1.2.3 \
+    SNAPSHOT_REGISTRY="${registry}" IMAGE_NAMESPACE="$3" DRY_RUN=true \
+    bash --noprofile --norc -eo pipefail "${work}/publish.sh" \
+    > "${work}/log" 2>&1 || status=$?
+  if { [ "$2" = 'error' ] && [ "${status}" -ne 0 ] &&
+    grep -q '^::error::' "${work}/log" &&
+    ! grep -q 'would push' "${work}/log"; } ||
+    { [ "$2" != 'error' ] && [ "${status}" -eq 0 ] &&
+      grep -qxF \
+        "Dry run: would push ${registry}/$2:1.2.3-SNAPSHOT-latest" \
+        "${work}/log"; }; then
+    echo "ok: snapshot: $1"
+  else
+    echo "FAIL: snapshot: $1 (exit ${status})"
+    sed 's/^/  | /' "${work}/log"
+    failures=$((failures + 1))
+  fi
+}
+publish_case 'a namespaced sub-path stages where promotion pulls it' \
+  onap/so/sdnc-adapter onap '["onap/so/sdnc-adapter:verify"]'
+promote_case 'promotion pulls the same sub-path' \
+  'pull.example/onap/so/sdnc-adapter:1 -> push.example/onap/so/sdnc-adapter:1.0.0' \
+  onap '[{"name":"so/sdnc-adapter","version":"1"}]'
+publish_case 'a bare build_command tag takes the namespace' \
+  onap/so/api onap '["so/api:verify"]'
+publish_case 'a registry host is dropped' \
+  onap/api onap '["localhost:5000/api:verify"]'
+publish_case 'an uppercase first component is a registry host' \
+  onap/team/api onap '["Registry/team/api:verify"]'
+publish_case 'no namespace keeps the path' team/api '' '["team/api:verify"]'
+publish_case 'distinct images on one path fail before any push' \
+  error onap '["other:verify","api:verify","onap/api:other"]'
+publish_case 'a path over 255 characters with the registry path fails' \
+  error onap "[\"${long:2}:verify\"]" snap.example/abc
+
 if [ "${failures}" -gt 0 ]; then
   echo "${failures} failure(s)"
   exit 1
 fi
-echo "All namespace_mode cases passed"
+echo "All namespace_mode, snapshot and promotion cases passed"
