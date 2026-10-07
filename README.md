@@ -144,12 +144,13 @@ gh attestation verify oci://ghcr.io/<org>/<image>@sha256:<digest> \
   --signer-workflow lfreleng-actions/docker-workflows/.github/workflows/build-test-release.yaml
 ```
 
-cosign matches the same identity, accepting any ref of the workflow:
+cosign matches the same identity, anchored at both ends so that the
+suffix must be a branch, tag or commit SHA ref of the workflow:
 
 ```bash
 cosign verify ghcr.io/<org>/<image>@sha256:<digest> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --certificate-identity-regexp '^https://github\.com/lfreleng-actions/docker-workflows/\.github/workflows/build-test-release\.yaml@'
+  --certificate-identity-regexp '^https://github\.com/lfreleng-actions/docker-workflows/\.github/workflows/build-test-release\.yaml@(refs/(heads|tags)/.+|[0-9a-f]{40})$'
 ```
 
 <!-- markdownlint-enable MD013 -->
@@ -375,8 +376,9 @@ repositories needing it release through `merge.yaml`.
 record for each GHCR image, labelled with the release tag, which
 lists the image on the organisation's Linked Artifacts page
 (`https://github.com/orgs/<org>/artifacts`). Storage records need
-an organisation-owned repository; elsewhere the step
-logs a warning and the attestation itself still succeeds.
+an organisation-owned repository: for a user-owned one the step
+skips the record without a warning. A storage API failure after
+the job starts logs a warning; the attestation succeeds either way.
 
 ### merge.yaml
 
