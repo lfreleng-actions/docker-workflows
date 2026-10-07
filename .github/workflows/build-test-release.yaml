@@ -1245,47 +1245,24 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: docker-archives-${{ needs.docker-metadata.outputs.build_id }}
-          path: /tmp/docker-archives
+          # Image mode only reads archives inside the workspace or
+          # RUNNER_TEMP, so they land under runner.temp, not /tmp
+          path: ${{ runner.temp }}/docker-archives
 
-      - name: 'Install Syft'
-        id: syft
-        # yamllint disable-line rule:line-length
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
-
+      # One CycloneDX SBOM per image archive, named
+      # sbom-cyclonedx-<archive-basename>.json; the Grype job scans
+      # every one. An empty archive directory fails the step.
+      # sbom_spec_version 1.7 keeps the spec the inline syft call
+      # wrote by default.
       - name: 'Generate image SBOMs'
-        shell: bash
-        env:
-          SYFT_CMD: ${{ steps.syft.outputs.cmd }}
-        run: |
-          # One CycloneDX SBOM per image archive; the Grype job scans
-          # every sbom-cyclonedx-*.json this step produces. nullglob:
-          # a missing/empty artifact must fail with a clear message,
-          # not a literal-glob Syft error.
-          shopt -s nullglob
-          archives=(/tmp/docker-archives/*.tar)
-          if [ "${#archives[@]}" -eq 0 ]; then
-            echo "::error::No image archives found to scan"
-            exit 1
-          fi
-          total=0
-          for archive in "${archives[@]}"; do
-            base=$(basename "${archive}" .tar)
-            out="sbom-cyclonedx-${base}.json"
-            echo "::group::SBOM ${base}"
-            "${SYFT_CMD}" scan "docker-archive:${archive}" \
-              -o "cyclonedx-json=${out}"
-            echo "::endgroup::"
-            count=$(jq '.components | length' "${out}")
-            echo "${base}: ${count} components"
-            total=$((total + count))
-          done
-          {
-            echo "## SBOM Summary"
-            echo ""
-            echo "CycloneDX SBOM per image;" \
-              "**${total}** components in total"
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
+        id: sbom
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/sbom-action@398aec0a5f332a0414246a6d9d45678ef4a95e98  # v0.3.0
+        with:
+          mode: image
+          image_archive_directory: ${{ runner.temp }}/docker-archives
+          sbom_format: json
+          sbom_spec_version: '1.7'
 
       - name: 'Upload SBOM artifacts'
         # yamllint disable-line rule:line-length

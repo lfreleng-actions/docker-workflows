@@ -279,6 +279,13 @@ and merge-lane builds run single-platform (the runner's native
 platform); the release lane builds multi-platform when the
 `platforms` input lists more than one target.
 
+In the verify and release lanes the SBOM job downloads those archives
+to `${{ runner.temp }}/docker-archives` and runs
+[sbom-action](https://github.com/lfreleng-actions/sbom-action) in
+image mode, which writes one CycloneDX 1.7 JSON document per archive,
+`sbom-cyclonedx-<archive-name>.json`, and fails if there is no archive
+to scan. The Grype job scans every one of them.
+
 ## Image Namespace
 
 `namespace_mode` decides the namespace every lane prefixes to image
@@ -513,6 +520,19 @@ triggers on merged `releases/` files with
 `distribution_type: container` (the LF self-release container
 schema, including its optional `container_pull_registry`/
 `container_push_registry` overrides).
+
+The `check-release` job detects and validates the release file with
+[docker-release-detect-action](https://github.com/lfreleng-actions/docker-release-detect-action).
+It compares the merged commit with its first parent alone, so a merge
+commit counts the release files it brings in, never one the
+target branch already held. It fails rather than skipping when the
+checkout is too shallow to hold that parent (the job fetches depth
+2), when a commit adds more than one container release file, or when
+a file breaks Docker's name or tag grammar. The lane keeps the
+action's default `numeric_versions: literal`, taking an unquoted
+numeric version as written (`version: 1.10` stays `1.10`); quote
+versions to be sure. The action needs `python3` 3.10 or later and mikefarah `yq`
+v4.25.3 or later, both present on GitHub-hosted runners.
 
 ## Usage
 
