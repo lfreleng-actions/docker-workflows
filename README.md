@@ -91,7 +91,8 @@ Consequences for callers:
 - **Provenance** pushes to the registry for GHCR images
   (`push-to-registry`) and nowhere else. Elsewhere the attestation
   lives in the GitHub attestation store, which
-  `gh attestation verify` reads.
+  `gh attestation verify` reads (see
+  [Verifying Releases](#verifying-releases)).
 - **Signatures** run against every pushed image. A failure against a
   registry named in `sigstore_sign_required_registries` fails the
   release; elsewhere the image publishes unsigned with a warning, so
@@ -120,6 +121,43 @@ Artifactory instance from this lane, and Model B does not sign at all
 (snapshot tags are transient). Model A publishes to GHCR and Docker
 Hub, so releasing to Artifactory awaits a generic registry target
 there — tracked in #26.
+
+## Verifying Releases
+
+The signing certificate behind every signature and attestation this
+lane makes names the reusable workflow, not the caller, as the
+signer: its SAN (the Build Signer URI) is
+`https://github.com/lfreleng-actions/docker-workflows/.github/workflows/build-test-release.yaml@<ref>`,
+while the calling repository appears as the source repository. This
+is deliberate. A verifier can require that a release came from the
+organisation's sanctioned release lane, not from any workflow that
+happens to live in the caller's repository.
+
+Verification has to name the signer workflow.
+`gh attestation verify --owner <org>` on its own fails with
+`Error: verifying with issuer "sigstore.dev"`, because `--owner`
+also expects the signer workflow to belong to that organisation:
+
+<!-- markdownlint-disable MD013 -->
+
+```bash
+gh attestation verify oci://ghcr.io/<org>/<image>@sha256:<digest> \
+  --owner <org> \
+  --signer-workflow lfreleng-actions/docker-workflows/.github/workflows/build-test-release.yaml
+```
+
+cosign matches the same identity, anchored at both ends so that the
+suffix must be a branch, tag or commit SHA ref of the workflow:
+
+```bash
+cosign verify ghcr.io/<org>/<image>@sha256:<digest> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/lfreleng-actions/docker-workflows/\.github/workflows/build-test-release\.yaml@(refs/(heads|tags)/.+|[0-9a-f]{40})$'
+```
+
+<!-- markdownlint-enable MD013 -->
+
+`cosign verify-attestation` takes the same two certificate flags.
 
 ## Job Graph
 
@@ -329,11 +367,20 @@ list reflects and when to extend it.
 
 Optional secrets: `DOCKERHUB_USERNAME`/`DOCKERHUB_PASSWORD` (the
 Docker Hub leg skips with a warning when unset). Callers grant
-`contents: write`, `id-token: write`, `attestations: write` and
-`packages: write`. The `build_command` escape hatch is absent from
+`contents: write`, `id-token: write`, `attestations: write`,
+`artifact-metadata: write` and `packages: write`. The
+`build_command` escape hatch is absent from
 this lane by design: project-tooling builds cannot produce
 multi-platform manifests or per-registry digests reliably, so
 repositories needing it release through `merge.yaml`.
+
+`artifact-metadata: write` lets the provenance step create a storage
+record for each GHCR image, labelled with the release tag, which
+lists the image on the organisation's Linked Artifacts page
+(`https://github.com/orgs/<org>/artifacts`). Storage records need
+an organisation-owned repository: for a user-owned one the step
+skips the record without a warning. A storage API failure after
+the job starts logs a warning; the attestation succeeds either way.
 
 ### merge.yaml
 
@@ -482,7 +529,9 @@ workflow's job permissions against the caller's grant before any job
 starts, and rejects the whole run when the callee asks for more.
 Because `permissions:` takes no expression, the lane's declarations
 cannot shrink for a dry run, so a caller must grant `contents`,
-`packages`, `id-token` and `attestations` write even though a dry run
-uses none of them. `merge.yaml` needs no more than `contents: read`,
+`packages`, `id-token`, `attestations` and `artifact-metadata` write
+even though a dry run uses none of them. A caller missing any of
+them fails at startup (`startup_failure`) before a job runs.
+`merge.yaml` needs no more than `contents: read`,
 because it authenticates to registries with a loaded credential
 rather than `GITHUB_TOKEN`.
