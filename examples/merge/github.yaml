@@ -63,7 +63,8 @@ jobs:
       #   snapshot_registry: 'acme.jfrog.io/docker-snapshot'
       #   release_registry: 'acme.jfrog.io/docker-release'
       # Optional Docker tuning; empty values auto-discover Dockerfiles:
-      # image_namespace: 'onap'       # publish as <registry>/onap/<name>
+      # namespace_mode: 'manual'       # none, auto (repo owner) or manual
+      # namespace: 'onap'              # publish as <registry>/onap/<name>
       # images: ''                    # JSON image list + build order
       # build_command: ''             # escape hatch: project tooling builds
       # push_latest: false            # tag promoted releases as 'latest'

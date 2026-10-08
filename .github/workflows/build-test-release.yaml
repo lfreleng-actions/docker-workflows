@@ -17,7 +17,7 @@
 # Registries:
 #   * GHCR: ghcr.io/<owner>/<name>, authenticated with GITHUB_TOKEN
 #     (callers grant packages: write)
-#   * Docker Hub: docker.io/<image_namespace>/<name>, authenticated
+#   * Docker Hub: docker.io/<namespace>/<name>, authenticated
 #     with the optional DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD secrets;
 #     skips with a warning when unset
 #
@@ -86,11 +86,22 @@ on:
         required: false
         type: string
         default: ''
-      image_namespace:
+      namespace_mode:
         description: >-
-          Docker Hub namespace (organisation/user) images publish
-          under; required when dockerhub_publish is true. GHCR images
-          always publish under the calling repository owner.
+          How the Docker Hub namespace (organisation/user) and the
+          local image alias prefix resolve: 'none' (no namespace),
+          'auto' (the lowercased owner of the repository built) or
+          'manual' (the namespace input). dockerhub_publish requires
+          'auto' or 'manual'. GHCR images always publish under the
+          calling repository owner.
+        required: false
+        type: string
+        default: 'none'
+      namespace:
+        description: >-
+          Image namespace for namespace_mode 'manual' (e.g. 'onap');
+          an error with any other mode. Docker Hub takes a single
+          path component.
         required: false
         type: string
         default: ''
@@ -117,9 +128,10 @@ on:
       dockerhub_publish:
         description: >-
           Publish images to Docker Hub
-          (docker.io/<image_namespace>/<name>). Requires the
+          (docker.io/<namespace>/<name>). Requires namespace_mode
+          'auto' or 'manual' and the
           DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD secrets; skips with a
-          warning when they are unavailable.
+          warning when the secrets are unavailable.
         required: false
         type: boolean
         default: false
@@ -368,6 +380,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     timeout-minutes: 2
+    outputs:
+      # The effective image namespace; empty for namespace_mode none
+      namespace: ${{ steps.namespace.outputs.namespace }}
     steps:
       - name: 'Validate platforms input'
         shell: bash
@@ -433,6 +448,66 @@ jobs:
             exit 1
           fi
           echo "Gerrit inputs validated ✅"
+
+      # Resolved once here, the root every job descends from; each
+      # job that names an image reads this job's namespace output.
+      # The Docker Hub checks run whether or not credentials exist,
+      # so dry runs and fork pull requests surface them too.
+      - name: 'Resolve image namespace'
+        id: namespace
+        shell: bash
+        env:
+          NAMESPACE_MODE: ${{ inputs.namespace_mode }}
+          NAMESPACE: ${{ inputs.namespace }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
+          DOCKERHUB_PUBLISH: ${{ inputs.dockerhub_publish }}
+        run: |
+          # none: no prefix; auto: the lowercased repository owner;
+          # manual: the namespace input
+          case "${NAMESPACE_MODE}" in
+            none) namespace='' ;;
+            auto) namespace="${REPOSITORY%%/*}"; namespace="${namespace,,}" ;;
+            manual) namespace="${NAMESPACE}" ;;
+            *)
+              echo "::error::Invalid namespace_mode '${NAMESPACE_MODE}'" \
+                "(expected none, auto or manual)"
+              exit 1
+              ;;
+          esac
+          if [ "${NAMESPACE_MODE}" != 'manual' ] && [ -n "${NAMESPACE}" ]
+          then
+            echo "::error::namespace '${NAMESPACE}' is set but" \
+              "namespace_mode is '${NAMESPACE_MODE}'; set namespace_mode" \
+              "to 'manual' or clear namespace"
+            exit 1
+          fi
+          if [ "${NAMESPACE_MODE}" = 'manual' ] && [ -z "${NAMESPACE}" ]; then
+            echo "::error::namespace_mode 'manual' requires the namespace input"
+            exit 1
+          fi
+          # Docker's repository path grammar: '/'-separated components,
+          # each runs of lowercase alphanumerics joined by a single '.'
+          # or '_', exactly '__', or one or more '-'
+          component='[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*'
+          if [ -n "${namespace}" ] &&
+            [[ ! "${namespace}" =~ ^${component}(/${component})*$ ]]; then
+            echo "::error::Invalid namespace '${namespace}'" \
+              "(namespace_mode ${NAMESPACE_MODE}): expected '/'-separated" \
+              "components of lowercase alphanumerics joined by a single" \
+              "'.' or '_', exactly '__', or one or more '-'"
+            exit 1
+          fi
+          # A Docker Hub namespace is one organisation or user
+          if [ "${DOCKERHUB_PUBLISH}" = 'true' ] &&
+            [[ -z "${namespace}" || "${namespace}" == */* ]]; then
+            echo "::error::dockerhub_publish requires namespace_mode" \
+              "'auto' or 'manual' resolving to a single path component" \
+              "(the Docker Hub organisation or user); got" \
+              "'${namespace}' from namespace_mode ${NAMESPACE_MODE}"
+            exit 1
+          fi
+          echo "namespace=${namespace}" >> "${GITHUB_OUTPUT}"
+          echo "Image namespace (${NAMESPACE_MODE}): ${namespace:-<none>} ✅"
 
   repository-metadata:
     name: 'Repository Metadata'
@@ -659,7 +734,7 @@ jobs:
           # metadata and housekeeping jobs.
           ref: ${{ needs.tag-validate.outputs.tag }}
           gerrit_refspec: ${{ inputs.gerrit_refspec }}
-          image_namespace: ${{ inputs.image_namespace }}
+          image_namespace: ${{ needs.gerrit-validate.outputs.namespace }}
           platforms: ${{ inputs.platforms }}
           # build_command stays unset: this lane deliberately omits
           # the escape hatch (see the workflow header), so an empty
@@ -668,6 +743,7 @@ jobs:
   build:
     name: 'Docker Build/Push'
     needs:
+      - 'gerrit-validate'
       - 'tag-validate'
       - 'docker-metadata'
     runs-on: ubuntu-latest
@@ -769,9 +845,9 @@ jobs:
       # point where publishing turns off: with no repository resolved
       # the build action tags nothing for a remote, pushes nothing and
       # reports pushed_count 0, which in turn skips signing,
-      # attestation and the 'latest' retag downstream. The input
-      # validation below still runs first, so a dry run still rejects
-      # an image_namespace that is missing or malformed.
+      # attestation and the 'latest' retag downstream. The
+      # gerrit-validate job has already rejected a namespace that
+      # Docker Hub publishing cannot use, dry run or not.
       - name: 'Resolve target registries'
         id: registries
         shell: bash
@@ -780,45 +856,13 @@ jobs:
           DOCKERHUB_PUBLISH: ${{ inputs.dockerhub_publish }}
           # yamllint disable-line rule:line-length
           HAS_DOCKERHUB_CREDS: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_PASSWORD != '' }}
-          IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
+          IMAGE_NAMESPACE: ${{ needs.gerrit-validate.outputs.namespace }}
           DRY_RUN: ${{ inputs.dry_run }}
           OWNER: ${{ github.repository_owner }}
         run: |
           # Gate each registry on its configuration/credentials
-          #
-          # Docker's reference grammar for one path component: runs
-          # of lowercase alphanumerics joined by a single '.' or
-          # '_', exactly '__', or one or more '-'. A plain character
-          # class would also admit '-team', 'team.' and 'a..b',
-          # which docker tag rejects, so the caller would pass this
-          # gate and fail later mid-publish. The build action applies
-          # the same grammar to the namespaced :verify alias; this
-          # gate applies it to a single component, because a Docker
-          # Hub namespace is an organisation or user rather than a
-          # path.
-          namespace_component='[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*'
           dockerhub='false'
           if [ "${DOCKERHUB_PUBLISH}" = 'true' ]; then
-            # Validate the namespace before the credential gate. An
-            # absent or malformed namespace is a caller mistake
-            # whether or not credentials happen to exist, and gating
-            # it behind them hid the error in precisely the
-            # secretless contexts -- dry runs, fork pull requests --
-            # that should surface it earliest and most cheaply.
-            if [ -z "${IMAGE_NAMESPACE}" ]; then
-              echo "::error::dockerhub_publish requires the" \
-                "image_namespace input (the Docker Hub organisation" \
-                "or user the images publish under)"
-              exit 1
-            fi
-            if [[ ! "${IMAGE_NAMESPACE}" =~ ^${namespace_component}$ ]]
-            then
-              echo "::error::Invalid image_namespace" \
-                "'${IMAGE_NAMESPACE}' (runs of lowercase" \
-                "alphanumerics joined by a single '.' or '_'," \
-                "exactly '__', or one or more '-')"
-              exit 1
-            fi
             if [ "${HAS_DOCKERHUB_CREDS}" != 'true' ]; then
               echo "::warning::DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD" \
                 "unavailable; skipping Docker Hub publish"
@@ -877,7 +921,7 @@ jobs:
       # own push), never re-read through the mutable tag: that digest
       # is the subject the sign job signs and attests. The local
       # working tag is the lane-neutral <name>:verify, aliased under
-      # image_namespace when that is a usable prefix, so one images
+      # the resolved namespace when there is one, so one images
       # input travels between the lanes unchanged; local tags never
       # publish. A multi-platform build pushes a manifest list and
       # pulls one platform back by digest for the test, SBOM and scan
@@ -900,7 +944,7 @@ jobs:
         with:
           images: ${{ needs.docker-metadata.outputs.images_json }}
           path_prefix: ${{ inputs.path_prefix }}
-          image_namespace: ${{ inputs.image_namespace }}
+          image_namespace: ${{ needs.gerrit-validate.outputs.namespace }}
           mode: 'push'
           repositories: ${{ steps.registries.outputs.repositories }}
           tags: ${{ steps.version.outputs.version }}
@@ -1201,47 +1245,24 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: docker-archives-${{ needs.docker-metadata.outputs.build_id }}
-          path: /tmp/docker-archives
+          # Image mode only reads archives inside the workspace or
+          # RUNNER_TEMP, so they land under runner.temp, not /tmp
+          path: ${{ runner.temp }}/docker-archives
 
-      - name: 'Install Syft'
-        id: syft
-        # yamllint disable-line rule:line-length
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
-
+      # One CycloneDX SBOM per image archive, named
+      # sbom-cyclonedx-<archive-basename>.json; the Grype job scans
+      # every one. An empty archive directory fails the step.
+      # sbom_spec_version 1.7 keeps the spec the inline syft call
+      # wrote by default.
       - name: 'Generate image SBOMs'
-        shell: bash
-        env:
-          SYFT_CMD: ${{ steps.syft.outputs.cmd }}
-        run: |
-          # One CycloneDX SBOM per image archive; the Grype job scans
-          # every sbom-cyclonedx-*.json this step produces. nullglob:
-          # a missing/empty artifact must fail with a clear message,
-          # not a literal-glob Syft error.
-          shopt -s nullglob
-          archives=(/tmp/docker-archives/*.tar)
-          if [ "${#archives[@]}" -eq 0 ]; then
-            echo "::error::No image archives found to scan"
-            exit 1
-          fi
-          total=0
-          for archive in "${archives[@]}"; do
-            base=$(basename "${archive}" .tar)
-            out="sbom-cyclonedx-${base}.json"
-            echo "::group::SBOM ${base}"
-            "${SYFT_CMD}" scan "docker-archive:${archive}" \
-              -o "cyclonedx-json=${out}"
-            echo "::endgroup::"
-            count=$(jq '.components | length' "${out}")
-            echo "${base}: ${count} components"
-            total=$((total + count))
-          done
-          {
-            echo "## SBOM Summary"
-            echo ""
-            echo "CycloneDX SBOM per image;" \
-              "**${total}** components in total"
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
+        id: sbom
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/sbom-action@398aec0a5f332a0414246a6d9d45678ef4a95e98  # v0.3.0
+        with:
+          mode: image
+          image_archive_directory: ${{ runner.temp }}/docker-archives
+          sbom_format: json
+          sbom_spec_version: '1.7'
 
       - name: 'Upload SBOM artifacts'
         # yamllint disable-line rule:line-length

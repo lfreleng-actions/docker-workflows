@@ -45,7 +45,7 @@ Two release models cover the LF project estate:
 - **Model A (tag-driven)** — `build-test-release.yaml`. A validated,
   signed semver tag drives the version. Images build (multi-platform
   capable) and push to GHCR (`ghcr.io/<owner>/<name>`) and optionally
-  Docker Hub (`docker.io/<image_namespace>/<name>`), each pushed
+  Docker Hub (`docker.io/<namespace>/<name>`), each pushed
   image signs with Sigstore cosign (keyless, by digest) and gains an
   SLSA build provenance attestation, and the audits gate promotion of
   the draft GitHub release (with per-image SBOMs and a digest
@@ -56,8 +56,9 @@ Two release models cover the LF project estate:
   `version.properties`. Merging a `releases/` file with
   `distribution_type: container` triggers a registry-side promotion:
   crane copies the staged `name:version` images to the release
-  registry at `container_release_tag`, preserving multi-architecture
-  manifests without rebuilding.
+  registry at `container_release_tag`, under the same image
+  namespace (see [Image Namespace](#image-namespace)), preserving
+  multi-architecture manifests without rebuilding.
 
 Model B publishes this tag set per image, sharing one timestamp per
 run (the Jenkins `include-docker-push.sh`/fabric8 idiom):
@@ -219,13 +220,14 @@ of extra `docker buildx build` arguments). Names in an explicit
 repository character set; auto-discovery instead keeps the first of
 any duplicate pair.
 
-With `image_namespace` set, the Dockerfile build path in every lane
-tags each built image both as `<namespace>/<name>:verify` and as
-`<name>:verify`, so a chain resolves whichever form it references and
-one `images` input travels between the verify, merge and release
-lanes unchanged. A **publishing** release build whose `platforms`
-input is anything other than `linux/amd64` — one foreign architecture
-as readily as a list of them — runs on the isolated
+With an image namespace resolved (see
+[Image Namespace](#image-namespace)), the Dockerfile build path in
+every lane tags each built image both as `<namespace>/<name>:verify`
+and as `<name>:verify`, so a chain resolves whichever form it
+references and one `images` input travels between the verify, merge
+and release lanes unchanged. A **publishing** release build whose
+`platforms` input is anything other than `linux/amd64` — one foreign
+architecture as readily as a list of them — runs on the isolated
 `docker-container` driver, which cannot see daemon-local tags; there
 each later build receives the earlier images by digest through
 `--build-context`, so the same chains still resolve. The exception is
@@ -237,11 +239,6 @@ The qualifier matters for dry runs. A release build that publishes
 nowhere produces one platform rather than a manifest list, so it
 runs on the daemon-backed `docker` driver whatever `platforms`
 asks for, and daemon-local chains resolve as they do elsewhere.
-
-Every lane checks `image_namespace` against Docker's reference
-grammar during discovery, so a value Docker refuses in a tag
-(`-team` or `team.`, say) fails the docker-metadata job before
-anything builds.
 
 Where `build_command` builds the images, discovery finding no
 Dockerfile is not an error: jib and Gradle plugins synthesise images
@@ -282,6 +279,65 @@ and merge-lane builds run single-platform (the runner's native
 platform); the release lane builds multi-platform when the
 `platforms` input lists more than one target.
 
+In the verify and release lanes the SBOM job downloads those archives
+to `${{ runner.temp }}/docker-archives` and runs
+[sbom-action](https://github.com/lfreleng-actions/sbom-action) in
+image mode, which writes one CycloneDX 1.7 JSON document per archive,
+`sbom-cyclonedx-<archive-name>.json`, and fails if there is no archive
+to scan. The Grype job scans every one of them.
+
+## Image Namespace
+
+`namespace_mode` decides the namespace every lane prefixes to image
+names, and `namespace` supplies it in `manual` mode:
+
+| Mode     | Namespace                                              |
+| -------- | ------------------------------------------------------ |
+| `none`   | Default. No namespace: images keep their bare names    |
+| `auto`   | The lowercased owner of the repository the lane builds |
+| `manual` | The `namespace` input, e.g. `onap` or `onap/so`        |
+
+Each lane resolves it once per run, in its first job
+(`gerrit-validate`), and every other job reads that job's `namespace`
+output, so the build aliases, the merge lane's snapshot publish and
+release promotion, and the release lane's Docker Hub path all agree.
+That job fails before anything builds on an unknown mode, on `manual`
+without a `namespace`, on a `namespace` under any other mode
+(rather than ignoring it), and on a value outside Docker's repository path
+grammar: `/`-separated components, each of lowercase alphanumerics
+joined by a single `.` or `_`, a doubled `__`, or one or more `-`.
+The release lane's `dockerhub_publish` also needs a namespace, and a
+single component at that, since a Docker Hub namespace is one
+organisation or user; GHCR publishes under the calling repository
+owner whatever the mode.
+
+`auto` takes the owner of the `repository` input (or of the calling
+repository when that is empty), since a lane can build another
+repository than the one calling it. That matches the Jenkins
+namespace for projects whose GitHub organisation carries the
+registry name — ONAP, OpenDaylight, O-RAN-SC and OPNFV. Projects
+whose GitHub organisation differs from their Gerrit host, such as
+FD.io (`FDio`) or Akraino (`akraino-edge-stack`), should use
+`manual`.
+
+In the merge lane the namespace applies to both halves. Snapshot and
+staging tags publish as `<snapshot_registry>/<namespace>/<name>`, where
+`<name>` is the image's full name, sub-paths included, and
+release promotion copies `<pull>/<namespace>/<name>:<version>` to
+`<push>/<namespace>/<name>:<container_release_tag>` (and `latest`),
+where the pull and push registries are the release file's overrides
+or the lane's inputs. Container names in release files are relative
+to the namespace: ONAP's never start with `onap/`, and some carry
+sub-paths such as `so/sdnc-adapter`. That is how global-jjb's
+`release-job.sh` builds `<registry>/<umbrella>/<name>`, so the same
+release files promote the same images. A name that already starts
+with `<namespace>/` stays as written, with a notice that it looks
+double-prefixed. Promotion resolves every path before it copies
+anything, and fails when two names resolve to the same path (`foo`
+and `<namespace>/foo`) or a path, with the registry's own path,
+exceeds 255 characters. The snapshot publish checks its paths the
+same way before it pushes anything.
+
 ## Inputs
 
 ### build-test.yaml
@@ -294,7 +350,8 @@ platform); the release lane builds multi-platform when the
 | `ref`                         | string  | `''`       | Branch/tag/SHA to check out (empty = default branch)                 |
 | `path_prefix`                 | string  | `'.'`      | Path to the project root directory                                   |
 | `images`                      | string  | `''`       | JSON image list (see Image Discovery); empty string auto-discovers   |
-| `image_namespace`             | string  | `''`       | Namespace prefixed to image names (e.g. `onap` -> `onap/<name>`)     |
+| `namespace_mode`              | string  | `'none'`   | `none`, `auto` or `manual`; see Image Namespace                      |
+| `namespace`                   | string  | `''`       | Namespace for `manual` (e.g. `onap` -> `onap/<name>`)                |
 | `build_command`               | string  | `''`       | Escape hatch: project tooling builds the images (make/mvn/gradle)    |
 | `build_command_images`        | string  | `''`       | Images `build_command` produces; declaring them skips inference      |
 | `build_timeout_minutes`       | number  | `30`       | Timeout for the build job in whole minutes                           |
@@ -351,8 +408,9 @@ Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 | ------------------- | ------- | --------------- | ------------------------------------------------------------------- |
 | `platforms`         | string  | `'linux/amd64'` | Target platforms (csv); more than one engages QEMU + manifest lists |
 | `ghcr_publish`      | boolean | `true`          | Publish to GHCR as `ghcr.io/<owner>/<name>` (GITHUB_TOKEN)          |
-| `dockerhub_publish` | boolean | `false`         | Publish to Docker Hub as `docker.io/<image_namespace>/<name>`       |
-| `image_namespace`   | string  | `''`            | Docker Hub namespace (required when `dockerhub_publish` is true)    |
+| `dockerhub_publish` | boolean | `false`         | Publish to Docker Hub as `docker.io/<namespace>/<name>`             |
+| `namespace_mode`    | string  | `'none'`        | `none`, `auto` or `manual`; Docker Hub needs `auto` or `manual`     |
+| `namespace`         | string  | `''`            | Namespace for `manual`; one component when publishing to Docker Hub |
 | `push_latest`       | boolean | `false`         | Apply the `latest` tag per image at promotion, after all gates pass |
 | `dry_run`           | boolean | `false`         | Run the lane without publishing: no push, release, promotion or tag |
 | `attestations`      | boolean | `true`          | SLSA build provenance per pushed image (by digest)                  |
@@ -393,7 +451,7 @@ the job starts logs a warning; the attestation succeeds either way.
 ### merge.yaml
 
 Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
-`images`, `image_namespace`, `build_command`,
+`images`, `namespace_mode`, `namespace`, `build_command`,
 `build_command_images`, `build_timeout_minutes`, hardening and
 `gerrit_*` inputs):
 
@@ -467,6 +525,19 @@ triggers on merged `releases/` files with
 `distribution_type: container` (the LF self-release container
 schema, including its optional `container_pull_registry`/
 `container_push_registry` overrides).
+
+The `check-release` job detects and validates the release file with
+[docker-release-detect-action](https://github.com/lfreleng-actions/docker-release-detect-action).
+It compares the merged commit with its first parent alone, so a merge
+commit counts the release files it brings in, never one the
+target branch already held. It fails rather than skipping when the
+checkout is too shallow to hold that parent (the job fetches depth
+2), when a commit adds more than one container release file, or when
+a file breaks Docker's name or tag grammar. The lane keeps the
+action's default `numeric_versions: literal`, taking an unquoted
+numeric version as written (`version: 1.10` stays `1.10`); quote
+versions to be sure. The action needs `python3` 3.10 or later and mikefarah `yq`
+v4.25.3 or later, both present on GitHub-hosted runners.
 
 ## Usage
 

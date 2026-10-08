@@ -73,11 +73,21 @@ on:
         required: false
         type: string
         default: ''
-      image_namespace:
+      namespace_mode:
         description: >-
-          Namespace prefixed to every image name on the registries
-          (e.g. 'onap' publishes <registry>/onap/<name>). Empty
-          applies no namespace.
+          How the namespace prefixed to every image name on the
+          registries resolves: 'none' (no namespace), 'auto' (the
+          lowercased owner of the repository built) or 'manual' (the
+          namespace input). With 'onap', snapshots publish as
+          <registry>/onap/<name> and release promotion copies
+          <registry>/onap/<release-file name>.
+        required: false
+        type: string
+        default: 'none'
+      namespace:
+        description: >-
+          Image namespace for namespace_mode 'manual' (e.g. 'onap' or
+          'onap/so'); an error with any other mode.
         required: false
         type: string
         default: ''
@@ -257,6 +267,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {}
     timeout-minutes: 2
+    outputs:
+      # The effective image namespace; empty for namespace_mode none
+      namespace: ${{ steps.namespace.outputs.namespace }}
     steps:
       - name: 'Validate registry inputs'
         shell: bash
@@ -330,6 +343,54 @@ jobs:
             exit 1
           fi
           echo "Gerrit inputs validated ✅"
+
+      # Resolved once here, the root every job descends from; each
+      # job that names an image reads this job's namespace output
+      - name: 'Resolve image namespace'
+        id: namespace
+        shell: bash
+        env:
+          NAMESPACE_MODE: ${{ inputs.namespace_mode }}
+          NAMESPACE: ${{ inputs.namespace }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
+        run: |
+          # none: no prefix; auto: the lowercased repository owner;
+          # manual: the namespace input
+          case "${NAMESPACE_MODE}" in
+            none) namespace='' ;;
+            auto) namespace="${REPOSITORY%%/*}"; namespace="${namespace,,}" ;;
+            manual) namespace="${NAMESPACE}" ;;
+            *)
+              echo "::error::Invalid namespace_mode '${NAMESPACE_MODE}'" \
+                "(expected none, auto or manual)"
+              exit 1
+              ;;
+          esac
+          if [ "${NAMESPACE_MODE}" != 'manual' ] && [ -n "${NAMESPACE}" ]
+          then
+            echo "::error::namespace '${NAMESPACE}' is set but" \
+              "namespace_mode is '${NAMESPACE_MODE}'; set namespace_mode" \
+              "to 'manual' or clear namespace"
+            exit 1
+          fi
+          if [ "${NAMESPACE_MODE}" = 'manual' ] && [ -z "${NAMESPACE}" ]; then
+            echo "::error::namespace_mode 'manual' requires the namespace input"
+            exit 1
+          fi
+          # Docker's repository path grammar: '/'-separated components,
+          # each runs of lowercase alphanumerics joined by a single '.'
+          # or '_', exactly '__', or one or more '-'
+          component='[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*'
+          if [ -n "${namespace}" ] &&
+            [[ ! "${namespace}" =~ ^${component}(/${component})*$ ]]; then
+            echo "::error::Invalid namespace '${namespace}'" \
+              "(namespace_mode ${NAMESPACE_MODE}): expected '/'-separated" \
+              "components of lowercase alphanumerics joined by a single" \
+              "'.' or '_', exactly '__', or one or more '-'"
+            exit 1
+          fi
+          echo "namespace=${namespace}" >> "${GITHUB_OUTPUT}"
+          echo "Image namespace (${NAMESPACE_MODE}): ${namespace:-<none>} ✅"
 
   repository-metadata:
     name: 'Repository Metadata'
@@ -458,7 +519,7 @@ jobs:
           # when a caller supplies one, matching its checkout step.
           ref: ${{ inputs.gerrit_revision || inputs.ref }}
           gerrit_refspec: ${{ inputs.gerrit_refspec }}
-          image_namespace: ${{ inputs.image_namespace }}
+          image_namespace: ${{ needs.gerrit-validate.outputs.namespace }}
           # With build_command set, an empty discovery is not an
           # error: the build job enumerates what the command created
           build_command: ${{ inputs.build_command }}
@@ -553,7 +614,7 @@ jobs:
 
   build:
     name: 'Docker Build'
-    needs: docker-metadata
+    needs: ['gerrit-validate', 'docker-metadata']
     runs-on: ubuntu-latest
     outputs:
       images: ${{ steps.build.outputs.images }}
@@ -634,7 +695,7 @@ jobs:
         with:
           images: ${{ needs.docker-metadata.outputs.images_json }}
           path_prefix: ${{ inputs.path_prefix }}
-          image_namespace: ${{ inputs.image_namespace }}
+          image_namespace: ${{ needs.gerrit-validate.outputs.namespace }}
           build_command: ${{ inputs.build_command }}
           build_command_images: ${{ inputs.build_command_images }}
 
@@ -670,6 +731,7 @@ jobs:
     name: 'Publish Snapshot'
     runs-on: ubuntu-latest
     needs:
+      - 'gerrit-validate'
       - 'resolve-version'
       - 'docker-metadata'
       - 'build'
@@ -828,7 +890,7 @@ jobs:
           IMAGES: ${{ needs.build.outputs.images }}
           VERSION: ${{ needs.resolve-version.outputs.version }}
           SNAPSHOT_REGISTRY: ${{ inputs.snapshot_registry }}
-          IMAGE_NAMESPACE: ${{ inputs.image_namespace }}
+          IMAGE_NAMESPACE: ${{ needs.gerrit-validate.outputs.namespace }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           # Retag the built images with the LF snapshot/staging tag
@@ -846,20 +908,43 @@ jobs:
           done
           timestamp=$(date -u '+%Y%m%dT%H%M%SZ')
           major_minor="${VERSION%.*}"
-          declare -a pushed=()
+          declare -a pushed=() sources=() names=()
           declare -A seen_names=()
+          # A registry's own path counts towards the 255-character
+          # repository limit; its host does not.
+          prefix=""
+          if [[ "${SNAPSHOT_REGISTRY}" == */* ]]; then
+            prefix="${SNAPSHOT_REGISTRY#*/}/"
+          fi
+          # Two phases, as in promotion: every publish path is resolved
+          # and checked before anything is tagged or pushed, so a
+          # collision or overlong path pushes nothing.
           while IFS= read -r local_tag; do
             # Strip the tag (the last colon-suffix) rather than the
             # first colon match: build_command-produced tags can
-            # carry a registry:port prefix
+            # carry a registry:port prefix. A first component is a
+            # registry host, and dropped, by Docker's rule: it holds
+            # '.', ':' or an uppercase letter, or is localhost.
             repo="${local_tag%:*}"
-            name="${repo##*/}"
-            # Publish names derive from the repository basename, so
-            # distinct images sharing a basename (team-a/api,
-            # team-b/api) would silently overwrite each other on the
-            # snapshot registry. Deduplicate identical images (one
-            # image carrying several local tags) and fail on genuine
-            # collisions.
+            first="${repo%%/*}"
+            if [[ "${repo}" == */* && ( "${first}" == *[.:]* ||
+              "${first}" == *[[:upper:]]* ||
+              "${first}" == localhost ) ]]; then
+              repo="${repo#*/}"
+            fi
+            # The publish path keeps sub-paths and takes the namespace
+            # exactly as promotion resolves a release-file name, so
+            # so/sdnc-adapter stages at <ns>/so/sdnc-adapter, where
+            # promotion pulls it. The build action's load-mode tags
+            # already carry the namespace and stay as they are.
+            name="${repo}"
+            if [[ -n "${IMAGE_NAMESPACE}" &&
+              "${repo}" != "${IMAGE_NAMESPACE}/"* ]]; then
+              name="${IMAGE_NAMESPACE}/${repo}"
+            fi
+            # Deduplicate identical images (one image carrying several
+            # local tags) and fail on distinct images that resolve
+            # to the same publish path.
             image_id=$(docker image inspect \
               --format '{{.Id}}' "${local_tag}")
             if [ -n "${seen_names[${name}]:-}" ]; then
@@ -874,15 +959,21 @@ jobs:
               exit 1
             fi
             seen_names[${name}]="${image_id}"
-            target="${SNAPSHOT_REGISTRY}/${name}"
-            if [ -n "${IMAGE_NAMESPACE}" ]; then
-              target="${SNAPSHOT_REGISTRY}/${IMAGE_NAMESPACE}/${name}"
+            if [ $((${#prefix} + ${#name})) -gt 255 ]; then
+              echo "::error::Repository path '${prefix}${name}'" \
+                "exceeds 255 characters"
+              exit 1
             fi
+            sources+=("${local_tag}")
+            names+=("${name}")
+          done < <(jq -r '.[]' <<< "${IMAGES}")
+          for i in "${!names[@]}"; do
+            target="${SNAPSHOT_REGISTRY}/${names[i]}"
             for tag in \
               "${VERSION}-SNAPSHOT-latest" \
               "${major_minor}-STAGING-latest" \
               "${VERSION}-${timestamp}"; do
-              docker tag "${local_tag}" "${target}:${tag}"
+              docker tag "${sources[i]}" "${target}:${tag}"
               if [ "${DRY_RUN}" = 'true' ]; then
                 echo "Dry run: would push ${target}:${tag}"
               else
@@ -892,7 +983,7 @@ jobs:
               fi
               pushed+=("${target}:${tag}")
             done
-          done < <(jq -r '.[]' <<< "${IMAGES}")
+          done
           {
             echo "## Snapshot Publish"
             echo ""
@@ -938,9 +1029,9 @@ jobs:
 
       # On Gerrit change-merged dispatches GERRIT_REFSPEC is the branch
       # ref (refs/heads/<branch>), so both checkout paths land on the
-      # merged commit. Both checkouts fetch depth 2 so diff-tree can
-      # compare HEAD against its parent (a depth-1 shallow HEAD looks
-      # like a root commit and diff-tree would silently emit nothing).
+      # merged commit. Both checkouts fetch depth 2: the detect action
+      # compares HEAD with its first parent and fails on a checkout
+      # too shallow to hold it.
       # A supplied gerrit_revision pins the checkout to the immutable
       # merged commit on the GitHub mirror (standard checkout below);
       # the Gerrit checkout path resolves the moving branch ref and
@@ -975,160 +1066,15 @@ jobs:
       # previously staged name:version pairs and the release tag they
       # promote to (the LF self-release container schema). Release
       # files with other distribution types (e.g. maven) belong to
-      # other pipelines and are ignored here.
+      # other pipelines and are ignored. Unquoted numeric versions
+      # are read literally (numeric_versions: literal, the default).
       - name: 'Detect container release file in merged commit'
         id: detect
-        shell: bash
-        env:
-          SNAPSHOT_REGISTRY: ${{ inputs.snapshot_registry }}
-          RELEASE_REGISTRY: ${{ inputs.release_registry }}
-        run: |
-          # Detect a release file added/changed by the merged commit.
-          # -m --first-parent makes merge commits diff against their
-          # first parent (plain diff-tree emits nothing for merges,
-          # which would silently suppress release detection). A
-          # diff-tree failure (e.g. insufficient history) fails loudly
-          # rather than silently skipping an intended release.
-          if ! files=$(git diff-tree -m --first-parent \
-            --no-commit-id -r HEAD --name-only -- "releases/"); then
-            echo "::error::git diff-tree failed; cannot detect" \
-              "release files (insufficient checkout history?)"
-            exit 1
-          fi
-          no_release() {
-            echo "$1"
-            {
-              echo "has_release=false"
-              echo "version="
-              echo "containers_json="
-              echo "pull_registry="
-              echo "push_registry="
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          }
-          declare -a container_files=()
-          while IFS= read -r file; do
-            [ -n "${file}" ] || continue
-            # Removed by the merged commit; not a release trigger
-            [ -f "${file}" ] || continue
-            dist_type=$(yq -r '.distribution_type // ""' "${file}")
-            if [ "${dist_type}" = 'container' ]; then
-              container_files+=("${file}")
-            else
-              echo "::notice::Ignoring non-container release file:" \
-                "${file} (distribution_type: ${dist_type:-unset})"
-            fi
-          done <<< "${files}"
-          if [ "${#container_files[@]}" -eq 0 ]; then
-            no_release "No container release file in merged commit"
-          fi
-          # Enforce exactly one container release descriptor per
-          # merged commit; multiple would make promotion arbitrary
-          if [ "${#container_files[@]}" -gt 1 ]; then
-            echo "::error::Multiple container release files in" \
-              "merged commit:"
-            printf -- '%s\n' "${container_files[@]}"
-            exit 1
-          fi
-          release_file="${container_files[0]}"
-          echo "Container release file detected: ${release_file}"
-          version=$(yq -r '.container_release_tag // ""' \
-            "${release_file}")
-          # Guard against malformed/hostile content before values
-          # reach $GITHUB_OUTPUT and downstream jobs: the value
-          # becomes a docker tag, so enforce the docker tag grammar
-          # (leading alphanumeric/underscore, 128 characters max)
-          if [[ ! "${version}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]
-          then
-            echo "::error::Invalid or missing" \
-              "container_release_tag in ${release_file}"
-            exit 1
-          fi
-          containers=$(yq -o=json -I=0 '.containers // []' \
-            "${release_file}")
-          # Names become registry repository paths (validate each
-          # slash-separated component, and require uniqueness —
-          # duplicate names would map to the same promotion
-          # destination and silently leave only the last source
-          # promoted) and versions become docker tags (apply the tag
-          # grammar), so crane receives well-formed references
-          if ! jq -e 'type == "array" and length > 0 and
-              ([.[].name] | length == (unique | length)) and
-              all(.[]; (.name | type == "string" and
-                (split("/") |
-                 all(.[];
-                   test("^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$")))) and
-                ((.version | type) as $t |
-                 ($t == "string" or $t == "number")) and
-                ((.version | tostring) |
-                test("^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")))' \
-              >/dev/null 2>&1 <<< "${containers}"; then
-            echo "::error::Invalid containers list in" \
-              "${release_file}: expected a non-empty array of" \
-              "{name, version} entries with registry-safe values"
-            exit 1
-          fi
-          # Normalise versions to strings (yq may emit numbers) and
-          # compact to a single line for $GITHUB_OUTPUT
-          containers=$(jq -c \
-            '[.[] | {name: .name, version: (.version | tostring)}]' \
-            <<< "${containers}")
-          # Optional per-file registry overrides (the LF self-release
-          # container schema carries these). The overrides may vary
-          # the port or repository path only: the promotion job logs
-          # in to these endpoints with the loaded registry
-          # credential, so an arbitrary host in a merged release file
-          # could exfiltrate it. Constrain each override to the host
-          # of the corresponding workflow input.
-          pull_registry=$(yq -r '.container_pull_registry // ""' \
-            "${release_file}")
-          push_registry=$(yq -r '.container_push_registry // ""' \
-            "${release_file}")
-          check_registry() {
-            local override="$1" allowed="$2" field="$3"
-            [ -n "${override}" ] || return 0
-            local pattern='^[A-Za-z0-9.-]+(:[0-9]+)?'
-            pattern+='(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*$'
-            if [[ ! "${override}" =~ ${pattern} ]]
-            then
-              echo "::error::Invalid ${field} in ${release_file}:" \
-                "${override} (expected host[:port] with an optional" \
-                "repository path of lowercase components)"
-              exit 1
-            fi
-            # Compare hosts, so a release file may still select a
-            # different port or repository path on the configured
-            # host — Nexus 3 and Artifactory both express the target
-            # repository that way, and the credential authenticates
-            # to the host either way. Strip the path before the port,
-            # because a host-only value carrying a path has no colon
-            # to cut at and would otherwise compare host and path
-            # together.
-            local override_host="${override%%/*}"
-            override_host="${override_host%%:*}"
-            local allowed_host="${allowed%%/*}"
-            allowed_host="${allowed_host%%:*}"
-            if [ "${override_host}" != "${allowed_host}" ]; then
-              echo "::error::${field} in ${release_file}" \
-                "(${override}) must stay on the configured" \
-                "registry host (${allowed_host}); the promotion" \
-                "credential only ever authenticates there"
-              exit 1
-            fi
-          }
-          check_registry "${pull_registry}" "${SNAPSHOT_REGISTRY}" \
-            'container_pull_registry'
-          check_registry "${push_registry}" "${RELEASE_REGISTRY}" \
-            'container_push_registry'
-          echo "Release tag: ${version}"
-          echo "Containers: ${containers}"
-          {
-            echo "has_release=true"
-            echo "version=${version}"
-            echo "containers_json=${containers}"
-            echo "pull_registry=${pull_registry}"
-            echo "push_registry=${push_registry}"
-          } >> "$GITHUB_OUTPUT"
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/docker-release-detect-action@bd5ea8d531f49d5eabbaa9e7a58447654c07fd34  # v0.0.1
+        with:
+          snapshot_registry: ${{ inputs.snapshot_registry }}
+          release_registry: ${{ inputs.release_registry }}
 
   # Registry-side promotion: crane copies the staged name:version
   # images named by the release file to the release registry at the
@@ -1140,6 +1086,7 @@ jobs:
     name: 'Promote Release'
     runs-on: ubuntu-latest
     needs:
+      - 'gerrit-validate'
       - 'check-release'
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.check-release.outputs.has_release == 'true' }}
@@ -1309,27 +1256,68 @@ jobs:
           PULL_REGISTRY: ${{ needs.check-release.outputs.pull_registry || inputs.snapshot_registry }}
           # yamllint disable-line rule:line-length
           PUSH_REGISTRY: ${{ needs.check-release.outputs.push_registry || inputs.release_registry }}
+          IMAGE_NAMESPACE: ${{ needs.gerrit-validate.outputs.namespace }}
           PUSH_LATEST: ${{ inputs.push_latest }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           # Registry-side promotion of every container named by the
-          # release file: staged name:version on the pull registry
-          # copies to name:release-tag on the push registry. The
-          # descriptor's name is the full repository path below the
-          # registry (the LF self-release schema, e.g.
-          # onap/ccsdk-odlsli-alpine-image), so no namespace applies
-          # here — re-adding image_namespace would double-prefix
-          # paths the snapshot publish already namespaced. crane
-          # copies manifests as-is, so multi-architecture manifest
-          # lists survive the promotion. Two phases: every copy
-          # completes before any mutable latest tag moves, so a
-          # failing copy never leaves a partially-latest release.
-          declare -a promoted=()
+          # release file: staged <ns>/name:version on the pull
+          # registry copies to <ns>/name:release-tag on the push
+          # registry, whichever registries the release file chose.
+          # Release-file names are relative to the namespace (ONAP's
+          # carry no onap/ prefix, some carry sub-paths such as
+          # so/sdnc-adapter), matching global-jjb's release-job.sh
+          # <registry>/<umbrella>/<name>, and the snapshot publish
+          # above namespaces the same way. crane copies manifests
+          # as-is, so multi-architecture manifest lists survive the
+          # promotion. Three phases: every final path is resolved and
+          # checked before anything copies, every copy completes
+          # before any mutable latest tag moves, so a failing copy
+          # never leaves a partially-latest release.
+          declare -a promoted=() paths=() versions=()
+          declare -A seen=()
+          # A registry's own path counts towards the 255-character
+          # repository limit; its host does not.
+          repo_prefix() {
+            if [[ "$1" == */* ]]; then echo "${1#*/}/"; fi
+          }
+          pull_prefix=$(repo_prefix "${PULL_REGISTRY}")
+          push_prefix=$(repo_prefix "${PUSH_REGISTRY}")
+          longest=$((${#pull_prefix} > ${#push_prefix} \
+            ? ${#pull_prefix} : ${#push_prefix}))
           while IFS= read -r container; do
             name=$(jq -r '.name' <<< "${container}")
             version=$(jq -r '.version' <<< "${container}")
-            src="${PULL_REGISTRY}/${name}:${version}"
-            dst="${PUSH_REGISTRY}/${name}:${RELEASE_TAG}"
+            path="${name}"
+            if [[ -n "${IMAGE_NAMESPACE}" &&
+              "${name}" == "${IMAGE_NAMESPACE}/"* ]]; then
+              echo "::notice::Release-file name '${name}' already" \
+                "starts with '${IMAGE_NAMESPACE}/' and is kept as-is;" \
+                "names are relative to the namespace, so it is" \
+                "probably double-prefixed"
+            elif [ -n "${IMAGE_NAMESPACE}" ]; then
+              path="${IMAGE_NAMESPACE}/${name}"
+            fi
+            # Names unique in the release file can still collide once
+            # namespaced ('foo' and '<ns>/foo'): the second copy would
+            # overwrite the first at the same release tag.
+            if [ -n "${seen[${path}]:-}" ]; then
+              echo "::error::Release-file names '${seen[${path}]}'" \
+                "and '${name}' both promote to '${path}'"
+              exit 1
+            fi
+            seen[${path}]="${name}"
+            if [ $((longest + ${#path})) -gt 255 ]; then
+              echo "::error::Repository path '${path}' exceeds 255" \
+                "characters with the registry path"
+              exit 1
+            fi
+            paths+=("${path}")
+            versions+=("${version}")
+          done < <(jq -c '.[]' <<< "${CONTAINERS}")
+          for i in "${!paths[@]}"; do
+            src="${PULL_REGISTRY}/${paths[i]}:${versions[i]}"
+            dst="${PUSH_REGISTRY}/${paths[i]}:${RELEASE_TAG}"
             if [ "${DRY_RUN}" = 'true' ]; then
               echo "Dry run: would copy ${src} -> ${dst}"
             else
@@ -1338,17 +1326,17 @@ jobs:
               echo "::endgroup::"
             fi
             promoted+=("${dst}")
-          done < <(jq -c '.[]' <<< "${CONTAINERS}")
+          done
           if [ "${PUSH_LATEST}" = 'true' ]; then
-            while IFS= read -r name; do
-              dst="${PUSH_REGISTRY}/${name}:${RELEASE_TAG}"
+            for path in "${paths[@]}"; do
+              dst="${PUSH_REGISTRY}/${path}:${RELEASE_TAG}"
               if [ "${DRY_RUN}" = 'true' ]; then
                 echo "Dry run: would tag ${dst} as latest"
               else
                 crane tag "${dst}" latest
               fi
-              promoted+=("${PUSH_REGISTRY}/${name}:latest")
-            done < <(jq -r '.[] | .name' <<< "${CONTAINERS}")
+              promoted+=("${PUSH_REGISTRY}/${path}:latest")
+            done
           fi
           {
             echo "## Release Promotion"

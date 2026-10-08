@@ -57,8 +57,9 @@ jobs:
     #   images: ''                    # JSON image list; empty auto-discovers
     #   platforms: 'linux/amd64'      # csv; add linux/arm64 for multi-arch
     #   ghcr_publish: true            # ghcr.io/<owner>/<name>
-    #   dockerhub_publish: false      # docker.io/<image_namespace>/<name>
-    #   image_namespace: ''           # Docker Hub namespace (org/user)
+    #   dockerhub_publish: false      # docker.io/<namespace>/<name>
+    #   namespace_mode: 'none'        # dockerhub_publish needs auto/manual
+    #   namespace: ''                 # manual only: Docker Hub org/user
     #   push_latest: false            # additionally push the latest tag
     #   test_command: ''              # smoke-test hook (IMAGES env = tags)
     #   attestations: true            # SLSA build provenance per image
