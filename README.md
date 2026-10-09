@@ -415,6 +415,7 @@ Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 | `dry_run`           | boolean | `false`         | Run the lane without publishing: no push, release, promotion or tag |
 | `attestations`      | boolean | `true`          | SLSA build provenance per pushed image (by digest)                  |
 | `sigstore_sign`     | boolean | `true`          | Sigstore cosign keyless signature per pushed image (by digest)      |
+| `signature_format`  | string  | `'bundle'`      | `bundle` (cosign v3 default) or `legacy` (`sha256-<hex>.sig` tag)   |
 
 <!-- markdownlint-enable MD013 -->
 
