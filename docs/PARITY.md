@@ -156,7 +156,7 @@ Unless noted, Jenkins paths below are global-jjb paths.
 | Docker Hub mirroring     | Daily `lftools nexus docker releasedockerhub` job per project (section 2)                                                                                                                                                                             | `build-test-release.yaml` can push to Docker Hub itself; `merge.yaml` cannot                                                                                  | N/A     | None                 |
 | Dry run                  | `DRY_RUN` parameter on release merge; image pushes and signing ignore it (section 6, D1)                                                                                                                                                              | `dry_run` in both publish lanes, self-tested on every pull request                                                                                            | Exceeds | #84, #89 (done), #28 |
 | Multi-architecture       | Not used by ONAP or ODL; promotion would flatten a manifest list (section 6, D4)                                                                                                                                                                      | `build-test-release.yaml` builds multi-platform; `merge.yaml` builds for the runner's platform; promotion keeps lists                                         | Partial | #32                  |
-| Scanning and SBOM        | Snyk template exists but neither project uses it; ONAP produces Maven dependency SBOMs, not image SBOMs                                                                                                                                               | Syft image SBOM (`sbom-action` image mode) and Grype in `build-test.yaml` and `build-test-release.yaml`; none in `merge.yaml`                                 | Exceeds | #35                  |
+| Scanning and SBOM        | Snyk template exists but neither project uses it; ONAP produces Maven dependency SBOMs, not image SBOMs                                                                                                                                               | Syft image SBOM (`sbom-action` image mode) and Grype in all three lanes; in `merge.yaml` they gate the snapshot publish                                       | Exceeds | #35, #120            |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -208,8 +208,13 @@ Unless noted, Jenkins paths below are global-jjb paths.
    per Jenkins instance, not per repository. Moving them off Jenkins
    needs a scheduled workflow somewhere; no issue tracks it. Nobody
    has checked whether the mirror copies cosign signature tags.
-8. **Merge-lane SBOM and scan (#35).** Verify and Model A produce
-   image SBOMs and Grype results; the merge lane does neither.
+8. **Merge-lane SBOM and scan (#120, addressed).** The merge lane
+   now runs the verify lane's gates: hadolint over the Dockerfiles
+   it builds, the test hook and image SBOM generation over the
+   archives its build job uploads, and Grype over those SBOMs. It
+   publishes no snapshot until each enabled gate passes. Jenkins
+   scans nothing here, so this exceeds parity. The hadolint and test
+   steps now exist in three copies (#35).
 9. **Multi-architecture merge builds (#32).**
 10. **Publish-path validation (#28).** A non-dry-run
     `build-test-release.yaml` publish to a scratch GHCR namespace,
