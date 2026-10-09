@@ -147,6 +147,17 @@ jobs:
       # build_command: ''             # escape hatch: project tooling builds
       # test_command: ''              # smoke-test hook (IMAGES env = tags)
       # build_permit_egress_traffic: false  # audit egress for build job
+      # Container release files: pass the registries merge.yaml
+      # receives, and a change adding or editing a
+      # releases/*-container.yaml file is checked before it merges.
+      # snapshot_registry: 'nexus3.onap.org:10003'
+      # release_registry: 'nexus3.onap.org:10002'
+      # registry_user: ''             # empty derives from the repository
+    # Optional: with a registry credential the release-file check also
+    # confirms each staged image exists and no release tag would change.
+    # secrets:
+    #   OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+    #   VAULT_MAPPING_JSON: ${{ secrets.VAULT_MAPPING_JSON }}
 
   # Report the overall workflow conclusion back to Gerrit as a Verified vote.
   vote:

@@ -29,7 +29,7 @@ with the Jenkins container jobs these workflows replace lives in
 
 | Workflow                                    | Trigger context       | Status      | Purpose                                                                     |
 | ------------------------------------------- | --------------------- | ----------- | --------------------------------------------------------------------------- |
-| `.github/workflows/build-test.yaml`         | Pull request / verify | Implemented | Image discovery, buildx build, hadolint, test hook, SBOM, Grype scan        |
+| `.github/workflows/build-test.yaml`         | Pull request / verify | Implemented | Discovery, buildx build, hadolint, tests, SBOM, Grype, release-file check   |
 | `.github/workflows/build-test-release.yaml` | Tag push (Model A)    | Implemented | Tag-validated multi-platform build/push to GHCR/Docker Hub, cosign + SLSA   |
 | `.github/workflows/merge.yaml`              | Merge (Model B)       | Implemented | Snapshot/staging publish (version.properties) + crane release promotion     |
 
@@ -165,15 +165,19 @@ cosign verify ghcr.io/<org>/<image>@sha256:<digest> \
 `build-test.yaml` (`->` denotes sequence; `{ }` runs in parallel):
 
 ```text
-gerrit-validate -> { repository-metadata | docker-metadata }
+gerrit-validate -> { repository-metadata | docker-metadata
+  | check-release }
 docker-metadata -> { dockerfile-lint | build }
 build -> { tests | sbom -> grype }
+check-release -> release-verify
 ```
 
 The dockerfile-lint (hadolint) job gates on docker-metadata rather
 than build:
 Dockerfile lint needs no built image, so lint findings surface even
-when the build itself fails.
+when the build itself fails. check-release and release-verify skip
+unless the caller sets the release registries (see
+[Release-file checks](#release-file-checks)).
 
 `build-test-release.yaml`:
 
@@ -366,6 +370,9 @@ same way before it pushes anything.
 | `grype_fail_on`               | string  | `'medium'` | Severity threshold that fails the Grype scan                         |
 | `grype_permit_fail`           | boolean | `false`    | Permit Grype findings without failing the job                        |
 | `grype_cache_db`              | string  | `'true'`   | Grype database cache mode; parallel callers need a single writer     |
+| `snapshot_registry`           | string  | `''`       | merge.yaml's snapshot registry; enables release-file checks          |
+| `release_registry`            | string  | `''`       | merge.yaml's release registry; enables release-file checks           |
+| `registry_user`               | string  | `''`       | Registry username override; empty derives from the repository name   |
 | `harden_runner_egress`        | string  | `'block'`  | Harden-runner egress policy: `block` or `audit`                      |
 | `harden_runner_allowlist`     | string  | (pinned)   | Out-of-band harden-runner allow-list configuration                   |
 | `build_permit_egress_traffic` | boolean | `false`    | Audit egress scoped to the build job (un-enumerable base registries) |
@@ -376,9 +383,12 @@ same way before it pushes anything.
 
 <!-- markdownlint-enable MD013 -->
 
-The workflow takes no secrets. Lint, test and scan failures honour
-the org-wide `NO_BLOCK_AUDIT_FAIL` repository variable as a runtime
-escape hatch alongside the per-call `*_permit_fail` inputs.
+Two optional secrets, `OP_SERVICE_ACCOUNT_TOKEN` and
+`VAULT_MAPPING_JSON`, load the registry credential the release-file
+checks use; nothing else in the lane needs them. Lint, test and scan
+failures honour the org-wide `NO_BLOCK_AUDIT_FAIL` repository
+variable as a runtime escape hatch alongside the per-call
+`*_permit_fail` inputs.
 
 `grype_cache_db` decides how the Grype scan uses the Actions cache for
 its vulnerability database. The cache keys rotate on the database
@@ -393,6 +403,45 @@ fails the scan rather than slowing it.
 
 The input's own description names the three modes, and
 `examples/build-test/` shows the parallel arrangement.
+
+#### Release-file checks
+
+Jenkins' `gerrit-release-verify` rejects a bad container release file
+before it merges. This lane does the same once the caller passes
+`snapshot_registry` and `release_registry`, with the values its
+`merge.yaml` caller receives; without them the two jobs below skip,
+and the lane behaves as before. A change that adds or edits a
+`releases/` file with `distribution_type: container` then goes
+through two jobs, neither of which touches the image build:
+
+- **check-release** runs `docker-release-detect-action`, the step
+  `merge.yaml` runs once the file merges, with the same registries.
+  It needs no network access or credential. A malformed file fails
+  the run with an annotation naming the file and the field: a
+  missing or invalid `container_release_tag`, a bad container name
+  or version, more than one container release file, or a registry
+  override leaving the configured host.
+- **release-verify** runs `docker-promote-action` with
+  `mode: verify`, which performs the promotion's checks and writes
+  nothing. It fails when a staged image does not exist, or a release
+  tag already holds different bits (`on_conflict: 'fail'`, as the
+  merge lane's promotion through `docker-promote-action` refuses
+  it); an image already released with the same digest passes.
+  Registries resolve as in `merge.yaml`: a release-file override,
+  else the input, with the image namespace between registry and
+  name. The job loads the registry credential
+  through `credential-load-action` and checks out nothing, so no
+  project code runs beside it. Without the two secrets, on a fork
+  pull request for instance, it warns and the offline check stands
+  alone.
+
+The comparison is HEAD against its first parent. A Gerrit patch set
+then compares with the commit it sits on, and a pull request's
+default checkout, the merge commit GitHub prepares, with the target
+branch, so every commit of the pull request counts. Leave `ref`
+empty on pull requests: pinned to the head commit, the comparison
+sees that commit's own changes alone. The `has_release` workflow
+output reports whether the lane detected a release file that passed.
 
 ### build-test-release.yaml
 
@@ -582,7 +631,13 @@ requests against pinned fixture releases:
 (three images with a same-repository FROM chain), covering
 auto-discovery, explicit image lists with per-image build arguments,
 image namespacing, the `build_command` escape hatch and the
-`test_command` hook.
+`test_command` hook. A further call checks out the monorepo commit
+that adds a release descriptor, with the release registries set, and
+a follow-on job requires the lane to report that file detected.
+`tests/test_verify_release.sh` covers the rest of the release-file
+checks: valid and malformed release files against
+`docker-release-detect-action`, and `docker-promote-action` in verify
+mode against a fake `crane`, each at the commit the lane pins.
 
 Both publish lanes are also self-tested, under `dry_run`. Neither
 publishes: they build, audit and test the fixture images, then

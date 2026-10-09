@@ -244,6 +244,53 @@ jobs:
       namespace_mode: 'auto'
       dry_run: true
 
+  # The verify lane's release-file checks, end to end, on the fixture
+  # commit that adds a valid release descriptor: the same commit and
+  # registries as merge-dry-run above, so verify reads the file
+  # exactly as that merge does. No secrets reach the call, so
+  # release-verify warns and keeps the offline check alone, which is
+  # the path every fork pull request takes. The malformed files that
+  # must fail, and the registry checks themselves, run in
+  # verify-release-checks below. Lint, SBOM and Grype are off: the
+  # build-test legs cover them.
+  verify-release:
+    name: 'Build/Test (release file)'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-docker-monorepo'
+      ref: 'v0.1.0'
+      snapshot_registry: 'nexus3.onap.org:10003'
+      release_registry: 'nexus3.onap.org:10002'
+      namespace_mode: 'auto'
+      lint_enabled: false
+      sbom_enabled: false
+      grype_enabled: false
+
+  # A leg that passes proves nothing if detection quietly found no
+  # file; the release descriptor must have been detected and passed
+  verify-release-detected:
+    name: 'Release file detected'
+    needs: verify-release
+    permissions: {}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 2
+    steps:
+      - name: 'Require a detected release'
+        shell: bash
+        env:
+          HAS_RELEASE: ${{ needs.verify-release.outputs.has_release }}
+        run: |
+          # The fixture commit adds releases/1.2.3-container.yaml
+          if [ "${HAS_RELEASE}" != 'true' ]; then
+            echo "::error::The verify lane did not detect the fixture's" \
+              "release file (has_release '${HAS_RELEASE}')"
+            exit 1
+          fi
+          echo "Release file detected and validated ✅"
+
   # The release lane, end to end, without publishing anything.
   #
   # dry_run resolves no target registry, so the lane discovers and
@@ -418,3 +465,35 @@ jobs:
           persist-credentials: false
       - name: 'Test namespace_mode resolution'
         run: tests/test_namespace_mode.sh
+
+  # The verify lane's release-file checks, case by case: the wiring
+  # of check-release and release-verify, the registry input step
+  # extracted from the workflow, docker-release-detect-action at its
+  # pinned commit against valid and malformed release files (each
+  # malformed one must fail), and docker-promote-action at its pinned
+  # commit in verify mode against a fake crane.
+  verify-release-checks:
+    name: 'Release file checks'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: '@e0e35011ee145321a51d3226f044ec88dfe645b1'  # v0.16.4
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Test release-file checks'
+        run: tests/test_verify_release.sh

@@ -10,9 +10,21 @@
 # build-test-release.yaml own the publish legs.
 #
 # Job graph (-> denotes sequence; { } runs in parallel):
-#   gerrit-validate -> { repository-metadata | docker-metadata }
+#   gerrit-validate -> { repository-metadata | docker-metadata
+#     | check-release }
 #   docker-metadata -> { dockerfile-lint | build }
 #   build -> { tests | sbom -> grype }
+#   check-release -> release-verify
+#
+# Release-file verification: with snapshot_registry and
+# release_registry set (the values merge.yaml receives), a change
+# that adds or edits a container release file under releases/ is
+# checked before it merges, as Jenkins' gerrit-release-verify does.
+# check-release validates the file offline; release-verify then runs
+# the promotion's registry checks without writing anything, when a
+# registry credential is available. Neither job touches the image
+# build. check-release still runs detection on every change, which
+# takes seconds; release-verify skips when it finds no release file.
 #
 # The dockerfile-lint (hadolint) job gates on docker-metadata rather
 # than build:
@@ -218,6 +230,44 @@ on:
         type: string
         default: 'true'
 
+      # --- Release-file verification (off unless the registries are set) ---
+      snapshot_registry:
+        description: >-
+          Registry that receives snapshot/staging publishes, as
+          host[:port] with an optional repository path. Nexus 3
+          distinguishes repositories by port
+          (nexus3.onap.org:10003); JFrog Artifactory's
+          repository-path method puts them in the path
+          (acme.jfrog.io/docker-snapshot), and its subdomain method
+          in the host (docker-snapshot.acme.jfrog.io). Also the
+          default registry release promotion pulls staged images
+          from (a container_pull_registry field in the release file
+          wins). Pass the value merge.yaml receives; with
+          release_registry, it turns on the release-file checks.
+          Empty (the default) leaves them off.
+        required: false
+        type: string
+        default: ''
+      release_registry:
+        description: >-
+          Registry that receives release promotions, as host[:port]
+          with an optional repository path, e.g.
+          nexus3.onap.org:10002 or acme.jfrog.io/docker-release. A
+          container_push_registry field in the release file wins.
+          Pass the value merge.yaml receives; empty (the default)
+          leaves the release-file checks off.
+        required: false
+        type: string
+        default: ''
+      registry_user:
+        description: >-
+          Registry username override; empty derives the username from
+          the repository name (the 1Password credential naming
+          contract)
+        required: false
+        type: string
+        default: ''
+
       # --- Runner hardening ---
       harden_runner_egress:
         description: "Harden-runner egress policy: 'block' or 'audit'"
@@ -265,6 +315,34 @@ on:
         required: false
         type: string
         default: ''
+
+    secrets:
+      OP_SERVICE_ACCOUNT_TOKEN:
+        description: >-
+          1Password service-account token used by credential-load-action
+          to fetch the per-repository registry credential from the common
+          per-org CI/CD vault (op://<vault>/<repository-name>/password).
+          The release-verify job skips its registry checks with a
+          warning when unset, leaving the offline release-file check,
+          so PR/self-test contexts still work.
+        required: false
+      VAULT_MAPPING_JSON:
+        description: >-
+          Base64-encoded JSON mapping of organisation name to 1Password
+          vault ID, keyed on github.repository_owner; consumed by
+          credential-load-action to resolve the correct vault. The
+          release-verify job skips its registry checks with a warning
+          when unset, leaving the offline release-file check, so
+          PR/self-test contexts still work.
+        required: false
+
+    outputs:
+      has_release:
+        description: >-
+          'true' when the change adds or edits a container release
+          file and it passed the offline check; 'false' when it
+          carries none; empty when the release-file checks are off
+        value: ${{ jobs.check-release.outputs.has_release }}
 
 permissions: {}
 
@@ -889,3 +967,242 @@ jobs:
           retention-days: '45'
           cache-db: ${{ inputs.grype_cache_db }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Offline release-file check: the change adds or edits a container
+  # release file under releases/, and it must parse and validate as
+  # merge.yaml's check-release job will read it once merged. Same
+  # action, same registry inputs, so verify predicts merge. The
+  # registry inputs are what turn this on: without them, a release
+  # file's registry overrides have no host to be checked against.
+  check-release:
+    name: 'Check Release File'
+    needs: gerrit-validate
+    # yamllint disable-line rule:line-length
+    if: inputs.snapshot_registry != '' || inputs.release_registry != ''
+    runs-on: ubuntu-latest
+    outputs:
+      has_release: ${{ steps.detect.outputs.has_release }}
+      version: ${{ steps.detect.outputs.version }}
+      containers_json: ${{ steps.detect.outputs.containers_json }}
+      pull_registry: ${{ steps.detect.outputs.pull_registry }}
+      push_registry: ${{ steps.detect.outputs.push_registry }}
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Validate registry inputs'
+        id: registries
+        shell: bash
+        env:
+          SNAPSHOT_REGISTRY: ${{ inputs.snapshot_registry }}
+          RELEASE_REGISTRY: ${{ inputs.release_registry }}
+        run: |
+          # merge.yaml requires both registries, and an override in a
+          # release file is checked against the matching one, so a
+          # check with only one of them could not predict the merge.
+          # The pattern is merge.yaml's: host[:port] with an optional
+          # repository path of Docker reference components.
+          if [ -z "${SNAPSHOT_REGISTRY}" ] || [ -z "${RELEASE_REGISTRY}" ]
+          then
+            echo "::error::Release-file checks need both" \
+              "snapshot_registry and release_registry (the values" \
+              "merge.yaml receives); set both, or neither"
+            exit 1
+          fi
+          pattern='^[A-Za-z0-9.-]+(:[0-9]+)?'
+          pattern+='(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*$'
+          for registry in "${SNAPSHOT_REGISTRY}" "${RELEASE_REGISTRY}"
+          do
+            if [[ ! "${registry}" =~ ${pattern} ]]
+            then
+              echo "::error::Invalid registry input: ${registry}" \
+                "(expected host[:port] with an optional repository" \
+                "path of lowercase components)"
+              exit 1
+            fi
+          done
+          echo "Registry inputs validated ✅"
+
+      # The detect action compares HEAD with its first parent, so both
+      # checkouts fetch depth 2 and the action fails on one too shallow
+      # to hold it. A Gerrit patch set compares with the commit it
+      # sits on. A pull request's default checkout is the merge commit
+      # GitHub prepares, whose first parent is the target branch, so
+      # every commit of the pull request counts; a caller pinning ref
+      # to the head commit would see only that commit's own changes.
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          fetch-depth: '2'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      # Reads files and git history only; runs nothing from the
+      # checkout and contacts no registry. Any value it outputs has
+      # passed its grammar checks, and a registry override has kept
+      # the host of the matching input, before release-verify sends
+      # it, with a credential, to a registry. Release files with
+      # other distribution types are left to their own pipelines.
+      - name: 'Detect container release file in change'
+        id: detect
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/docker-release-detect-action@bd5ea8d531f49d5eabbaa9e7a58447654c07fd34  # v0.0.1
+        with:
+          snapshot_registry: ${{ inputs.snapshot_registry }}
+          release_registry: ${{ inputs.release_registry }}
+
+  # The promotion's own checks, with nothing written: every staged
+  # image the release file names must exist, and no release tag may
+  # already hold different bits. A tag already holding the staged
+  # digest passes as released. The job checks out nothing, so no
+  # project code runs beside the registry credential; it consumes
+  # only check-release's validated outputs.
+  release-verify:
+    name: 'Verify Release Promotion'
+    runs-on: ubuntu-latest
+    needs:
+      - 'gerrit-validate'
+      - 'check-release'
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.check-release.outputs.has_release == 'true' }}
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # Staged images on Nexus 3 snapshot ports may need a login to
+      # read. Without a credential (fork pull requests, self-tests)
+      # the change keeps the offline check alone, with a warning.
+      - name: 'Check registry credentials'
+        id: creds
+        shell: bash
+        env:
+          # yamllint disable-line rule:line-length
+          HAS_CREDENTIALS: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' && secrets.VAULT_MAPPING_JSON != '' }}
+        run: |
+          # Gate the registry checks on credential availability
+          if [ "${HAS_CREDENTIALS}" = 'true' ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::OP_SERVICE_ACCOUNT_TOKEN and/or" \
+              "VAULT_MAPPING_JSON unavailable; the release file passed" \
+              "the offline check, but its staged images and release" \
+              "tags were not checked"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Resolve registry username'
+        id: registry-user
+        if: steps.creds.outputs.available == 'true'
+        shell: bash
+        env:
+          REGISTRY_USER_INPUT: ${{ inputs.registry_user }}
+          # The repository actually checked out, which can differ
+          # from GITHUB_REPOSITORY for cross-repository calls
+          TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
+        run: |
+          # merge.yaml's 1Password credential naming contract: the
+          # credential item takes the name of the repository being
+          # released, and so does the username unless registry_user
+          # overrides it. Both reach $GITHUB_OUTPUT, so each is
+          # constrained to a character set holding no line break.
+          registry_user="${REGISTRY_USER_INPUT:-${TARGET_REPOSITORY##*/}}"
+          credential_name="${TARGET_REPOSITORY##*/}"
+          if [[ ! "${registry_user}" =~ ^[A-Za-z0-9._@+-]+$ ]]; then
+            echo "::error::Invalid registry username:" \
+              "${registry_user}"
+            exit 1
+          fi
+          if [[ ! "${credential_name}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Invalid credential name:" \
+              "${credential_name}"
+            exit 1
+          fi
+          {
+            echo "registry_user=${registry_user}"
+            echo "credential_name=${credential_name}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 'Load registry credential'
+        id: load-credential
+        if: steps.creds.outputs.available == 'true'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/credential-load-action@025002b47f4302fb7252175c470da69435060176  # v2.0.4
+        with:
+          # yamllint disable-line rule:line-length
+          op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          vault_mapping_json: ${{ secrets.VAULT_MAPPING_JSON }}
+          # yamllint disable-line rule:line-length
+          credential_name: ${{ steps.registry-user.outputs.credential_name }}
+          credential_grants_json: ${{ vars.CREDENTIAL_LOAD_GRANTS }}
+          export_env: 'false'
+
+      # The registries and namespace resolve exactly as merge.yaml's
+      # promotion resolves them: a release-file override, else the
+      # input, with the lane's namespace between registry and name.
+      # on_conflict 'fail' matches the merge lane's promotion through
+      # docker-promote-action (#135): release tags are immutable, so
+      # a tag already holding other bits fails here as it will there.
+      # The action logs in to both endpoints itself, in a private
+      # docker config it removes when the step ends.
+      - name: 'Verify staged images and release tags'
+        if: steps.creds.outputs.available == 'true'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/docker-promote-action@8b0d32d8392bae6dea61e8e4e182ee687bd6b3ab  # v0.1.0
+        with:
+          mode: 'verify'
+          containers_json: ${{ needs.check-release.outputs.containers_json }}
+          release_tag: ${{ needs.check-release.outputs.version }}
+          # yamllint disable-line rule:line-length
+          pull_registry: ${{ needs.check-release.outputs.pull_registry || inputs.snapshot_registry }}
+          # yamllint disable-line rule:line-length
+          push_registry: ${{ needs.check-release.outputs.push_registry || inputs.release_registry }}
+          namespace: ${{ needs.gerrit-validate.outputs.namespace }}
+          on_conflict: 'fail'
+          registry_user: ${{ steps.registry-user.outputs.registry_user }}
+          registry_password: ${{ steps.load-credential.outputs.credential }}
