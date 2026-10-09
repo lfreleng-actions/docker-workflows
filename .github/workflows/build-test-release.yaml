@@ -6,8 +6,9 @@
 #
 # Reproduces the canonical Linux Foundation release pipeline shape for
 # container images: a validated, signed semver tag drives the version,
-# the images build (multi-platform capable) and push to GHCR and/or
-# Docker Hub, each pushed image signs with Sigstore cosign (keyless)
+# the images build (multi-platform capable) and push to GHCR, Docker
+# Hub and/or a Nexus 3 registry, each pushed image signs with Sigstore
+# cosign (keyless)
 # and gains SLSA build provenance, and the audits gate the release:
 #   tag-validate -> build -> sign
 #   docker-metadata -> { dockerfile-lint | build }
@@ -20,6 +21,13 @@
 #   * Docker Hub: docker.io/<namespace>/<name>, authenticated
 #     with the optional DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD secrets;
 #     skips with a warning when unset
+#   * The registry input: <registry>/<namespace>/<name>, for Nexus 3
+#     (and, untested, Artifactory), authenticated to its host[:port]
+#     with the credential credential-load-action loads from 1Password
+#     through the optional OP_SERVICE_ACCOUNT_TOKEN/VAULT_MAPPING_JSON
+#     secrets; skips with a warning when unset. The build, sign and
+#     promote-release jobs each load it for themselves, and only when
+#     they push or tag there.
 #
 # Platform strategy: the default single-platform build uses the
 # buildx docker driver, so images build in array order against the
@@ -135,6 +143,34 @@ on:
         required: false
         type: boolean
         default: false
+      registry:
+        description: >-
+          A further registry to publish to, as host[:port] with an
+          optional repository path; empty (the default) adds none.
+          Images push as <registry>/<namespace>/<name>, or
+          <registry>/<name> under namespace_mode 'none'. Nexus 3
+          addresses a repository by port (nexus3.onap.org:10002);
+          JFrog Artifactory's repository-path method puts it in the
+          path (acme.jfrog.io/docker-release), which validates and
+          resolves but is untested against a live instance. The lane
+          logs in to host[:port] with the credential
+          credential-load-action loads for the published repository,
+          and skips this registry with a warning when the
+          OP_SERVICE_ACCOUNT_TOKEN/VAULT_MAPPING_JSON secrets are
+          unavailable. GHCR and Docker Hub hosts are refused: use
+          ghcr_publish and dockerhub_publish.
+        required: false
+        type: string
+        default: ''
+      registry_user:
+        description: >-
+          Login username for the registry input; empty derives it from
+          the published repository's name (the 1Password credential
+          naming contract). The credential itself always keys on that
+          name. An error without the registry input.
+        required: false
+        type: string
+        default: ''
       push_latest:
         description: >-
           Additionally publish the 'latest' tag per image. The tag
@@ -147,8 +183,11 @@ on:
       dry_run:
         description: >-
           Run the release lane without publishing. Dry runs skip
-          registry login and resolve no target registry, so the build
-          loads images locally and pushes nothing; they create no
+          credential loading and registry login and resolve no target
+          registry, so the build loads images locally and pushes
+          nothing; the build job's summary reports the references
+          each requested registry would receive and the login it
+          would use. They create no
           draft release, attach no release asset, promote no release
           and move no 'latest' tag. Everything else runs for real,
           including tag validation, discovery, the build, hadolint,
@@ -355,6 +394,22 @@ on:
           publishing with a warning when unset, so PR/self-test
           contexts still work.
         required: false
+      OP_SERVICE_ACCOUNT_TOKEN:
+        description: >-
+          1Password service-account token credential-load-action uses
+          to fetch the registry input's credential from the common
+          per-org CI/CD vault (op://<vault>/<repository-name>/password).
+          The build job skips that registry with a warning when unset,
+          so PR/self-test contexts still work.
+        required: false
+      VAULT_MAPPING_JSON:
+        description: >-
+          Base64-encoded JSON mapping of organisation name to
+          1Password vault ID, keyed on github.repository_owner;
+          consumed by credential-load-action to resolve the vault. The
+          build job skips the registry input with a warning when
+          unset, so PR/self-test contexts still work.
+        required: false
 
     outputs:
       tag:
@@ -365,6 +420,12 @@ on:
           JSON array of pushed images as {name, image, digest}
           objects, one entry per image per registry
         value: ${{ jobs.build.outputs.pushed }}
+      registry_plan:
+        description: >-
+          Dry runs only: JSON array of the registry plan's lines, the
+          login and the pushes each requested registry would receive
+          and any credentials it lacks; empty when the run publishes
+        value: ${{ jobs.build.outputs.registry_plan }}
 
 permissions: {}
 
@@ -400,6 +461,83 @@ jobs:
             exit 1
           fi
           echo "Platforms input validated ✅"
+
+      # Mirrors merge.yaml's check of its registry inputs, so the two
+      # lanes accept the same values, save that the host must also be
+      # one Docker reads as a host (see below). It runs whether or not
+      # credentials exist, so dry runs and fork pull requests surface
+      # a bad value too.
+      - name: 'Validate registry inputs'
+        shell: bash
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          REGISTRY_USER: ${{ inputs.registry_user }}
+        run: |
+          # Validate the registry input and its username override
+          if [ -z "${REGISTRY}" ]; then
+            if [ -n "${REGISTRY_USER}" ]; then
+              echo "::error::registry_user is set but registry is" \
+                "empty; set registry or clear registry_user"
+              exit 1
+            fi
+            echo "No registry input; GHCR/Docker Hub only ✅"
+            exit 0
+          fi
+          # Require host[:port] with an optional repository path: the
+          # value composes image references and reaches docker login,
+          # docker push, cosign and crane, so schemes, credentials,
+          # query strings or hostile content must stop here. The path
+          # serves Artifactory's repository-path method, where the
+          # repository key sits below the host rather than on a port
+          # of its own as in Nexus 3.
+          #
+          # Path components take Docker's reference grammar: runs of
+          # lowercase alphanumerics joined by a single '.' or '_',
+          # exactly '__', or one or more '-'. Docker and crane reject
+          # anything else when they parse the reference, so a looser
+          # rule would accept a value here only to fail the publish
+          # later. The rule also excludes '.', '..' and trailing
+          # separators without needing checks of their own.
+          #
+          # The host takes dot-separated DNS labels of up to 63
+          # characters, so '.', 'a..b' or an over-long label stop here
+          # rather than in Docker.
+          label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+          pattern="^${label}([.]${label})*(:[0-9]+)?"
+          pattern+='(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*$'
+          if [[ ! "${REGISTRY}" =~ ${pattern} ]]; then
+            echo "::error::Invalid registry input: ${REGISTRY}" \
+              "(expected host[:port] with an optional repository" \
+              "path of lowercase components)"
+            exit 1
+          fi
+          # Docker reads a first component as a registry host only
+          # when it holds a '.' or a port or is localhost; anything
+          # else names a Docker Hub namespace, so the lane would log
+          # in to one place and push to docker.io.
+          case "${REGISTRY%%/*}" in
+            *.* | *:* | localhost) ;;
+            *)
+              echo "::error::registry '${REGISTRY}' has no '.' or" \
+                "port in its host, so Docker would push it to Docker" \
+                "Hub; use a fully qualified host or add the port"
+              exit 1
+              ;;
+          esac
+          # GHCR and Docker Hub have inputs of their own, with their
+          # own credentials. Logging in to either with the 1Password
+          # credential would replace that login in the docker config
+          # the later steps share.
+          host="${REGISTRY%%/*}"
+          host="${host%%:*}"
+          case "${host,,}" in
+            ghcr.io|docker.io|index.docker.io|registry-1.docker.io)
+              echo "::error::registry '${REGISTRY}' names GHCR or" \
+                "Docker Hub; use ghcr_publish or dockerhub_publish"
+              exit 1
+              ;;
+          esac
+          echo "Registry input validated: ${REGISTRY} ✅"
 
       # A dry run has no tag-push context to infer the release tag
       # from, so it validates the tag named by the ref input instead.
@@ -752,6 +890,19 @@ jobs:
       image_count: ${{ steps.build.outputs.image_count }}
       pushed: ${{ steps.build.outputs.pushed }}
       pushed_count: ${{ steps.build.outputs.pushed_count }}
+      # Which registries published ('true'/'false'), and how the jobs
+      # that push or tag after the build (sign, promote-release)
+      # authenticate to the registry input: empty unless images
+      # published there. promote-release reads these exact decisions,
+      # never a substring of pushed, which a registry input such as
+      # private-docker.io would match.
+      ghcr: ${{ steps.registries.outputs.ghcr }}
+      dockerhub: ${{ steps.registries.outputs.dockerhub }}
+      registry_login: ${{ steps.registries.outputs.registry_login }}
+      registry_user: ${{ steps.registries.outputs.registry_user }}
+      credential_name: ${{ steps.registries.outputs.credential_name }}
+      # A dry run's registry plan, as a JSON array of its lines
+      registry_plan: ${{ steps.registries.outputs.plan }}
     permissions:
       contents: read
       packages: write  # Push images to GHCR
@@ -836,18 +987,26 @@ jobs:
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
-      # The Docker Hub secrets stay optional so PR/self-test contexts
-      # can exercise the pipeline; when absent the Docker Hub leg
-      # skips with a warning rather than failing. GHCR authenticates
-      # with GITHUB_TOKEN, which always exists.
+      # The Docker Hub and 1Password secrets stay optional so
+      # PR/self-test contexts can exercise the pipeline; when absent
+      # the registry they serve skips with a warning rather than
+      # failing. GHCR authenticates with GITHUB_TOKEN, which always
+      # exists.
+      #
+      # Every registry decision the lane makes is taken here, once:
+      # which registries publish, the repository prefix each pushes
+      # to, and the registry input's login endpoint, username and
+      # credential name, which the sign and promote-release jobs
+      # read from this job's outputs.
       #
       # A dry run resolves no target registry. That is the single
       # point where publishing turns off: with no repository resolved
       # the build action tags nothing for a remote, pushes nothing and
       # reports pushed_count 0, which in turn skips signing,
-      # attestation and the 'latest' retag downstream. The
-      # gerrit-validate job has already rejected a namespace that
-      # Docker Hub publishing cannot use, dry run or not.
+      # attestation and the 'latest' retag downstream. It reports the
+      # plan instead. The gerrit-validate job has already rejected a
+      # registry value or a namespace that publishing cannot use, dry
+      # run or not.
       - name: 'Resolve target registries'
         id: registries
         shell: bash
@@ -856,47 +1015,152 @@ jobs:
           DOCKERHUB_PUBLISH: ${{ inputs.dockerhub_publish }}
           # yamllint disable-line rule:line-length
           HAS_DOCKERHUB_CREDS: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_PASSWORD != '' }}
+          REGISTRY: ${{ inputs.registry }}
+          REGISTRY_USER_INPUT: ${{ inputs.registry_user }}
+          # yamllint disable-line rule:line-length
+          HAS_REGISTRY_CREDS: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' && secrets.VAULT_MAPPING_JSON != '' }}
+          # The repository actually checked out/published, which can
+          # differ from GITHUB_REPOSITORY for cross-repository calls
+          TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
           IMAGE_NAMESPACE: ${{ needs.gerrit-validate.outputs.namespace }}
+          IMAGES_JSON: ${{ needs.docker-metadata.outputs.images_json }}
+          VERSION: ${{ steps.version.outputs.version }}
           DRY_RUN: ${{ inputs.dry_run }}
           OWNER: ${{ github.repository_owner }}
         run: |
-          # Gate each registry on its configuration/credentials
-          dockerhub='false'
+          # Resolve each requested registry to the repository prefix
+          # the build action pushes to and the login it needs, then
+          # gate it on this run's credentials. GHCR comes first: its
+          # digest is the one a multi-platform build pulls back for
+          # scanning. The parallel arrays hold one entry per requested
+          # registry: its kind, its prefix, its login and the secrets
+          # it lacks in this run ('' when it has them all).
+          declare -a kinds=() targets=() logins=() missing=()
+          declare -A publish=(
+            [ghcr]='false' [dockerhub]='false' [registry]='false'
+          )
+          if [ "${GHCR_PUBLISH}" = 'true' ]; then
+            owner=$(tr '[:upper:]' '[:lower:]' <<< "${OWNER}")
+            kinds+=('ghcr')
+            targets+=("ghcr.io/${owner}")
+            logins+=('ghcr.io with GITHUB_TOKEN')
+            missing+=('')
+          fi
           if [ "${DOCKERHUB_PUBLISH}" = 'true' ]; then
-            if [ "${HAS_DOCKERHUB_CREDS}" != 'true' ]; then
-              echo "::warning::DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD" \
-                "unavailable; skipping Docker Hub publish"
+            kinds+=('dockerhub')
+            targets+=("docker.io/${IMAGE_NAMESPACE}")
+            logins+=('docker.io as DOCKERHUB_USERNAME')
+            if [ "${HAS_DOCKERHUB_CREDS}" = 'true' ]; then
+              missing+=('')
             else
-              dockerhub='true'
+              missing+=('DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD')
             fi
           fi
-          ghcr='false'
-          if [ "${GHCR_PUBLISH}" = 'true' ]; then
-            ghcr='true'
+          registry_user=''
+          credential_name=''
+          login_endpoint=''
+          if [ -n "${REGISTRY}" ]; then
+            # 1Password credential naming contract: the credential
+            # (and by default the username) take the name of the
+            # repository being published. registry_user overrides
+            # the login username only, so a cross-repository call
+            # still loads the target's item rather than the caller's.
+            registry_user="${REGISTRY_USER_INPUT:-${TARGET_REPOSITORY##*/}}"
+            credential_name="${TARGET_REPOSITORY##*/}"
+            # Both values reach $GITHUB_OUTPUT, where a line break
+            # would append a record of its own, so each is
+            # constrained rather than merely escaped. The username
+            # admits '@' and '+' as well: registry accounts genuinely
+            # use them, since Artifactory SaaS identities are commonly
+            # email addresses, and the value only travels to docker
+            # login. The credential name keys a 1Password item and
+            # derives from a repository name, so it keeps the tighter
+            # set.
+            if [[ ! "${registry_user}" =~ ^[A-Za-z0-9._@+-]+$ ]]; then
+              echo "::error::Invalid registry username: ${registry_user}"
+              exit 1
+            fi
+            if [[ ! "${credential_name}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "::error::Invalid credential name: ${credential_name}"
+              exit 1
+            fi
+            # docker login takes an endpoint, not an image reference.
+            # A repository path belongs to the reference and
+            # authenticates against the host serving it, which is how
+            # Artifactory's repository-path method works; Nexus 3
+            # encodes the repository in the port, so there the whole
+            # value stays.
+            login_endpoint="${REGISTRY%%/*}"
+            kinds+=('registry')
+            targets+=("${REGISTRY}${IMAGE_NAMESPACE:+/${IMAGE_NAMESPACE}}")
+            logins+=("${login_endpoint} as ${registry_user}")
+            if [ "${HAS_REGISTRY_CREDS}" = 'true' ]; then
+              missing+=('')
+            else
+              missing+=('OP_SERVICE_ACCOUNT_TOKEN/VAULT_MAPPING_JSON')
+            fi
           fi
-          if [ "${DRY_RUN}" = 'true' ]; then
-            echo "::notice::Dry run: images build and archive, and" \
-              "nothing publishes (GHCR requested: ${ghcr}, Docker" \
-              "Hub resolved: ${dockerhub})"
-            ghcr='false'
-            dockerhub='false'
-          elif [ "${ghcr}" != 'true' ] && [ "${dockerhub}" != 'true' ]; then
-            echo "::warning::No target registries resolved; images" \
-              "will build and archive but nothing will publish"
-          fi
-          # The repository prefixes the build action pushes to, GHCR
-          # first: its digest is the one pulled back for scanning
+
           repositories=''
-          if [ "${ghcr}" = 'true' ]; then
-            repositories="ghcr.io/$(tr '[:upper:]' '[:lower:]' <<< "${OWNER}")"
+          plan_json=''
+          if [ "${DRY_RUN}" = 'true' ]; then
+            # Report what a real run would log in to and push, then
+            # resolve nothing, so nothing logs in or pushes
+            echo "::notice::Dry run: images build and archive, and" \
+              "nothing publishes"
+            mapfile -t names < <(jq -r '.[].name' <<< "${IMAGES_JSON}")
+            plan=()
+            if [ "${#kinds[@]}" -eq 0 ]; then
+              plan+=('Dry run: no target registry requested')
+            fi
+            for i in "${!kinds[@]}"; do
+              plan+=("Dry run: would log in to ${logins[i]}")
+              for name in "${names[@]}"; do
+                plan+=("Dry run: would push ${targets[i]}/${name}:${VERSION}")
+              done
+              if [ -n "${missing[i]}" ]; then
+                note="Dry run: ${missing[i]} unavailable; a real run"
+                plan+=("${note} would skip ${targets[i]%%/*} with a warning")
+              fi
+            done
+            printf '%s\n' "${plan[@]}"
+            plan_json=$(printf '%s\n' "${plan[@]}" | jq -Rnc '[inputs]')
+            {
+              echo '## Registry plan (dry run)'
+              echo ''
+              printf -- '- %s\n' "${plan[@]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            for i in "${!kinds[@]}"; do
+              if [ -n "${missing[i]}" ]; then
+                echo "::warning::${missing[i]} unavailable; skipping" \
+                  "the ${targets[i]%%/*} publish"
+                continue
+              fi
+              publish["${kinds[i]}"]='true'
+              repositories+="${repositories:+,}${targets[i]}"
+              echo "Publishing to ${targets[i]} (login: ${logins[i]})"
+            done
+            if [ -z "${repositories}" ]; then
+              echo "::warning::No target registries resolved; images" \
+                "will build and archive but nothing will publish"
+            fi
           fi
-          if [ "${dockerhub}" = 'true' ]; then
-            repositories+="${repositories:+,}docker.io/${IMAGE_NAMESPACE}"
+          # Only a registry input that publishes hands its login on
+          if [ "${publish[registry]}" != 'true' ]; then
+            registry_user=''
+            credential_name=''
+            login_endpoint=''
           fi
           {
-            echo "ghcr=${ghcr}"
-            echo "dockerhub=${dockerhub}"
+            echo "ghcr=${publish[ghcr]}"
+            echo "dockerhub=${publish[dockerhub]}"
+            echo "registry=${publish[registry]}"
             echo "repositories=${repositories}"
+            echo "registry_login=${login_endpoint}"
+            echo "registry_user=${registry_user}"
+            echo "credential_name=${credential_name}"
+            echo "plan=${plan_json}"
           } >> "$GITHUB_OUTPUT"
 
       - name: 'Login to GHCR'
@@ -914,6 +1178,32 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      # The registry input's credential loads only in the jobs that
+      # push or tag there: this one, sign and promote-release.
+      # credential_grants_json wires the admin-managed
+      # CREDENTIAL_LOAD_GRANTS repository/organisation variable in at
+      # the workflow layer: composite actions cannot read vars, and
+      # the grants list must never become a caller-facing input.
+      - name: 'Load registry credential'
+        id: load-credential
+        if: steps.registries.outputs.registry == 'true'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/credential-load-action@025002b47f4302fb7252175c470da69435060176  # v2.0.4
+        with:
+          # yamllint disable-line rule:line-length
+          op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          vault_mapping_json: ${{ secrets.VAULT_MAPPING_JSON }}
+          credential_name: ${{ steps.registries.outputs.credential_name }}
+          credential_grants_json: ${{ vars.CREDENTIAL_LOAD_GRANTS }}
+          export_env: 'false'
+      - name: 'Login to release registry'
+        if: steps.registries.outputs.registry == 'true'
+        # yamllint disable-line rule:line-length
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ${{ steps.registries.outputs.registry_login }}
+          username: ${{ steps.registries.outputs.registry_user }}
+          password: ${{ steps.load-credential.outputs.credential }}
 
       # Builds every image, pushes it to each resolved repository under
       # the release version, and captures the digest of each push from
@@ -973,8 +1263,9 @@ jobs:
   # (Sigstore) plus SLSA build provenance via GitHub attestations,
   # matching the verification story of the other workflow families.
   # Provenance pushes to the registry for GHCR images; Docker Hub
-  # lacks dependable OCI referrers support, so its attestations live
-  # in the GitHub attestation store (gh attestation verify).
+  # and Nexus 3 lack dependable OCI referrers support, so their
+  # attestations live in the GitHub attestation store (gh attestation
+  # verify).
   # Signing follows the same registry-aware principle from the other
   # end: it runs everywhere, but only failures against the registries
   # named in sigstore_sign_required_registries fail the release.
@@ -1028,6 +1319,40 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      # cosign stores the signature beside the image, so signing an
+      # image on the registry input needs its login too; attestation
+      # never pushes there (provenance stays in the GitHub store).
+      # The build job resolved the login; only the credential loads
+      # again here, as job outputs must never carry a secret. Both
+      # steps continue on error: a failure here surfaces as the sign
+      # step's authentication failure, which that step then fails or
+      # warns on per sigstore_sign_required_registries, so a
+      # best-effort registry cannot block promotion.
+      - name: 'Load registry credential'
+        id: load-credential
+        # yamllint disable-line rule:line-length
+        if: inputs.sigstore_sign && needs.build.outputs.registry_login != '' && startsWith(matrix.image, format('{0}/', inputs.registry))
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/credential-load-action@025002b47f4302fb7252175c470da69435060176  # v2.0.4
+        with:
+          # yamllint disable-line rule:line-length
+          op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          vault_mapping_json: ${{ secrets.VAULT_MAPPING_JSON }}
+          credential_name: ${{ needs.build.outputs.credential_name }}
+          credential_grants_json: ${{ vars.CREDENTIAL_LOAD_GRANTS }}
+          export_env: 'false'
+      - name: 'Login to release registry'
+        # yamllint disable-line rule:line-length
+        if: inputs.sigstore_sign && needs.build.outputs.registry_login != '' && startsWith(matrix.image, format('{0}/', inputs.registry))
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ${{ needs.build.outputs.registry_login }}
+          username: ${{ needs.build.outputs.registry_user }}
+          password: ${{ steps.load-credential.outputs.credential }}
 
       - name: 'Install cosign'
         if: inputs.sigstore_sign
@@ -1743,8 +2068,7 @@ jobs:
       # registry-side, preserving manifest lists. A failed promotion
       # above therefore never moves 'latest'.
       - name: 'Login to GHCR'
-        # yamllint disable-line rule:line-length
-        if: ${{ inputs.push_latest && contains(needs.build.outputs.pushed, 'ghcr.io/') }}
+        if: ${{ inputs.push_latest && needs.build.outputs.ghcr == 'true' }}
         # yamllint disable-line rule:line-length
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
@@ -1752,13 +2076,38 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: 'Login to Docker Hub'
-        # yamllint disable-line rule:line-length
-        if: ${{ inputs.push_latest && contains(needs.build.outputs.pushed, 'docker.io/') }}
+        if: ${{ inputs.push_latest && needs.build.outputs.dockerhub == 'true' }}
         # yamllint disable-line rule:line-length
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      # The 'latest' retag on the registry input needs its login: the
+      # build job resolved it, and the credential loads again here,
+      # as job outputs must never carry a secret
+      - name: 'Load registry credential'
+        id: load-credential
+        # yamllint disable-line rule:line-length
+        if: ${{ inputs.push_latest && needs.build.outputs.registry_login != '' }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/credential-load-action@025002b47f4302fb7252175c470da69435060176  # v2.0.4
+        with:
+          # yamllint disable-line rule:line-length
+          op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          vault_mapping_json: ${{ secrets.VAULT_MAPPING_JSON }}
+          credential_name: ${{ needs.build.outputs.credential_name }}
+          credential_grants_json: ${{ vars.CREDENTIAL_LOAD_GRANTS }}
+          export_env: 'false'
+      - name: 'Login to release registry'
+        # yamllint disable-line rule:line-length
+        if: ${{ inputs.push_latest && needs.build.outputs.registry_login != '' }}
+        # yamllint disable-line rule:line-length
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ${{ needs.build.outputs.registry_login }}
+          username: ${{ needs.build.outputs.registry_user }}
+          password: ${{ steps.load-credential.outputs.credential }}
 
       - name: 'Set up crane'
         # yamllint disable-line rule:line-length

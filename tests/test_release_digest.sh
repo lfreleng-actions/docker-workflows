@@ -15,7 +15,9 @@
 # - the build job's 'version' and 'registries' step scripts, extracted
 #   from the workflow and run as GitHub runs a 'shell: bash' step; they
 #   turn the release tag and the publish switches into the action's
-#   tags and repositories inputs
+#   tags and repositories inputs, the registry input's login, and a
+#   dry run's plan
+# - the gerrit-validate job's check of the registry input
 # - the action itself, fetched at the commit the workflow pins and run
 #   as its build step runs it, which resolves each pushed repository's
 #   digest from RepoDigests
@@ -87,9 +89,20 @@ expect_input platforms '${{ inputs.platforms }}'
 
 # --- The lane's own step scripts ---------------------------------------
 
-# run_step ID [NAME=VALUE...]: run the build job step with that id as a
+# run_script [NAME=VALUE...]: run ${work}/step.sh as GitHub runs a
 # 'shell: bash' step, in an environment holding only NAME=VALUE; its
-# outputs land in ${work}/output, its log in ${work}/log
+# outputs land in ${work}/output, its step summary in ${work}/summary,
+# its log in ${work}/log
+run_script() {
+  : > "${work}/output"
+  : > "${work}/summary"
+  env -i PATH="${PATH}" HOME="${work}" GITHUB_OUTPUT="${work}/output" \
+    GITHUB_STEP_SUMMARY="${work}/summary" "$@" \
+    bash --noprofile --norc -eo pipefail "${work}/step.sh" \
+    > "${work}/log" 2>&1
+}
+
+# run_step ID [NAME=VALUE...]: run the build job step with that id
 run_step() {
   local id="$1"
   shift
@@ -98,10 +111,51 @@ run_step() {
     echo "FAIL: no '${id}' step script in the build job of ${workflow}"
     exit 1
   fi
-  : > "${work}/output"
-  env -i PATH="${PATH}" HOME="${work}" GITHUB_OUTPUT="${work}/output" "$@" \
-    bash --noprofile --norc -eo pipefail "${work}/step.sh" \
-    > "${work}/log" 2>&1
+  run_script "$@"
+}
+
+# check_run DESCRIPTION STATUS CHECK...: judge the last run_script.
+# Each CHECK is 'error' (the step fails with an ::error::), KEY=VALUE
+# (the step output KEY is VALUE), 'log:TEXT' or 'summary:TEXT' (the
+# log or step summary contains TEXT). Without 'error' the step must
+# succeed.
+check_run() {
+  local description="$1" status="$2" check key want got problems=''
+  local want_error='false'
+  shift 2
+  for check in "$@"; do
+    case "${check}" in
+      error)
+        want_error='true'
+        if [ "${status}" -eq 0 ] ||
+          ! grep -q '^::error::' "${work}/log"; then
+          problems+="; expected an ::error:: failure"
+        fi
+        ;;
+      log:* | summary:*)
+        if ! grep -qF -- "${check#*:}" "${work}/${check%%:*}"; then
+          problems+="; ${check%%:*} lacks '${check#*:}'"
+        fi
+        ;;
+      *=*)
+        key="${check%%=*}"
+        want="${check#*=}"
+        got=$(output "${key}" "${work}/output")
+        if [ "${got}" != "${want}" ]; then
+          problems+="; ${key}: expected '${want}', got '${got}'"
+        fi
+        ;;
+    esac
+  done
+  if [ "${want_error}" = 'false' ] && [ "${status}" -ne 0 ]; then
+    problems+="; exit ${status}"
+  fi
+  if [ -z "${problems}" ]; then
+    echo "ok: ${description}"
+  else
+    fail "${description}${problems}"
+    sed 's/^/  | /' "${work}/log"
+  fi
 }
 
 # version_case DESCRIPTION TAG EXPECTED ('error' when the step must fail)
@@ -125,29 +179,132 @@ version_case 'the v prefix strips' v1.2.3 1.2.3
 version_case 'build metadata maps + to _' v1.2.3+build.5 1.2.3_build.5
 version_case 'a tag without the v prefix fails' 1.2.3 error
 
-# registries_case DESCRIPTION GHCR DOCKERHUB CREDS DRY_RUN EXPECTED
+# registries_case DESCRIPTION [NAME=VALUE...] -- CHECK...: run the
+# registries step with NAME=VALUE over a baseline that requests no
+# registry, then judge it as check_run does
 registries_case() {
-  local status=0 actual
-  run_step registries \
-    GHCR_PUBLISH="$2" DOCKERHUB_PUBLISH="$3" HAS_DOCKERHUB_CREDS="$4" \
-    DRY_RUN="$5" IMAGE_NAMESPACE=probeorg OWNER=ProbeOrg || status=$?
-  actual=$(output repositories "${work}/output")
-  if [ "${status}" -eq 0 ] && [ "${actual}" = "$6" ]; then
-    echo "ok: $1"
-  else
-    fail "$1: expected '$6', got '${actual}' (exit ${status})"
-    sed 's/^/  | /' "${work}/log"
-  fi
+  local description="$1" status=0
+  shift
+  local -a env=(
+    GHCR_PUBLISH=false DOCKERHUB_PUBLISH=false HAS_DOCKERHUB_CREDS=false
+    REGISTRY='' REGISTRY_USER_INPUT='' HAS_REGISTRY_CREDS=false
+    TARGET_REPOSITORY=ProbeOrg/probe-repo IMAGE_NAMESPACE=probeorg
+    OWNER=ProbeOrg DRY_RUN=false VERSION=1.2.3
+    IMAGES_JSON='[{"name": "probe"}, {"name": "probe-tools"}]'
+  )
+  while [ "$1" != '--' ]; do
+    env+=("$1")
+    shift
+  done
+  shift
+  run_step registries "${env[@]}" || status=$?
+  check_run "${description}" "${status}" "$@"
 }
 
+nexus='nexus3.onap.org:10002'
+with_nexus=(REGISTRY="${nexus}" HAS_REGISTRY_CREDS=true)
+no_registry=(registry=false registry_login='' registry_user=''
+  credential_name='')
+
 registries_case 'GHCR pushes under the lowercased owner' \
-  true false false false ghcr.io/probeorg
+  GHCR_PUBLISH=true -- \
+  repositories=ghcr.io/probeorg ghcr=true dockerhub=false \
+  "${no_registry[@]}"
 registries_case 'GHCR first, then Docker Hub' \
-  true true true false ghcr.io/probeorg,docker.io/probeorg
+  GHCR_PUBLISH=true DOCKERHUB_PUBLISH=true HAS_DOCKERHUB_CREDS=true -- \
+  repositories=ghcr.io/probeorg,docker.io/probeorg dockerhub=true
 registries_case 'Docker Hub without credentials resolves nothing' \
-  false true false false ''
+  DOCKERHUB_PUBLISH=true -- \
+  repositories='' dockerhub=false \
+  'log:::warning::DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD unavailable'
+registries_case 'the registry input publishes after GHCR and Docker Hub' \
+  GHCR_PUBLISH=true DOCKERHUB_PUBLISH=true HAS_DOCKERHUB_CREDS=true \
+  "${with_nexus[@]}" -- \
+  "repositories=ghcr.io/probeorg,docker.io/probeorg,${nexus}/probeorg" \
+  registry=true "registry_login=${nexus}" registry_user=probe-repo \
+  credential_name=probe-repo
+registries_case 'a path-bearing registry logs in to its host' \
+  "${with_nexus[@]}" REGISTRY=acme.jfrog.io/docker-release -- \
+  repositories=acme.jfrog.io/docker-release/probeorg registry=true \
+  registry_login=acme.jfrog.io
+registries_case "namespace_mode 'none' pushes under the registry alone" \
+  "${with_nexus[@]}" IMAGE_NAMESPACE='' -- \
+  "repositories=${nexus}" registry=true
+registries_case 'registry_user overrides the username only' \
+  "${with_nexus[@]}" REGISTRY_USER_INPUT=svc-ci@example.org -- \
+  registry_user=svc-ci@example.org credential_name=probe-repo
+registries_case 'an invalid registry username fails' \
+  "${with_nexus[@]}" REGISTRY_USER_INPUT='svc ci' -- error
+registries_case 'the registry input skips without credentials' \
+  GHCR_PUBLISH=true "${with_nexus[@]}" HAS_REGISTRY_CREDS=false -- \
+  repositories=ghcr.io/probeorg "${no_registry[@]}" \
+  "log:::warning::OP_SERVICE_ACCOUNT_TOKEN/VAULT_MAPPING_JSON unavailable"
 registries_case 'a dry run resolves no repository' \
-  true true true true ''
+  GHCR_PUBLISH=true DOCKERHUB_PUBLISH=true HAS_DOCKERHUB_CREDS=true \
+  DRY_RUN=true -- \
+  repositories='' ghcr=false dockerhub=false
+registries_case 'a dry run reports the plan for every requested registry' \
+  GHCR_PUBLISH=true "${with_nexus[@]}" HAS_REGISTRY_CREDS=false \
+  DRY_RUN=true -- \
+  repositories='' "${no_registry[@]}" \
+  'log:Dry run: would log in to ghcr.io with GITHUB_TOKEN' \
+  'log:Dry run: would push ghcr.io/probeorg/probe:1.2.3' \
+  "log:Dry run: would log in to ${nexus} as probe-repo" \
+  "log:Dry run: would push ${nexus}/probeorg/probe:1.2.3" \
+  "log:Dry run: would push ${nexus}/probeorg/probe-tools:1.2.3" \
+  'log:OP_SERVICE_ACCOUNT_TOKEN/VAULT_MAPPING_JSON unavailable' \
+  "log:a real run would skip ${nexus} with a warning" \
+  'summary:## Registry plan (dry run)' \
+  "summary:- Dry run: would push ${nexus}/probeorg/probe:1.2.3"
+# The plan output carries the same lines, one array element each
+if output plan "${work}/output" | jq -e --arg nexus "${nexus}" '
+    length == 7 and
+    index("Dry run: would push \($nexus)/probeorg/probe-tools:1.2.3")
+    != null' > /dev/null; then
+  echo 'ok: the plan output lists every plan line'
+else
+  fail "the plan output lists every plan line: $(output plan "${work}/output")"
+fi
+registries_case 'a real run reports no plan' \
+  GHCR_PUBLISH=true -- plan=''
+
+# validate_case DESCRIPTION REGISTRY REGISTRY_USER CHECK...: run the
+# gerrit-validate job's registry input check
+validate_case() {
+  local description="$1" status=0
+  yq -r '.jobs."gerrit-validate".steps[]
+    | select(.name == "Validate registry inputs") | .run' \
+    "${workflow}" > "${work}/step.sh"
+  if [ ! -s "${work}/step.sh" ]; then
+    echo "FAIL: no 'Validate registry inputs' step in ${workflow}"
+    exit 1
+  fi
+  run_script REGISTRY="$2" REGISTRY_USER="$3" || status=$?
+  shift 3
+  check_run "${description}" "${status}" "$@"
+}
+
+validate_case 'no registry input passes' '' ''
+validate_case 'registry_user without registry fails' '' svc-ci error
+validate_case 'a port-addressed registry passes' "${nexus}" ''
+validate_case 'a path-bearing registry passes' \
+  acme.jfrog.io/docker-release svc-ci@example.org
+validate_case 'a scheme fails' "https://${nexus}" '' error
+validate_case 'an uppercase path component fails' \
+  acme.jfrog.io/Docker-Release '' error
+validate_case 'a trailing slash fails' "${nexus}/" '' error
+validate_case 'an empty host label fails' 'nexus3..onap.org:10002' '' error
+validate_case "a lone '.' fails" '.' '' error
+label63=$(printf 'a%.0s' {1..63})
+validate_case 'a 63-character host label passes' "${label63}.example:5000" ''
+validate_case 'a 64-character host label fails' \
+  "${label63}a.example:5000" '' error
+validate_case 'a dotless host without a port fails' registry/team '' error
+validate_case 'a dotless host with a port passes' registry:5000 ''
+validate_case 'localhost passes' localhost/team ''
+validate_case 'GHCR is refused' ghcr.io/probeorg '' error
+validate_case 'Docker Hub is refused, case and port aside' \
+  Docker.IO:443 '' error
 
 # --- The pinned action ---------------------------------------------------
 
@@ -278,6 +435,27 @@ digest_case 'each registry resolves its own digest' \
 probeorg/probe@${a}" \
   "$(pushed probe ghcr.io/probeorg/probe "${c}" \
     probe docker.io/probeorg/probe "${a}")"
+
+digest_case 'a port-addressed registry matches exactly' \
+  probe probeorg nexus3.onap.org:10002/probeorg \
+  "probeorg/probe@${b}
+nexus3.onap.org:10002/probeorg/probe@${a}" \
+  "$(pushed probe nexus3.onap.org:10002/probeorg/probe "${a}")"
+
+digest_case "the registry input resolves under namespace_mode 'none'" \
+  probe '' nexus3.onap.org:10002 \
+  "nexus3.onap.org:10002/probe@${a}" \
+  "$(pushed probe nexus3.onap.org:10002/probe "${a}")"
+
+digest_case 'GHCR, Docker Hub and the registry input resolve apart' \
+  probe probeorg \
+  ghcr.io/probeorg,docker.io/probeorg,nexus3.onap.org:10002/probeorg \
+  "ghcr.io/probeorg/probe@${c}
+probeorg/probe@${a}
+nexus3.onap.org:10002/probeorg/probe@${b}" \
+  "$(pushed probe ghcr.io/probeorg/probe "${c}" \
+    probe docker.io/probeorg/probe "${a}" \
+    probe nexus3.onap.org:10002/probeorg/probe "${b}")"
 
 digest_case 'no entry for the repository fails the step' \
   probe probeorg docker.io/probeorg \
