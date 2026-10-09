@@ -340,6 +340,21 @@ on:
         required: false
         type: string
         default: 'ghcr.io docker.io'
+      signature_format:
+        description: >-
+          Format of the cosign signature: 'bundle' (cosign v3's
+          default, a Sigstore bundle) or 'legacy' (the pre-v3
+          sha256-<hex>.sig signature image, written by passing
+          --new-bundle-format=false --use-signing-config=false).
+          Verifying a bundle needs cosign v3, or v2.6.0 and later
+          with --new-bundle-format=true; choose 'legacy' for older
+          verifiers or a registry that rejects the bundle. cosign v3
+          deprecates --new-bundle-format, so 'legacy' lasts only as
+          long as the cosign this lane pins accepts it. Has no effect
+          when sigstore_sign is false.
+        required: false
+        type: string
+        default: 'bundle'
 
     secrets:
       DOCKERHUB_USERNAME:
@@ -400,6 +415,25 @@ jobs:
             exit 1
           fi
           echo "Platforms input validated ✅"
+
+      # The sign job runs only after images push, so an invalid value
+      # caught there would leave a release published but unsigned
+      - name: 'Validate signature_format input'
+        id: signature-format
+        shell: bash
+        env:
+          SIGNATURE_FORMAT: ${{ inputs.signature_format }}
+        run: |
+          # bundle or legacy; the sign job maps each to cosign flags
+          case "${SIGNATURE_FORMAT}" in
+            bundle|legacy) ;;
+            *)
+              echo "::error::Invalid signature_format" \
+                "'${SIGNATURE_FORMAT}' (expected bundle or legacy)"
+              exit 1
+              ;;
+          esac
+          echo "Signature format: ${SIGNATURE_FORMAT} ✅"
 
       # A dry run has no tag-push context to infer the release tag
       # from, so it validates the tag named by the ref input instead.
@@ -1033,6 +1067,12 @@ jobs:
         if: inputs.sigstore_sign
         # yamllint disable-line rule:line-length
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
+        with:
+          # Pinned rather than left to the installer's default, which
+          # moves with installer releases and could change the stored
+          # signature format unnoticed. v3.0.6 is the default of
+          # installer v4.1.2; the installer verifies the binary itself.
+          cosign-release: 'v3.0.6'
 
       - name: 'Sign image with cosign (keyless)'
         if: inputs.sigstore_sign
@@ -1042,6 +1082,7 @@ jobs:
           DIGEST: ${{ matrix.digest }}
           # yamllint disable-line rule:line-length
           REQUIRED_REGISTRIES: ${{ inputs.sigstore_sign_required_registries }}
+          SIGNATURE_FORMAT: ${{ inputs.signature_format }}
         run: |
           # Keyless signature over the immutable digest; verification:
           #   cosign verify <image>@<digest> \
@@ -1072,7 +1113,24 @@ jobs:
             fi
           done
 
-          if cosign sign --yes "${IMAGE}@${DIGEST}"; then
+          # bundle is cosign v3's default and needs no flag. The value
+          # was validated up front; an unknown one still fails here
+          # rather than signing in a format the caller did not ask for.
+          sign_args=(--yes)
+          case "${SIGNATURE_FORMAT}" in
+            bundle) ;;
+            legacy)
+              sign_args+=(--new-bundle-format=false)
+              sign_args+=(--use-signing-config=false)
+              ;;
+            *)
+              echo "::error::Invalid signature_format" \
+                "'${SIGNATURE_FORMAT}' (expected bundle or legacy)"
+              exit 1
+              ;;
+          esac
+
+          if cosign sign "${sign_args[@]}" "${IMAGE}@${DIGEST}"; then
             echo "Signed ${IMAGE}@${DIGEST}"
             exit 0
           fi
