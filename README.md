@@ -27,11 +27,11 @@ with the Jenkins container jobs these workflows replace lives in
 
 <!-- markdownlint-disable MD013 -->
 
-| Workflow                                    | Trigger context       | Status      | Purpose                                                                     |
-| ------------------------------------------- | --------------------- | ----------- | --------------------------------------------------------------------------- |
-| `.github/workflows/build-test.yaml`         | Pull request / verify | Implemented | Image discovery, buildx build, hadolint, test hook, SBOM, Grype scan        |
-| `.github/workflows/build-test-release.yaml` | Tag push (Model A)    | Implemented | Tag-validated multi-platform build/push to GHCR/Docker Hub, cosign + SLSA   |
-| `.github/workflows/merge.yaml`              | Merge (Model B)       | Implemented | Snapshot/staging publish (version.properties) + crane release promotion     |
+| Workflow                                    | Trigger context       | Status      | Purpose                                                                           |
+| ------------------------------------------- | --------------------- | ----------- | --------------------------------------------------------------------------------- |
+| `.github/workflows/build-test.yaml`         | Pull request / verify | Implemented | Image discovery, buildx build, hadolint, test hook, SBOM, Grype scan              |
+| `.github/workflows/build-test-release.yaml` | Tag push (Model A)    | Implemented | Tag-validated multi-platform build/push to GHCR/Docker Hub/Nexus 3, cosign + SLSA |
+| `.github/workflows/merge.yaml`              | Merge (Model B)       | Implemented | Snapshot/staging publish (version.properties) + crane release promotion           |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -45,7 +45,8 @@ Two release models cover the LF project estate:
 - **Model A (tag-driven)** — `build-test-release.yaml`. A validated,
   signed semver tag drives the version. Images build (multi-platform
   capable) and push to GHCR (`ghcr.io/<owner>/<name>`) and optionally
-  Docker Hub (`docker.io/<namespace>/<name>`), each pushed
+  Docker Hub (`docker.io/<namespace>/<name>`) and a Nexus 3 registry
+  (`<registry>/<namespace>/<name>`), each pushed
   image signs with Sigstore cosign (keyless, by digest) and gains an
   SLSA build provenance attestation, and the audits gate promotion of
   the draft GitHub release (with per-image SBOMs and a digest
@@ -78,12 +79,12 @@ gaps rather than assuming every target behaves like GHCR:
 
 <!-- markdownlint-disable MD013 -->
 
-| Registry            | OCI referrers API | cosign signature (tag scheme) | Provenance destination            |
-| ------------------- | ----------------- | ----------------------------- | --------------------------------- |
-| GHCR                | Yes               | Yes                           | Pushed to the registry            |
-| Docker Hub          | Unreliable        | Yes                           | GitHub attestation store          |
-| Nexus 3             | No (404)          | Yes (verified on 3.95.1)      | GitHub attestation store          |
-| JFrog Artifactory   | Unverified        | Unverified                    | GitHub attestation store          |
+| Registry            | OCI referrers API | cosign signature (tag scheme)                                        | Provenance destination            |
+| ------------------- | ----------------- | -------------------------------------------------------------------- | --------------------------------- |
+| GHCR                | Yes               | Yes                                                                  | Pushed to the registry            |
+| Docker Hub          | Unreliable        | Yes                                                                  | GitHub attestation store          |
+| Nexus 3             | No (404)          | Yes (verified on 3.95.1); best effort; bundle format untested (#114) | GitHub attestation store          |
+| JFrog Artifactory   | Unverified        | Unverified                                                           | GitHub attestation store          |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -114,14 +115,23 @@ legacy tag scheme by design and never passes
 subject-bearing manifest through the referrers API instead, and
 neither Nexus 3 nor Docker Hub supports it dependably.
 
+Model A publishes to Nexus 3 through its `registry` input, and signs
+there best effort: the default `sigstore_sign_required_registries`
+leaves Nexus out, so a failed signature push warns rather than
+failing the release. Name the registry's `host:port` there (for
+example `nexus3.onap.org:10002`) to make it required. No test has
+yet shown whether Nexus stores cosign's newer bundle format (#114).
+Its provenance lives in the GitHub attestation store.
+
 Artifactory is addressable by `merge.yaml` (Model B), which accepts
 its repository-path and subdomain forms alongside the Nexus
 port-per-repository form. Its supply-chain columns above stay
 **Unverified**: nothing has yet pushed a cosign signature to an
 Artifactory instance from this lane, and Model B does not sign at all
-(snapshot tags are transient). Model A publishes to GHCR and Docker
-Hub, so releasing to Artifactory awaits a generic registry target
-there — tracked in #26.
+(snapshot tags are transient). Model A's `registry` input accepts the
+same repository-path form (`acme.jfrog.io/docker-release`) and logs
+in to its host, so Artifactory drops in there too, but nothing has
+released to a live instance that way yet — tracked in #26.
 
 ## Verifying Releases
 
@@ -300,7 +310,8 @@ names, and `namespace` supplies it in `manual` mode:
 Each lane resolves it once per run, in its first job
 (`gerrit-validate`), and every other job reads that job's `namespace`
 output, so the build aliases, the merge lane's snapshot publish and
-release promotion, and the release lane's Docker Hub path all agree.
+release promotion, and the release lane's Docker Hub and `registry`
+paths all agree.
 That job fails before anything builds on an unknown mode, on `manual`
 without a `namespace`, on a `namespace` under any other mode
 (rather than ignoring it), and on a value outside Docker's repository path
@@ -309,7 +320,9 @@ joined by a single `.` or `_`, a doubled `__`, or one or more `-`.
 The release lane's `dockerhub_publish` also needs a namespace, and a
 single component at that, since a Docker Hub namespace is one
 organisation or user; GHCR publishes under the calling repository
-owner whatever the mode.
+owner whatever the mode. The release lane's `registry` input
+publishes as `<registry>/<namespace>/<name>`, or `<registry>/<name>`
+under `none`, as the merge lane's snapshots do.
 
 `auto` takes the owner of the `repository` input (or of the calling
 repository when that is empty), since a lane can build another
@@ -404,17 +417,19 @@ Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 
 <!-- markdownlint-disable MD013 -->
 
-| Input               | Type    | Default         | Description                                                         |
-| ------------------- | ------- | --------------- | ------------------------------------------------------------------- |
-| `platforms`         | string  | `'linux/amd64'` | Target platforms (csv); more than one engages QEMU + manifest lists |
-| `ghcr_publish`      | boolean | `true`          | Publish to GHCR as `ghcr.io/<owner>/<name>` (GITHUB_TOKEN)          |
-| `dockerhub_publish` | boolean | `false`         | Publish to Docker Hub as `docker.io/<namespace>/<name>`             |
-| `namespace_mode`    | string  | `'none'`        | `none`, `auto` or `manual`; Docker Hub needs `auto` or `manual`     |
-| `namespace`         | string  | `''`            | Namespace for `manual`; one component when publishing to Docker Hub |
-| `push_latest`       | boolean | `false`         | Apply the `latest` tag per image at promotion, after all gates pass |
-| `dry_run`           | boolean | `false`         | Run the lane without publishing: no push, release, promotion or tag |
-| `attestations`      | boolean | `true`          | SLSA build provenance per pushed image (by digest)                  |
-| `sigstore_sign`     | boolean | `true`          | Sigstore cosign keyless signature per pushed image (by digest)      |
+| Input               | Type    | Default         | Description                                                              |
+| ------------------- | ------- | --------------- | ------------------------------------------------------------------------ |
+| `platforms`         | string  | `'linux/amd64'` | Target platforms (csv); more than one engages QEMU + manifest lists      |
+| `ghcr_publish`      | boolean | `true`          | Publish to GHCR as `ghcr.io/<owner>/<name>` (GITHUB_TOKEN)               |
+| `dockerhub_publish` | boolean | `false`         | Publish to Docker Hub as `docker.io/<namespace>/<name>`                  |
+| `namespace_mode`    | string  | `'none'`        | `none`, `auto` or `manual`; Docker Hub needs `auto` or `manual`          |
+| `namespace`         | string  | `''`            | Namespace for `manual`; one component when publishing to Docker Hub      |
+| `registry`          | string  | `''`            | Further registry as `host[:port][/path]`, e.g. `nexus3.onap.org:10002`   |
+| `registry_user`     | string  | `''`            | Username override for `registry`; empty derives from the repository name |
+| `push_latest`       | boolean | `false`         | Apply the `latest` tag per image at promotion, after all gates pass      |
+| `dry_run`           | boolean | `false`         | Run the lane without publishing: no push, release, promotion or tag      |
+| `attestations`      | boolean | `true`          | SLSA build provenance per pushed image (by digest)                       |
+| `sigstore_sign`     | boolean | `true`          | Sigstore cosign keyless signature per pushed image (by digest)           |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -432,7 +447,22 @@ See [Registry Capability](#registry-capability) for what the default
 list reflects and when to extend it.
 
 Optional secrets: `DOCKERHUB_USERNAME`/`DOCKERHUB_PASSWORD` (the
-Docker Hub leg skips with a warning when unset). Callers grant
+Docker Hub leg skips with a warning when unset) and
+`OP_SERVICE_ACCOUNT_TOKEN`/`VAULT_MAPPING_JSON` (the 1Password
+credential for `registry`, keyed on the published repository's
+name as in `merge.yaml`; that registry skips with a warning when
+unset). The lane validates `registry` as `merge.yaml` validates its
+registry inputs, but also requires a host Docker reads as one (with a
+`.` or a port, or `localhost`) rather than as a Docker Hub namespace.
+It refuses GHCR and Docker Hub hosts there (they have inputs of
+their own), and logs in to its `host[:port]` in the build,
+sign and promote-release jobs whenever they push or tag there.
+Under the default `harden_runner_egress: block` the registry
+host must be on the egress allow-list; see
+[Egress allow-list](#egress-allow-list), or pass a
+`harden_runner_allowlist` that permits it. A dry run lists, in the
+build job's summary and the `registry_plan` output, the login and
+pushes each requested registry would receive. Callers grant
 `contents: write`, `id-token: write`, `attestations: write`,
 `artifact-metadata: write` and `packages: write`. The
 `build_command` escape hatch is absent from
@@ -589,7 +619,9 @@ publishes: they build, audit and test the fixture images, then
 report the tags, assets and promotion a real run would produce.
 `merge.yaml` runs against the fixture commit that adds a release
 descriptor, and `build-test-release.yaml` against its signed `v0.1.0`
-tag, so tag validation applies at full strength.
+tag, so tag validation applies at full strength. A further
+`build-test-release.yaml` leg plans a Nexus 3 `registry` with GHCR
+off, and a follow-up job asserts its `registry_plan` output.
 
 A dry run cannot reach the behaviour that appears after images
 push: cosign signing, SLSA provenance, per-registry digest capture,
@@ -602,8 +634,10 @@ The single-platform digest capture is also tested in isolation:
 registry steps, extracted from the workflow, and then the build
 action at the commit the lane pins, against a fake `docker`. It
 checks that the steps feed the action the right tags and
-repositories, and that each pushed repository resolves its own
-digest, Docker Hub's included.
+repositories, the `registry` input's login and dry-run plan
+included, that the `registry` input check accepts and refuses the
+right values, and that each pushed repository resolves its own
+digest, Docker Hub's and a port-addressed registry's included.
 
 One consequence worth knowing before calling `build-test-release.yaml`
 with `dry_run`, self-test or otherwise: GitHub checks a called

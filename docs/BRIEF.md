@@ -342,7 +342,7 @@ Beyond the standard family inputs (4.1), Docker-specific:
 | `registry_mirror`                                             | `''`                             | rewrite/pull-through for `FROM nexus3…:10001/...` style bases                                                                                                                                                                        |
 | `container_tag_method`                                        | `'auto'`                         | `version.properties` \| `container-tag.yaml` \| `git-tag` \| explicit input                                                                                                                                                          |
 | `tag_suffix_style`                                            | `'lf'`                           | LF snapshot/staging idiom on/off; custom template                                                                                                                                                                                    |
-| `dockerhub_publish`, `ghcr_publish`, `nexus_publish`          | `false`                          | independent per-registry toggles                                                                                                                                                                                                     |
+| `dockerhub_publish`, `ghcr_publish`, `registry`               | `false` / `true` / `''`          | per-registry toggles; `registry` (`host[:port][/path]`) adds Nexus 3 to the release lane, Artifactory's path form accepted but untested (#26)                                                                                        |
 | `snapshot_registry`, `release_registry`, `dockerhub_registry` | org defaults                     | e.g. `nexus3.onap.org:10003` / `:10002` / `docker.io`                                                                                                                                                                                |
 | `hadolint_enabled` / `hadolint_permit_fail`                   | `true` / `false`                 | Dockerfile lint gate                                                                                                                                                                                                                 |
 | `scan_tool` / `scan_fail_on` / `scan_permit_fail`             | `'grype'` / `'medium'` / `false` | image CVE gate (trivy selectable)                                                                                                                                                                                                    |
@@ -352,12 +352,13 @@ Beyond the standard family inputs (4.1), Docker-specific:
 
 <!-- markdownlint-enable MD013 -->
 
-Secrets: `DOCKERHUB_USERNAME`/`DOCKERHUB_PASSWORD` (or token),
-`NEXUS3_PASSWORD` (+ `nexus_user` input / repo-name derivation),
-GHCR via `GITHUB_TOKEN` `packages: write`, all optional; 1Password
-(`OP_SERVICE_ACCOUNT_TOKEN` + `VAULT_MAPPING_JSON`) as the managed
-alternative, resolved through `credential-load-action`. Publish jobs
-check availability and skip-with-warning (family convention).
+Secrets: `DOCKERHUB_USERNAME`/`DOCKERHUB_PASSWORD` (or token) and
+GHCR via `GITHUB_TOKEN` `packages: write`; Nexus 3 (and Artifactory)
+through 1Password (`OP_SERVICE_ACCOUNT_TOKEN` + `VAULT_MAPPING_JSON`),
+resolved by `credential-load-action` on the published repository's
+name, with a `registry_user` input overriding the login username in
+both publish lanes. All optional: publish jobs check availability
+and skip-with-warning (family convention).
 
 ### 5.3 Gaps in existing in-house actions
 
@@ -394,7 +395,10 @@ check availability and skip-with-warning (family convention).
   testing (see question 5 below); the capability matrix lives in
   README.md
 - **Egress**: keep block mode; all target registries already in
-  allow_list v0.12.1; third-party base images are the un-enumerable
+  allow_list v0.12.1, the Nexus 3 hosts at ports 10001-10004
+  included; a `registry` host outside that list (another Artifactory
+  tenant, another port) needs a `harden_runner_allowlist` that
+  permits it; third-party base images are the un-enumerable
   case → document `build_permit_egress_traffic` as the sanctioned
   hatch (or `registry_mirror` through Nexus 10001)
 

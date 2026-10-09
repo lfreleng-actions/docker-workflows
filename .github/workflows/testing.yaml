@@ -16,7 +16,9 @@
 # Both publish lanes ARE self-tested here, under dry_run, by the
 # merge-dry-run and release-dry-run jobs. Neither publishes: they
 # build, audit and test the fixture images, then report the tags,
-# assets and promotion a real run would produce.
+# assets and promotion a real run would produce. The
+# release-dry-run-nexus job plans the release lane's registry input
+# the same way.
 #
 # What the dry runs cannot reach is the part that only exists once
 # images push: cosign signing, SLSA provenance and per-registry
@@ -355,6 +357,76 @@ jobs:
       sbom_enabled: false
       grype_enabled: false
 
+  # The registry input, planned end to end without publishing.
+  #
+  # A Nexus 3 release registry, addressed by port as the LF registries
+  # are, with GHCR off so the plan holds that registry alone. No
+  # 1Password secrets reach this call, so the plan also has to name
+  # them as missing: a real run here would skip the registry with a
+  # warning rather than fail. Nothing connects to the registry under
+  # dry_run. Lint, SBOM and Grype are off, as on the leg above: the
+  # registry plan is what needs proving, and the job after this one
+  # asserts it from the lane's registry_plan output.
+  release-dry-run-nexus:
+    name: 'Release (dry run, Nexus 3)'
+    permissions:
+      # Matches the grant on release-dry-run; see the rationale there.
+      # yamllint disable-line rule:line-length
+      contents: write  # tag-validate drafts, attach edits, promote publishes
+      packages: write  # build pushes to GHCR; promote retags 'latest'
+      id-token: write  # sign requests a Sigstore OIDC token
+      attestations: write  # sign attaches SLSA build provenance
+      artifact-metadata: write  # sign creates attestation storage records
+    uses: $/.github/workflows/build-test-release.yaml
+    with:
+      repository: 'lfreleng-actions/test-docker-monorepo'
+      ref: 'v0.1.0'
+      dry_run: true
+      registry: 'nexus3.onap.org:10002'
+      ghcr_publish: false
+      namespace_mode: 'auto'
+      lint_enabled: false
+      sbom_enabled: false
+      grype_enabled: false
+
+  release-dry-run-nexus-plan:
+    name: 'Release (dry run, Nexus 3) plan'
+    needs: 'release-dry-run-nexus'
+    permissions: {}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: '@e0e35011ee145321a51d3226f044ec88dfe645b1'  # v0.16.4
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Assert the registry plan'
+        shell: bash
+        env:
+          PLAN: ${{ needs.release-dry-run-nexus.outputs.registry_plan }}
+        run: |
+          # The plan logs in to the port-addressed endpoint as the
+          # repository's name, pushes every image under the owner's
+          # namespace at the tag's version, and names the missing
+          # 1Password secrets; nothing goes to GHCR
+          jq -r '.[]' <<< "${PLAN}"
+          prefix='Dry run: would push nexus3.onap.org:10002/lfreleng-actions/'
+          jq -e --arg prefix "${prefix}" '
+            index("Dry run: would log in to nexus3.onap.org:10002 as"
+              + " test-docker-monorepo") != null
+            and any(.[]; startswith($prefix) and endswith(":0.1.0"))
+            and any(.[]; test("OP_SERVICE_ACCOUNT_TOKEN"))
+            and all(.[]; test("ghcr\\.io") | not)
+          ' <<< "${PLAN}" > /dev/null
+          echo "Registry plan as expected ✅"
+
   # The release lane's single-platform digest capture, which the dry
   # runs above cannot reach because nothing pushes. The test runs the
   # build job's version and registries step scripts, extracted from
@@ -362,7 +434,9 @@ jobs:
   # workflow pins, against a fake docker, checking that each pushed
   # repository resolves its own digest from RepoDigests: Docker Hub in
   # the familiar form docker prints it (#96), other registries matched
-  # exactly.
+  # exactly. It also runs the gerrit-validate job's registry input
+  # check, and the registries step against the registry input's
+  # login, credential and dry-run plan cases.
   release-digest:
     name: 'Release digest resolution'
     permissions:
