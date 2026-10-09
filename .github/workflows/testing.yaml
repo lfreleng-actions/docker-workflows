@@ -231,6 +231,9 @@ jobs:
   # namespace_mode auto namespaces both halves under the fixture's
   # owner, lfreleng-actions: the snapshot tags and both sides of the
   # promotion plan, whose release-file names are relative to it.
+  #
+  # The gates (hadolint, tests, image SBOM and Grype) run as they
+  # would on a real merge, and snapshot-publish waits for them.
   merge-dry-run:
     name: 'Merge (dry run)'
     permissions:
@@ -243,6 +246,101 @@ jobs:
       release_registry: 'nexus3.onap.org:10002'
       namespace_mode: 'auto'
       dry_run: true
+      # namespace_mode auto archives the images as
+      # lfreleng-actions/<name>:verify only, so the test script needs
+      # the namespace to find them
+      # yamllint disable-line rule:line-length
+      test_command: 'NAMESPACE=lfreleng-actions TAG=verify tests/scripts/test_images.sh'
+      # Lint and Grype findings in fixture CONTENT soft-fail, as in
+      # the build-test legs above: this job validates that the
+      # machinery executes, not the hygiene of fixture Dockerfiles.
+      lint_permit_fail: true
+      grype_permit_fail: true
+      # Leg 1 of build-test is the single writer of the Grype
+      # database cache; this job restores without saving. See the
+      # grype_cache_db note there.
+      grype_cache_db: 'restore-only'
+
+  # The merge lane with every optional gate switched off. A gate
+  # disabled by its input must not hold back the snapshot publish:
+  # the release lane once skipped its promotion that way, with every
+  # job green (#90). merge-gating below asserts the publish ran;
+  # merge-gating-condition covers the failing-gate cases a passing
+  # run cannot reach.
+  merge-dry-run-gates-off:
+    name: 'Merge (dry run, gates off)'
+    permissions:
+      contents: read
+    uses: $/.github/workflows/merge.yaml
+    with:
+      repository: 'lfreleng-actions/test-docker-monorepo'
+      ref: 'v0.1.0'
+      snapshot_registry: 'nexus3.onap.org:10003'
+      release_registry: 'nexus3.onap.org:10002'
+      namespace_mode: 'auto'
+      dry_run: true
+      lint_enabled: false
+      sbom_enabled: false
+      grype_enabled: false
+
+  # A skipped job renders green, so the two merge legs passing proves
+  # nothing about whether snapshot-publish ran. This job reads the
+  # conclusions of their jobs from the run itself and checks that
+  # the gates ran or skipped as configured and that the publish ran
+  # in both.
+  merge-gating:
+    name: 'Merge gating'
+    needs: ['merge-dry-run', 'merge-dry-run-gates-off']
+    permissions:
+      actions: read  # list this run's jobs and their conclusions
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: '@e0e35011ee145321a51d3226f044ec88dfe645b1'  # v0.16.4
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Check merge job conclusions'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # One line per job of this run attempt: name, conclusion.
+          # Jobs of a called workflow are named '<caller> / <job>'.
+          path="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          path+="/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100"
+          jobs=$(gh api --paginate "${path}" \
+            --jq '.jobs[] | [.name, (.conclusion // "none")] | @tsv')
+          failures=0
+          expect() {
+            local name="$1 / $2" actual
+            actual=$(awk -F'\t' -v n="${name}" '$1 == n { print $2 }' \
+              <<< "${jobs}")
+            if [ "${actual}" = "$3" ]; then
+              echo "ok: ${name}: ${actual}"
+            else
+              echo "::error::${name}: expected '$3'" \
+                "but got '${actual:-absent}'"
+              failures=$((failures + 1))
+            fi
+          }
+          for gate in 'Dockerfile Lint' 'Tests' 'Image SBOM' \
+            'Grype Audit SBOM' 'Publish Snapshot'; do
+            expect 'Merge (dry run)' "${gate}" success
+          done
+          for gate in 'Dockerfile Lint' 'Image SBOM' 'Grype Audit SBOM'; do
+            expect 'Merge (dry run, gates off)' "${gate}" skipped
+          done
+          expect 'Merge (dry run, gates off)' 'Tests' success
+          expect 'Merge (dry run, gates off)' 'Publish Snapshot' success
+          [ "${failures}" -eq 0 ]
 
   # The release lane, end to end, without publishing anything.
   #
@@ -418,3 +516,34 @@ jobs:
           persist-credentials: false
       - name: 'Test namespace_mode resolution'
         run: tests/test_namespace_mode.sh
+
+  # The merge lane's gate-then-stage condition: snapshot-publish's
+  # 'if:' extracted from merge.yaml and evaluated over every
+  # combination of gate results and toggles. The dry-run legs above
+  # cannot fail a gate without failing this run, so the failure cases
+  # are proven here: no failed or cancelled gate admits a publish.
+  merge-gating-condition:
+    name: 'Merge gating condition'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: '@e0e35011ee145321a51d3226f044ec88dfe645b1'  # v0.16.4
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Test the snapshot-publish gate condition'
+        run: tests/test_merge_gating.sh

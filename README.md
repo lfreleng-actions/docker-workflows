@@ -31,7 +31,7 @@ with the Jenkins container jobs these workflows replace lives in
 | ------------------------------------------- | --------------------- | ----------- | --------------------------------------------------------------------------- |
 | `.github/workflows/build-test.yaml`         | Pull request / verify | Implemented | Image discovery, buildx build, hadolint, test hook, SBOM, Grype scan        |
 | `.github/workflows/build-test-release.yaml` | Tag push (Model A)    | Implemented | Tag-validated multi-platform build/push to GHCR/Docker Hub, cosign + SLSA   |
-| `.github/workflows/merge.yaml`              | Merge (Model B)       | Implemented | Snapshot/staging publish (version.properties) + crane release promotion     |
+| `.github/workflows/merge.yaml`              | Merge (Model B)       | Implemented | Gated snapshot/staging publish (version.properties) + crane promotion       |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -51,9 +51,10 @@ Two release models cover the LF project estate:
   the draft GitHub release (with per-image SBOMs and a digest
   manifest attached).
 - **Model B (merge-driven)** — `merge.yaml`. The Jenkins-heritage
-  LF/Gerrit flow: every merge builds the images and pushes the
-  snapshot/staging tag set to the snapshot registry, versioned from
-  `version.properties`. Merging a `releases/` file with
+  LF/Gerrit flow: every merge builds the images, gates them on
+  hadolint, the test hook and a Grype scan of their SBOMs, and pushes
+  the snapshot/staging tag set to the snapshot registry, versioned
+  from `version.properties`. Merging a `releases/` file with
   `distribution_type: container` triggers a registry-side promotion:
   crane copies the staged `name:version` images to the release
   registry at `container_release_tag`, under the same image
@@ -192,10 +193,24 @@ build -> sbom -> grype
 ```text
 gerrit-validate -> { repository-metadata | docker-metadata
   | resolve-version | check-release }
-docker-metadata -> build
-{ resolve-version | build } -> snapshot-publish
+docker-metadata -> { dockerfile-lint | build }
+build -> { tests | sbom -> grype }
+{ resolve-version | dockerfile-lint | tests | sbom | grype }
+  -> snapshot-publish
 check-release -> release-publish
 ```
+
+The merge lane gates, then stages. Its lint, test, SBOM and Grype
+jobs match `build-test.yaml`'s. hadolint lints the Dockerfiles the
+build consumed. The tests and SBOM generation read the image archives
+the build job uploads, the same bits `snapshot-publish` pushes, and
+Grype scans the SBOMs generated from them. Every snapshot tag is a
+promotable candidate, so `snapshot-publish` waits until each enabled
+gate passes; it depends on `sbom` directly as well as through
+`grype`, so an SBOM failure blocks it even with Grype off. A gate
+switched off by its input does not hold it back. `release-publish`
+promotes staged images and builds nothing, so the gates do not apply
+to it.
 
 ## Image Discovery
 
@@ -279,7 +294,7 @@ and merge-lane builds run single-platform (the runner's native
 platform); the release lane builds multi-platform when the
 `platforms` input lists more than one target.
 
-In the verify and release lanes the SBOM job downloads those archives
+In every lane the SBOM job downloads those archives
 to `${{ runner.temp }}/docker-archives` and runs
 [sbom-action](https://github.com/lfreleng-actions/sbom-action) in
 image mode, which writes one CycloneDX 1.7 JSON document per archive,
@@ -453,7 +468,10 @@ the job starts logs a warning; the attestation succeeds either way.
 Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 `images`, `namespace_mode`, `namespace`, `build_command`,
 `build_command_images`, `build_timeout_minutes`, hardening and
-`gerrit_*` inputs):
+`gerrit_*` inputs, `test_command`/`test_permit_fail`,
+`lint_enabled`/`lint_permit_fail` (and its deprecated
+`audit_permit_fail` alias), `sbom_enabled`,
+`grype_enabled`/`grype_fail_on`/`grype_permit_fail`/`grype_cache_db`):
 
 <!-- markdownlint-disable MD013 -->
 
@@ -467,6 +485,14 @@ Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 | `dry_run`           | boolean | `false` | Exercise the publish/promotion lanes without credentials or pushes                      |
 
 <!-- markdownlint-enable MD013 -->
+
+A failing lint, test, SBOM or Grype job blocks the snapshot publish
+and nothing stages. The `*_permit_fail` inputs, or the
+`NO_BLOCK_AUDIT_FAIL` repository variable, let staging go ahead
+despite lint, test or Grype findings; SBOM generation has no such
+input, so its failure always blocks. The image SBOMs stay on the run
+for 45 days as the `sbom-files-<build_id>` artefact, next to the
+Grype results.
 
 The registry inputs take a host, an optional port and an optional
 repository path, which covers how the platforms in use address a
@@ -589,7 +615,15 @@ publishes: they build, audit and test the fixture images, then
 report the tags, assets and promotion a real run would produce.
 `merge.yaml` runs against the fixture commit that adds a release
 descriptor, and `build-test-release.yaml` against its signed `v0.1.0`
-tag, so tag validation applies at full strength.
+tag, so tag validation applies at full strength. A second merge leg
+switches lint, SBOM and Grype off, and a final job reads the run's
+job conclusions. It checks that the gates ran or skipped as
+configured and that the snapshot publish ran in both legs, because a
+wrongly skipped job still shows green. A failing gate cannot run in
+the self-test without failing it, so `tests/test_merge_gating.sh`
+covers that case: it evaluates the publish condition from
+`merge.yaml` over every combination of gate results and toggles, and
+checks that no failed or cancelled gate admits a publish.
 
 A dry run cannot reach the behaviour that appears after images
 push: cosign signing, SLSA provenance, per-registry digest capture,
