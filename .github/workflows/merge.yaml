@@ -11,8 +11,20 @@
 # merged commit adds a container release file under releases/:
 #   gerrit-validate -> { repository-metadata | docker-metadata
 #     | resolve-version | check-release }
-#   docker-metadata -> build -> snapshot-publish
+#   docker-metadata -> { dockerfile-lint | build }
+#   build -> { tests | sbom -> grype }
+#   { resolve-version | dockerfile-lint | tests | sbom | grype }
+#     -> snapshot-publish
 #   check-release -> release-publish (registry-side crane promotion)
+#
+# Gate, then stage: the lint, test, SBOM and Grype jobs mirror
+# build-test.yaml's. hadolint lints the Dockerfiles the build
+# consumed; tests and SBOM generation read the image archives the
+# build job uploads, the bits snapshot-publish pushes; Grype scans
+# the SBOMs generated from them. Every snapshot tag is a promotable
+# candidate, so snapshot-publish runs only once each enabled gate
+# has passed; a gate disabled by its input does not hold it back,
+# and the *_permit_fail inputs let staging proceed past findings.
 #
 # Snapshot tag set (one shared timestamp per run), matching the
 # Jenkins include-docker-push.sh / fabric8 idiom the LF project
@@ -96,9 +108,10 @@ on:
           Escape hatch: a shell command run from path_prefix that
           builds the container images (e.g. 'make images' or
           'mvn -P docker package'). The workflow then enumerates the
-          images the command created and publishes them. Empty
-          (default) builds the discovered/declared Dockerfiles
-          natively with docker buildx.
+          images the command created, feeds them to the test, SBOM
+          and scan jobs, and publishes them. Empty (default) builds
+          the discovered/declared Dockerfiles natively with docker
+          buildx.
         required: false
         type: string
         default: ''
@@ -121,6 +134,100 @@ on:
         required: false
         type: number
         default: 30
+
+      # --- Tests ---
+      # The test, lint, SBOM and Grype inputs match build-test.yaml's
+      # in name, default and meaning. Here a failing gate also holds
+      # back snapshot-publish. The lint, test and Grype gates take a
+      # *_permit_fail input (with the NO_BLOCK_AUDIT_FAIL repository
+      # variable as fallback) that permits their findings; SBOM
+      # generation has none, so its failure always blocks.
+      test_command:
+        description: >-
+          Shell command run from path_prefix after the built images
+          load into the Docker daemon (a smoke/integration hook, e.g.
+          'make test'). The IMAGES environment variable carries a JSON
+          array of the built image tags. Empty runs no command: the
+          tests job passes with a notice, which satisfies the
+          snapshot-publish gate.
+        required: false
+        type: string
+        default: ''
+      test_permit_fail:
+        description: 'Permit test failures without failing the workflow'
+        required: false
+        type: boolean
+        default: false
+
+      # --- Dockerfile lint (hadolint) ---
+      lint_enabled:
+        description: 'Run the Dockerfile lint job (set false to skip)'
+        required: false
+        type: boolean
+        default: true
+      lint_permit_fail:
+        description: 'Permit hadolint findings (the NO_BLOCK pattern)'
+        required: false
+        type: boolean
+        default: false
+      audit_permit_fail:
+        description: >-
+          DEPRECATED alias for lint_permit_fail, retained so existing
+          callers keep working. This job lints Dockerfiles; it does not
+          audit dependencies. Elsewhere in the estate audit_* governs a
+          dependency audit, so the name is being retired here. Prefer
+          lint_permit_fail; this input is removed at the next major.
+        required: false
+        type: boolean
+        default: false
+
+      # --- SBOM ---
+      sbom_enabled:
+        description: >-
+          Generate an image SBOM (set false to skip). The Grype scan
+          reads the SBOM, so skipping generation leaves it nothing to
+          scan. To keep the SBOM but drop the scan, use grype_enabled.
+        required: false
+        type: boolean
+        default: true
+
+      # --- Grype scan ---
+      grype_enabled:
+        description: >-
+          Run the Grype vulnerability scan over the generated SBOMs (set
+          false to skip). Decoupling is one-way: disabling the scan
+          keeps the SBOMs, but disabling the SBOM job also stops the
+          scan, which has nothing to read.
+        required: false
+        type: boolean
+        default: true
+      grype_fail_on:
+        description: 'Minimum severity that fails the Grype scan'
+        required: false
+        type: string
+        default: 'medium'
+      grype_permit_fail:
+        description: >-
+          Permit Grype findings without failing the job. When false, falls
+          back to the NO_BLOCK_AUDIT_FAIL repository variable at runtime.
+        required: false
+        type: boolean
+        default: false
+      grype_cache_db:
+        description: >-
+          How the Grype scan uses the Actions cache for the
+          vulnerability database: 'true' restores and saves,
+          'restore-only' restores but never saves, 'false' disables
+          caching. Cache entries rotate on the database build time, so
+          exactly one job may write a given prefix; where a caller
+          invokes this workflow several times in parallel, give one
+          call 'true' and the rest 'restore-only'. With several
+          writers, creation order and build order can disagree, and a
+          restore then returns an older database than the newest
+          saved.
+        required: false
+        type: string
+        default: 'true'
 
       # --- Registry publishing ---
       snapshot_registry:
@@ -727,16 +834,347 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  tests:
+    name: 'Tests'
+    runs-on: ubuntu-latest
+    needs: ['build', 'docker-metadata']
+    # No image_count guard, unlike build-test.yaml: this lane has no
+    # build_permit_fail, and its build job fails when it saves no
+    # archive, so a successful build always leaves images to test.
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # Same checkout as the build job, so the test hook runs against
+      # the tree that produced the images
+      - name: 'Checkout Gerrit change'
+        # yamllint disable-line rule:line-length
+        if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        if: inputs.gerrit_refspec == '' || inputs.gerrit_revision != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.gerrit_revision || inputs.ref }}
+          persist-credentials: false
+
+      - name: 'Download image archives'
+        if: inputs.test_command != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: docker-archives-${{ needs.docker-metadata.outputs.build_id }}
+          path: /tmp/docker-archives
+
+      - name: 'Run tests'
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          TEST_COMMAND: ${{ inputs.test_command }}
+          IMAGES: ${{ needs.build.outputs.images }}
+          # The NO_BLOCK/soft-fail pattern: the test_permit_fail input
+          # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
+          # variable) disables failure propagation.
+          # yamllint disable-line rule:line-length
+          NO_BLOCK: ${{ inputs.test_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+        run: |
+          # Load the built images and run the caller's test hook; the
+          # IMAGES environment variable carries the built tag list.
+          if [ -z "${TEST_COMMAND}" ]; then
+            echo "::notice::No test_command provided; nothing to run"
+            exit 0
+          fi
+          # nullglob: a missing/empty artifact must fail with a clear
+          # message, not a literal-glob docker load error.
+          shopt -s nullglob
+          archives=(/tmp/docker-archives/*.tar)
+          if [ "${#archives[@]}" -eq 0 ]; then
+            echo "::error::No image archives found to load"
+            exit 1
+          fi
+          for archive in "${archives[@]}"; do
+            docker load -i "${archive}"
+          done
+          cd "${PATH_PREFIX}"
+          status=0
+          bash -e -c "${TEST_COMMAND}" || status=$?
+          if [ "${status}" != "0" ]; then
+            if [ "${NO_BLOCK}" = "true" ]; then
+              echo "::warning::Tests failed, but failures are" \
+                "permitted so the job will not fail."
+              exit 0
+            fi
+            exit "${status}"
+          fi
+
+  dockerfile-lint:
+    name: 'Dockerfile Lint'
+    runs-on: ubuntu-latest
+    needs: 'docker-metadata'
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.docker-metadata.result == 'success' && inputs.lint_enabled }}
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # Same checkout as the build job, so lint covers the
+      # Dockerfiles that produced the images
+      - name: 'Checkout Gerrit change'
+        # yamllint disable-line rule:line-length
+        if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        if: inputs.gerrit_refspec == '' || inputs.gerrit_revision != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.gerrit_revision || inputs.ref }}
+          persist-credentials: false
+
+      - name: 'Lint Dockerfiles (hadolint)'
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          IMAGES_JSON: ${{ needs.docker-metadata.outputs.images_json }}
+          # Digest-pinned hadolint container; docker.io serves it and
+          # sits in the egress allow-list.
+          # yamllint disable-line rule:line-length
+          HADOLINT_IMAGE: 'hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d'
+          # The NO_BLOCK/soft-fail pattern: the lint_permit_fail input
+          # (or its deprecated audit_permit_fail alias)
+          # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
+          # variable) disables failure propagation.
+          # yamllint disable-line rule:line-length
+          NO_BLOCK: ${{ inputs.lint_permit_fail || inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+        run: |
+          # Lint exactly the Dockerfiles the build consumes (from the
+          # resolved image list), so per-image dockerfile overrides
+          # and non-standard filenames stay covered. The resolved
+          # paths are relative to path_prefix (discovery runs there).
+          cd "${PATH_PREFIX}"
+          status=0
+          while IFS= read -r dockerfile; do
+            echo "::group::hadolint ${dockerfile}"
+            docker run --rm \
+              -v "${PWD}:/mnt:ro" -w /mnt \
+              "${HADOLINT_IMAGE}" \
+              hadolint "${dockerfile}" || status=1
+            echo "::endgroup::"
+          done < <(jq -r '.[] | .dockerfile //
+            (.context + "/Dockerfile")' <<< "${IMAGES_JSON}")
+          if [ "${status}" = "0" ]; then
+            echo "Dockerfile lint passed ✅"
+            exit 0
+          fi
+          if [ "${NO_BLOCK}" = "true" ]; then
+            echo "::warning::hadolint reported findings, but failures" \
+              "are permitted so the job will not fail."
+            exit 0
+          fi
+          echo "::error::hadolint reported findings"
+          exit 1
+
+  sbom:
+    name: 'Image SBOM'
+    runs-on: ubuntu-latest
+    needs: ['build', 'docker-metadata']
+    # As for the tests job: a successful build always leaves archives.
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.build.result == 'success' && inputs.sbom_enabled }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Download image archives'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: docker-archives-${{ needs.docker-metadata.outputs.build_id }}
+          # Image mode only reads archives inside the workspace or
+          # RUNNER_TEMP, so they land under runner.temp, not /tmp
+          path: ${{ runner.temp }}/docker-archives
+
+      # One CycloneDX SBOM per image archive, named
+      # sbom-cyclonedx-<archive-basename>.json; the Grype job scans
+      # every one. An empty archive directory fails the step.
+      # sbom_spec_version 1.7 keeps the spec the inline syft call
+      # wrote by default.
+      - name: 'Generate image SBOMs'
+        id: sbom
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/sbom-action@398aec0a5f332a0414246a6d9d45678ef4a95e98  # v0.3.0
+        with:
+          mode: image
+          image_archive_directory: ${{ runner.temp }}/docker-archives
+          sbom_format: json
+          sbom_spec_version: '1.7'
+
+      # Kept as a run artefact for the 45 days the scan results
+      # stay, so the SBOMs of the staged bits outlive the run's
+      # short-lived image archives.
+      - name: 'Upload SBOM artifacts'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom-files-${{ needs.docker-metadata.outputs.build_id }}
+          path: sbom-cyclonedx-*.json
+          retention-days: 45
+          # Fail fast: the downstream Grype job requires this artifact,
+          # so a missing/misnamed SBOM must surface here, not later
+          if-no-files-found: error
+
+  grype:
+    name: 'Grype Audit SBOM'
+    runs-on: ubuntu-latest
+    needs: ['sbom', 'docker-metadata']
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.sbom.result == 'success' && inputs.grype_enabled }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Download SBOM artefact'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sbom-files-${{ needs.docker-metadata.outputs.build_id }}
+
+      # The grype_permit_fail input (or, when unset, the NO_BLOCK_AUDIT_FAIL
+      # repository variable) disables failure propagation so staging
+      # can proceed when blocked by newly discovered CVEs in base images
+      # or transitive dependencies.
+      - name: 'Grype audit SBOMs'
+        id: grype-audit
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/grype-scan-action@ee8d637c2324bbb84ae583abc95b56c9c4d078ee  # v0.1.0
+        with:
+          sbom: 'sbom-cyclonedx-*.json'
+          fail-on: ${{ inputs.grype_fail_on }}
+          # yamllint disable-line rule:line-length
+          permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+          # yamllint disable-line rule:line-length
+          artifact-name: grype-scan-results-${{ needs.docker-metadata.outputs.build_id }}
+          retention-days: '45'
+          cache-db: ${{ inputs.grype_cache_db }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
   snapshot-publish:
     name: 'Publish Snapshot'
     runs-on: ubuntu-latest
+    # Gate, then stage: a snapshot tag is a promotable candidate, so
+    # every gate must pass before anything publishes.
+    #
+    # A skipped gate is accepted ONLY when an input explains it, as
+    # in build-test-release.yaml's tests job. A bare 'skipped' is
+    # ambiguous: grype also skips when the sbom job FAILS, and
+    # accepting that would stage images no scan examined. sbom is a
+    # direct dependency for the same reason: with grype_enabled
+    # false, an SBOM failure would otherwise pass unseen.
+    #
+    # tests carries no toggle: it runs whenever build succeeds and
+    # passes with a notice when test_command is empty, so only its
+    # success admits a publish.
+    #
+    # The explicit !cancelled() matters as well: a skipped job taints
+    # every job downstream of it unless that job sets its own
+    # status check, which is how disabled audits once stranded
+    # build-test-release.yaml's promotion (#90).
     needs:
       - 'gerrit-validate'
       - 'resolve-version'
       - 'docker-metadata'
       - 'build'
+      - 'tests'
+      - 'dockerfile-lint'
+      - 'sbom'
+      - 'grype'
     # yamllint disable-line rule:line-length
-    if: ${{ !cancelled() && needs.resolve-version.result == 'success' && needs.build.result == 'success' }}
+    if: ${{ !cancelled() && needs.resolve-version.result == 'success' && needs.build.result == 'success' && needs.tests.result == 'success' && (needs.dockerfile-lint.result == 'success' || (needs.dockerfile-lint.result == 'skipped' && !inputs.lint_enabled)) && (needs.sbom.result == 'success' || (needs.sbom.result == 'skipped' && !inputs.sbom_enabled)) && (needs.grype.result == 'success' || (needs.grype.result == 'skipped' && (!inputs.grype_enabled || !inputs.sbom_enabled))) }}
     permissions:
       contents: read
     timeout-minutes: 15
