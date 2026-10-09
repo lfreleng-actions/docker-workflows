@@ -78,12 +78,12 @@ gaps rather than assuming every target behaves like GHCR:
 
 <!-- markdownlint-disable MD013 -->
 
-| Registry            | OCI referrers API | cosign signature (tag scheme) | Provenance destination            |
-| ------------------- | ----------------- | ----------------------------- | --------------------------------- |
-| GHCR                | Yes               | Yes                           | Pushed to the registry            |
-| Docker Hub          | Unreliable        | Yes                           | GitHub attestation store          |
-| Nexus 3             | No (404)          | Yes (verified on 3.95.1)      | GitHub attestation store          |
-| JFrog Artifactory   | Unverified        | Unverified                    | GitHub attestation store          |
+| Registry          | OCI referrers API | cosign v3 bundle signature | Legacy `.sig` signature  | Provenance destination   |
+| ----------------- | ----------------- | -------------------------- | ------------------------ | ------------------------ |
+| GHCR              | No (404)          | Yes (fallback tag)         | Yes                      | Pushed to the registry   |
+| Docker Hub        | Unreliable        | Untested                   | Yes                      | GitHub attestation store |
+| Nexus 3           | No (404)          | Untested (#114)            | Yes (verified on 3.95.1) | GitHub attestation store |
+| JFrog Artifactory | Unverified        | Unverified                 | Unverified               | GitHub attestation store |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -99,20 +99,36 @@ Consequences for callers:
   release; elsewhere the image publishes unsigned with a warning, so
   an unproven registry cannot take a release down. Add a registry to
   that input once testing proves it stores signatures.
-- cosign v3.0.6, which `sigstore/cosign-installer` v4.1.2 installs,
-  stores the signature under the legacy tag scheme, as
-  `sha256-<hex>.sig` beside the image. OCI 1.1 referrer storage
-  needs `--registry-referrers-mode oci-1-1`, which this lane does
-  not pass, so cleanup policies and verification tooling should
-  expect the `.sig` tag.
+- **Signature format.** cosign v3.0.6, which
+  `sigstore/cosign-installer` v4.1.2 installs, writes each
+  signature as a Sigstore bundle
+  (`application/vnd.dev.sigstore.bundle.v0.3+json`) attached to the
+  image digest as an OCI 1.1 referrer. Where the
+  registry answers 404 for the referrers API, the referrer is
+  instead listed in an OCI image index under a fallback tag named
+  `sha256-<hex>`, the image digest with no `.sig` suffix. GHCR is
+  such a registry: a real publish (#28) found the signature and the
+  GHCR provenance sharing one fallback tag. The legacy
+  `sha256-<hex>.sig` signature image is what cosign v2 wrote, and
+  what cosign v3 writes when given `--new-bundle-format=false
+  --use-signing-config=false`, flags this lane does not pass.
+- **Cleanup and retention.** Policies that prune untagged or
+  non-release tags must keep both forms: the `sha256-<hex>` fallback
+  tags this lane writes now, and any `sha256-<hex>.sig` tags from
+  earlier signing. Without its fallback tag, cosign cannot find the
+  signature (nor, on GHCR, the provenance), and untagged-manifest
+  cleanup then deletes both.
 
-Nexus 3 accepts a cosign signature push (the signature image
-manifest under the `sha256-<hex>.sig` tag) even with
-`strictContentTypeValidation` enabled. This lane keeps cosign's
-legacy tag scheme by design and never passes
-`--registry-referrers-mode oci-1-1`: that path writes a
-subject-bearing manifest through the referrers API instead, and
-neither Nexus 3 nor Docker Hub supports it dependably.
+The legacy result for Nexus 3 predates the bundle format: Nexus
+3.95.1 accepted a legacy cosign signature push even with
+`strictContentTypeValidation` enabled. The bundle path pushes a
+different shape, a subject-bearing manifest with an
+`application/vnd.oci.empty.v1+json` config and a fallback image
+index. No test has yet shown whether Nexus 3 accepts it under
+strict validation; #114 tracks that test and a lane option to
+select the legacy format. No test has yet pushed a cosign v3
+bundle to Docker Hub either, which is why those cells read
+Untested.
 
 Artifactory is addressable by `merge.yaml` (Model B), which accepts
 its repository-path and subdomain forms alongside the Nexus
@@ -136,8 +152,11 @@ happens to live in the caller's repository.
 
 Verification has to name the signer workflow.
 `gh attestation verify --owner <org>` on its own fails with
-`Error: verifying with issuer "sigstore.dev"`, because `--owner`
-also expects the signer workflow to belong to that organisation:
+`Error: verifying with issuer "sigstore.dev"` for any caller outside
+`lfreleng-actions`, because `--owner` also expects the signer
+workflow to belong to that organisation. `--owner` (or `--repo`) is
+still required: it names the calling organisation, where the
+attestation lives. Add `--signer-workflow` to name the lane:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -146,6 +165,11 @@ gh attestation verify oci://ghcr.io/<org>/<image>@sha256:<digest> \
   --owner <org> \
   --signer-workflow lfreleng-actions/docker-workflows/.github/workflows/build-test-release.yaml
 ```
+
+`--signer-repo lfreleng-actions/docker-workflows` is the looser
+alternative, accepting any workflow in this repository. For GHCR
+images, `--bundle-from-oci` reads the provenance from the registry
+instead of the GitHub attestation store.
 
 cosign matches the same identity, anchored at both ends so that the
 suffix must be a branch, tag or commit SHA ref of the workflow:
@@ -158,7 +182,26 @@ cosign verify ghcr.io/<org>/<image>@sha256:<digest> \
 
 <!-- markdownlint-enable MD013 -->
 
-`cosign verify-attestation` takes the same two certificate flags.
+`cosign verify-attestation` takes the same two certificate flags;
+pass `--type slsaprovenance1` to select the SLSA provenance.
+
+The signatures are Sigstore bundles (see
+[Registry Capability](#registry-capability)), which not every cosign
+reads:
+
+| Verifier                 | Reads this lane's signatures                 |
+| ------------------------ | -------------------------------------------- |
+| cosign v3                | Yes, by default                              |
+| cosign v2.6.0 and later  | With `--new-bundle-format=true`              |
+| cosign before v2.6.0     | No: it reports `no signatures found`         |
+
+On GHCR, plain `cosign verify` lists two entries for one image: the
+signature (predicate type `https://sigstore.dev/cosign/sign/v1`) and
+the SLSA provenance bundle (`https://slsa.dev/provenance/v1`).
+Both are bundles signed by the same workflow identity and attached
+to the same digest, so cosign reports both as verified signatures.
+The second entry is the provenance, not a duplicate signature;
+check the predicate type when a script counts signatures.
 
 ## Job Graph
 
