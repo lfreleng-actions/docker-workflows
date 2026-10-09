@@ -73,3 +73,15 @@ jobs:
     #   harden_runner_egress: 'block' # 'block' (default) or 'audit'
     #   build_permit_egress_traffic: false  # audit egress for build job only
     #                                 # (third-party base image registries)
+    #   # Container release files: pass the registries merge.yaml
+    #   # receives, and a change adding or editing a
+    #   # releases/*-container.yaml file is checked before it merges.
+    #   snapshot_registry: 'nexus3.onap.org:10003'
+    #   release_registry: 'nexus3.onap.org:10002'
+    #   registry_user: ''             # empty derives from the repository
+    # # Optional: with a registry credential the check also confirms each
+    # # staged image exists and no release tag would change. Fork pull
+    # # requests receive no secrets and keep the offline check alone.
+    # secrets:
+    #   OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+    #   VAULT_MAPPING_JSON: ${{ secrets.VAULT_MAPPING_JSON }}
