@@ -55,10 +55,13 @@ Two release models cover the LF project estate:
   snapshot/staging tag set to the snapshot registry, versioned from
   `version.properties`. Merging a `releases/` file with
   `distribution_type: container` triggers a registry-side promotion:
-  crane copies the staged `name:version` images to the release
+  [docker-promote-action](https://github.com/lfreleng-actions/docker-promote-action)
+  copies the staged `name:version` images to the release
   registry at `container_release_tag`, under the same image
   namespace (see [Image Namespace](#image-namespace)), preserving
-  multi-architecture manifests without rebuilding.
+  multi-architecture manifests without rebuilding. Promotion skips an
+  image already released with the same digest, and fails on a release
+  tag holding other bits (see [merge.yaml](#mergeyaml)).
 
 Model B publishes this tag set per image, sharing one timestamp per
 run (the Jenkins `include-docker-push.sh`/fabric8 idiom):
@@ -330,13 +333,15 @@ or the lane's inputs. Container names in release files are relative
 to the namespace: ONAP's never start with `onap/`, and some carry
 sub-paths such as `so/sdnc-adapter`. That is how global-jjb's
 `release-job.sh` builds `<registry>/<umbrella>/<name>`, so the same
-release files promote the same images. A name that already starts
-with `<namespace>/` stays as written, with a notice that it looks
-double-prefixed. Promotion resolves every path before it copies
-anything, and fails when two names resolve to the same path (`foo`
-and `<namespace>/foo`) or a path, with the registry's own path,
-exceeds 255 characters. The snapshot publish checks its paths the
-same way before it pushes anything.
+release files promote the same images. Promotion never strips a
+prefix: a name that already starts with `<namespace>/` gains the
+namespace again (`onap/app` resolves to `onap/onap/app`), as in
+Jenkins, with a notice that it looks double-prefixed. Promotion
+resolves every path before it copies anything, and fails when a name
+appears twice or a path, with the registry's own path, exceeds 255
+characters. The snapshot publish checks its paths the same way
+before it pushes anything, and fails when two images resolve to the
+same path.
 
 ## Inputs
 
@@ -538,6 +543,31 @@ action's default `numeric_versions: literal`, taking an unquoted
 numeric version as written (`version: 1.10` stays `1.10`); quote
 versions to be sure. The action needs `python3` 3.10 or later and mikefarah `yq`
 v4.25.3 or later, both present on GitHub-hosted runners.
+
+The `release-publish` job promotes with
+[docker-promote-action](https://github.com/lfreleng-actions/docker-promote-action),
+which reads every staged image and every release tag before it
+writes anything, then copies by digest with `crane copy`:
+
+- a release tag already holding the staged digest is **skipped**,
+  so a re-run or a second merge of the same release file copies
+  nothing again;
+- a release tag holding a **different** digest fails the job before
+  writing any image, because release tags are immutable (the lane
+  sets the action's default `on_conflict: fail`); release under a new
+  tag instead;
+- a missing staged image fails the job before writing any image;
+- `latest` (`push_latest`) moves once every image has released, and
+  not before.
+
+The step summary lists each image with its source, destination,
+digest and status. The action logs in to each registry's
+`host[:port]` with the loaded credential, in a docker config private
+to the step, and downloads a pinned, checksum-verified `crane` from
+GitHub releases, so a custom `harden_runner_allowlist` must permit
+`github.com` and `release-assets.githubusercontent.com`. A dry run
+prints the plan without downloading, logging in or reading a
+registry.
 
 ## Usage
 
