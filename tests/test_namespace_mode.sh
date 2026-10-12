@@ -8,10 +8,14 @@
 # that names an image reads that job's 'namespace' output. The test
 # extracts that step script from each lane and runs it as GitHub runs
 # a 'shell: bash' step, checking the resolved value and that invalid
-# combinations fail with an ::error:: annotation.
+# combinations fail with an ::error:: annotation. Promotion runs
+# docker-promote-action at the commit merge.yaml pins.
 #
 # Usage: tests/test_namespace_mode.sh
-# Needs bash, yq (either the Go or the Python implementation).
+# PROMOTE_ACTION_DIR may name a local clone of docker-promote-action
+# checked out at the pinned commit, to run without fetching it.
+# Needs bash, git, python3 (3.10 or later) and yq (either the Go or
+# the Python implementation).
 
 set -euo pipefail
 
@@ -78,24 +82,81 @@ for lane in build-test merge build-test-release; do
   fi
 done
 
-# Merge-lane promotion: names resolve under the namespace and every
-# final path is checked before anything copies. DRY_RUN keeps crane
-# out of the test.
-# promote_case DESCRIPTION EXPECTED NAMESPACE CONTAINERS_JSON [PUSH]
-# EXPECTED is a 'would copy' line the log must hold, or 'error'
+# Merge-lane promotion runs docker-promote-action. The lane's step must
+# hand the action the resolved namespace and the release file's
+# registries, and the action itself, fetched at the commit the lane
+# pins and run under dry_run (which keeps crane and every registry out
+# of the test), must resolve names under the namespace and check every
+# path before anything copies.
+lane=merge
+# promote_step FIELD: one field of the release-publish promote step
+promote_step() {
+  yq -r ".jobs.\"release-publish\".steps[] | select(.id == \"promote\") | .$1" \
+    "${root}/.github/workflows/merge.yaml"
+}
+uses=$(promote_step uses)
+pattern='^lfreleng-actions/docker-promote-action@([0-9a-f]{40})$'
+if [[ ! "${uses}" =~ ${pattern} ]]; then
+  echo "FAIL: the release-publish promote step does not use"
+  echo "  docker-promote-action at a commit SHA (got '${uses}')"
+  exit 1
+fi
+pin="${BASH_REMATCH[1]}"
+
+# promote_input NAME VALUE: the promote step passes VALUE as input NAME
+promote_input() {
+  local actual
+  actual=$(promote_step "with.$1")
+  if [ "${actual}" = "$2" ]; then
+    echo "ok: promotion: step input $1"
+  else
+    echo "FAIL: promotion: step input $1 is '${actual}', expected '$2'"
+    failures=$((failures + 1))
+  fi
+}
+# shellcheck disable=SC2016  # literal workflow expressions
+promote_input namespace '${{ needs.gerrit-validate.outputs.namespace }}'
+# shellcheck disable=SC2016
+promote_input pull_registry \
+  '${{ needs.check-release.outputs.pull_registry || inputs.snapshot_registry }}'
+# shellcheck disable=SC2016
+promote_input push_registry \
+  '${{ needs.check-release.outputs.push_registry || inputs.release_registry }}'
+# shellcheck disable=SC2016
+promote_input dry_run '${{ inputs.dry_run }}'
+
+if [ -n "${PROMOTE_ACTION_DIR:-}" ]; then
+  action=$(cd "${PROMOTE_ACTION_DIR}" && pwd)
+else
+  action="${work}/promote-action"
+  git -c init.defaultBranch=main init -q "${action}"
+  git -C "${action}" fetch -q --depth 1 \
+    https://github.com/lfreleng-actions/docker-promote-action "${pin}"
+  git -C "${action}" checkout -q FETCH_HEAD
+fi
+head=$(git -C "${action}" rev-parse HEAD)
+if [ "${head}" != "${pin}" ]; then
+  echo "FAIL: ${action} is at ${head}, but merge.yaml pins ${pin}"
+  exit 1
+fi
+
+# promote_case DESCRIPTION EXPECTED NAMESPACE CONTAINERS_JSON [PUSH] [LINE]
+# EXPECTED is a 'would copy' line the log must hold, or 'error'; LINE
+# is a further text the log must hold
 promote_case() {
   local status=0
   env -i PATH="${PATH}" HOME="${work}" \
-    GITHUB_STEP_SUMMARY="${work}/summary" CONTAINERS="$4" \
-    RELEASE_TAG=1.0.0 PULL_REGISTRY=pull.example PUSH_LATEST=false \
-    PUSH_REGISTRY="${5:-push.example}" IMAGE_NAMESPACE="$3" \
-    DRY_RUN=true bash --noprofile --norc -eo pipefail \
-    "${work}/promote.sh" > "${work}/log" 2>&1 || status=$?
+    GITHUB_OUTPUT="${work}/output" GITHUB_STEP_SUMMARY="${work}/summary" \
+    INPUT_CONTAINERS_JSON="$4" INPUT_RELEASE_TAG=1.0.0 \
+    INPUT_PULL_REGISTRY=pull.example INPUT_PUSH_REGISTRY="${5:-push.example}" \
+    INPUT_NAMESPACE="$3" INPUT_PUSH_LATEST=false INPUT_DRY_RUN=true \
+    python3 -I "${action}/entrypoint.py" > "${work}/log" 2>&1 || status=$?
   if { [ "$2" = 'error' ] && [ "${status}" -ne 0 ] &&
     grep -q '^::error::' "${work}/log" &&
     ! grep -q 'would copy' "${work}/log"; } ||
     { [ "$2" != 'error' ] && [ "${status}" -eq 0 ] &&
-      grep -qxF "Dry run: would copy $2" "${work}/log"; }; then
+      grep -qxF "Dry run: would copy $2" "${work}/log" &&
+      grep -qF "${6:-}" "${work}/log"; }; then
     echo "ok: promotion: $1"
   else
     echo "FAIL: promotion: $1 (exit ${status})"
@@ -104,20 +165,19 @@ promote_case() {
   fi
 }
 
-lane=merge
-yq -r '.jobs."release-publish".steps[]
-  | select(.name == "Promote staged images") | .run' \
-  "${root}/.github/workflows/merge.yaml" > "${work}/promote.sh"
 long=$(printf 'a%.0s' $(seq 251))
 promote_case 'names resolve under the namespace' \
   'pull.example/onap/so/api:1.2 -> push.example/onap/so/api:1.0.0' \
   onap '[{"name":"so/api","version":"1.2"}]'
-promote_case 'a prefixed name is kept as written' \
-  'pull.example/onap/api:1.2 -> push.example/onap/api:1.0.0' \
-  onap '[{"name":"onap/api","version":"1.2"}]'
-promote_case 'names colliding once namespaced fail before copying' \
+# Names are relative to the namespace, as in global-jjb's
+# release-job.sh: no prefix is ever stripped
+promote_case 'a prefixed name gains the namespace again, with a notice' \
+  'pull.example/onap/onap/api:1.2 -> push.example/onap/onap/api:1.0.0' \
+  onap '[{"name":"onap/api","version":"1.2"}]' push.example \
+  '::notice::onap/api already starts with namespace'
+promote_case 'a name listed twice fails before copying' \
   error onap \
-  '[{"name":"api","version":"1"},{"name":"onap/api","version":"2"}]'
+  '[{"name":"api","version":"1"},{"name":"api","version":"2"}]'
 promote_case 'a path over 255 characters once namespaced fails' \
   error onap "[{\"name\":\"${long}\",\"version\":\"1\"}]"
 promote_case 'a registry path counts towards the limit' \

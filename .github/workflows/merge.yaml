@@ -1076,12 +1076,12 @@ jobs:
           snapshot_registry: ${{ inputs.snapshot_registry }}
           release_registry: ${{ inputs.release_registry }}
 
-  # Registry-side promotion: crane copies the staged name:version
-  # images named by the release file to the release registry at the
-  # release tag, preserving multi-architecture manifests. No rebuild
-  # occurs — the staged images were built and published by the merge
-  # that staged them — so this job deliberately does not depend on
-  # this run's build.
+  # Registry-side promotion through docker-promote-action: the staged
+  # name:version images named by the release file copy to the release
+  # registry at the release tag, by digest, preserving
+  # multi-architecture manifests. No rebuild occurs — the staged
+  # images were built and published by the merge that staged them —
+  # so this job deliberately does not depend on this run's build.
   release-publish:
     name: 'Promote Release'
     runs-on: ubuntu-latest
@@ -1133,7 +1133,7 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 'Resolve registry username and login endpoints'
+      - name: 'Resolve registry username and credential name'
         id: publish-params
         if: steps.creds.outputs.available == 'true'
         shell: bash
@@ -1143,10 +1143,6 @@ jobs:
           # The repository actually checked out/published, which can
           # differ from GITHUB_REPOSITORY for cross-repository calls
           TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
-          # yamllint disable-line rule:line-length
-          PULL_REGISTRY: ${{ needs.check-release.outputs.pull_registry || inputs.snapshot_registry }}
-          # yamllint disable-line rule:line-length
-          PUSH_REGISTRY: ${{ needs.check-release.outputs.push_registry || inputs.release_registry }}
         run: |
           # 1Password credential naming contract: the credential (and
           # username) take the name of the repository being published
@@ -1171,7 +1167,7 @@ jobs:
           # rather than merely escaped. The username admits '@' and
           # '+' as well: registry accounts genuinely use them, since
           # Artifactory SaaS identities are commonly email addresses,
-          # and the value only travels to docker login. The
+          # and the value only travels to the registry login. The
           # credential name keys a 1Password item and derives from a
           # repository name, so it keeps the tighter set.
           if [[ ! "${registry_user}" =~ ^[A-Za-z0-9._@+-]+$ ]]; then
@@ -1184,21 +1180,9 @@ jobs:
               "${credential_name}"
             exit 1
           fi
-          # docker login takes an endpoint, not an image reference. A
-          # repository path belongs to the reference and authenticates
-          # against the host serving it, which is how Artifactory's
-          # repository-path method works; Nexus 3 encodes the
-          # repository in the port, so there the whole value stays.
-          # crane reads the docker config these logins write.
-          pull_endpoint="${PULL_REGISTRY%%/*}"
-          push_endpoint="${PUSH_REGISTRY%%/*}"
-          echo "Pull login endpoint: ${pull_endpoint}"
-          echo "Push login endpoint: ${push_endpoint}"
           {
             echo "registry_user=${registry_user}"
             echo "credential_name=${credential_name}"
-            echo "pull_endpoint=${pull_endpoint}"
-            echo "push_endpoint=${push_endpoint}"
           } >> "$GITHUB_OUTPUT"
 
       - name: 'Load registry credential'
@@ -1215,139 +1199,43 @@ jobs:
           credential_grants_json: ${{ vars.CREDENTIAL_LOAD_GRANTS }}
           export_env: 'false'
 
-      # The same per-repository credential authenticates both
-      # registries (the LF Nexus 3 snapshot/release registries share
-      # a credential realm, as do the repositories of one Artifactory
-      # instance); crane reads the docker config both logins write.
-      # Release-file registry overrides must stay within that realm —
-      # promotion to registries with separate credentials (e.g.
-      # docker.io) remains with the LF release-engineering tooling
-      # for now.
-      - name: 'Login to pull registry'
-        if: steps.creds.outputs.available == 'true'
-        # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
-        with:
-          registry: ${{ steps.publish-params.outputs.pull_endpoint }}
-          username: ${{ steps.publish-params.outputs.registry_user }}
-          password: ${{ steps.load-credential.outputs.credential }}
-      - name: 'Login to push registry'
-        if: steps.creds.outputs.available == 'true'
-        # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
-        with:
-          registry: ${{ steps.publish-params.outputs.push_endpoint }}
-          username: ${{ steps.publish-params.outputs.registry_user }}
-          password: ${{ steps.load-credential.outputs.credential }}
-
-      - name: 'Set up crane'
-        if: steps.creds.outputs.available == 'true'
-        # yamllint disable-line rule:line-length
-        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b  # v0.7
-
+      # docker-promote-action reads every staged image and release tag
+      # before it writes anything, copies by digest, and moves latest
+      # only once every image has released. A release tag already
+      # holding the staged digest is skipped, so a re-run or a second
+      # merge of the same release file copies nothing again;
+      # on_conflict 'fail' refuses a release tag that holds other
+      # bits, since release tags are immutable. A dry run plans
+      # without downloading crane, logging in or reading a registry.
+      #
+      # The action logs in to the login endpoint (host[:port]) of each
+      # registry base, in a docker config private to the step, while
+      # image references keep the full base, Artifactory repository
+      # path included. The same per-repository credential
+      # authenticates both registries (the LF Nexus 3
+      # snapshot/release registries share a credential realm, as do
+      # the repositories of one Artifactory instance). Release-file
+      # registry overrides must stay within that realm — promotion to
+      # registries with separate credentials (e.g. docker.io) remains
+      # with the LF release-engineering tooling for now.
       - name: 'Promote staged images'
+        id: promote
         # yamllint disable-line rule:line-length
         if: steps.creds.outputs.available == 'true' || inputs.dry_run
-        shell: bash
-        env:
-          CONTAINERS: ${{ needs.check-release.outputs.containers_json }}
-          RELEASE_TAG: ${{ needs.check-release.outputs.version }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/docker-promote-action@8b0d32d8392bae6dea61e8e4e182ee687bd6b3ab  # v0.1.0
+        with:
           # yamllint disable-line rule:line-length
-          PULL_REGISTRY: ${{ needs.check-release.outputs.pull_registry || inputs.snapshot_registry }}
+          containers_json: ${{ needs.check-release.outputs.containers_json }}
+          release_tag: ${{ needs.check-release.outputs.version }}
           # yamllint disable-line rule:line-length
-          PUSH_REGISTRY: ${{ needs.check-release.outputs.push_registry || inputs.release_registry }}
-          IMAGE_NAMESPACE: ${{ needs.gerrit-validate.outputs.namespace }}
-          PUSH_LATEST: ${{ inputs.push_latest }}
-          DRY_RUN: ${{ inputs.dry_run }}
-        run: |
-          # Registry-side promotion of every container named by the
-          # release file: staged <ns>/name:version on the pull
-          # registry copies to <ns>/name:release-tag on the push
-          # registry, whichever registries the release file chose.
-          # Release-file names are relative to the namespace (ONAP's
-          # carry no onap/ prefix, some carry sub-paths such as
-          # so/sdnc-adapter), matching global-jjb's release-job.sh
-          # <registry>/<umbrella>/<name>, and the snapshot publish
-          # above namespaces the same way. crane copies manifests
-          # as-is, so multi-architecture manifest lists survive the
-          # promotion. Three phases: every final path is resolved and
-          # checked before anything copies, every copy completes
-          # before any mutable latest tag moves, so a failing copy
-          # never leaves a partially-latest release.
-          declare -a promoted=() paths=() versions=()
-          declare -A seen=()
-          # A registry's own path counts towards the 255-character
-          # repository limit; its host does not.
-          repo_prefix() {
-            if [[ "$1" == */* ]]; then echo "${1#*/}/"; fi
-          }
-          pull_prefix=$(repo_prefix "${PULL_REGISTRY}")
-          push_prefix=$(repo_prefix "${PUSH_REGISTRY}")
-          longest=$((${#pull_prefix} > ${#push_prefix} \
-            ? ${#pull_prefix} : ${#push_prefix}))
-          while IFS= read -r container; do
-            name=$(jq -r '.name' <<< "${container}")
-            version=$(jq -r '.version' <<< "${container}")
-            path="${name}"
-            if [[ -n "${IMAGE_NAMESPACE}" &&
-              "${name}" == "${IMAGE_NAMESPACE}/"* ]]; then
-              echo "::notice::Release-file name '${name}' already" \
-                "starts with '${IMAGE_NAMESPACE}/' and is kept as-is;" \
-                "names are relative to the namespace, so it is" \
-                "probably double-prefixed"
-            elif [ -n "${IMAGE_NAMESPACE}" ]; then
-              path="${IMAGE_NAMESPACE}/${name}"
-            fi
-            # Names unique in the release file can still collide once
-            # namespaced ('foo' and '<ns>/foo'): the second copy would
-            # overwrite the first at the same release tag.
-            if [ -n "${seen[${path}]:-}" ]; then
-              echo "::error::Release-file names '${seen[${path}]}'" \
-                "and '${name}' both promote to '${path}'"
-              exit 1
-            fi
-            seen[${path}]="${name}"
-            if [ $((longest + ${#path})) -gt 255 ]; then
-              echo "::error::Repository path '${path}' exceeds 255" \
-                "characters with the registry path"
-              exit 1
-            fi
-            paths+=("${path}")
-            versions+=("${version}")
-          done < <(jq -c '.[]' <<< "${CONTAINERS}")
-          for i in "${!paths[@]}"; do
-            src="${PULL_REGISTRY}/${paths[i]}:${versions[i]}"
-            dst="${PUSH_REGISTRY}/${paths[i]}:${RELEASE_TAG}"
-            if [ "${DRY_RUN}" = 'true' ]; then
-              echo "Dry run: would copy ${src} -> ${dst}"
-            else
-              echo "::group::Promote ${src} -> ${dst}"
-              crane copy "${src}" "${dst}"
-              echo "::endgroup::"
-            fi
-            promoted+=("${dst}")
-          done
-          if [ "${PUSH_LATEST}" = 'true' ]; then
-            for path in "${paths[@]}"; do
-              dst="${PUSH_REGISTRY}/${path}:${RELEASE_TAG}"
-              if [ "${DRY_RUN}" = 'true' ]; then
-                echo "Dry run: would tag ${dst} as latest"
-              else
-                crane tag "${dst}" latest
-              fi
-              promoted+=("${PUSH_REGISTRY}/${path}:latest")
-            done
-          fi
-          {
-            echo "## Release Promotion"
-            echo ""
-            if [ "${DRY_RUN}" = 'true' ]; then
-              echo "Dry run: **${#promoted[@]}** tag(s) computed," \
-                "nothing promoted"
-            else
-              echo "Promoted **${#promoted[@]}** tag(s):"
-            fi
-            echo ""
-            printf -- "- \`%s\`\n" "${promoted[@]}"
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
+          pull_registry: ${{ needs.check-release.outputs.pull_registry || inputs.snapshot_registry }}
+          # yamllint disable-line rule:line-length
+          push_registry: ${{ needs.check-release.outputs.push_registry || inputs.release_registry }}
+          namespace: ${{ needs.gerrit-validate.outputs.namespace }}
+          push_latest: ${{ inputs.push_latest }}
+          dry_run: ${{ inputs.dry_run }}
+          on_conflict: 'fail'
+          registry_user: ${{ steps.publish-params.outputs.registry_user }}
+          # yamllint disable-line rule:line-length
+          registry_password: ${{ steps.load-credential.outputs.credential }}

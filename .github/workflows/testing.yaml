@@ -392,7 +392,9 @@ jobs:
   # namespace_mode resolution in every lane: the gerrit-validate step
   # script that resolves the image namespace, extracted from each
   # workflow and run against valid and invalid mode/namespace pairs,
-  # including the release lane's Docker Hub requirements.
+  # including the release lane's Docker Hub requirements. The merge
+  # lane's promotion plan comes from docker-promote-action, fetched at
+  # the commit merge.yaml pins and run under dry_run.
   namespace-mode:
     name: 'Namespace mode resolution'
     permissions:

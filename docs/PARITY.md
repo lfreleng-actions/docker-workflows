@@ -148,8 +148,8 @@ Unless noted, Jenkins paths below are global-jjb paths.
 | Staging trigger          | Maven: Gerrit comment, optional cron; plain Dockerfile: every merge plus weekly                                                                                                                                                                       | Every merge                                                                                                                                                   | Partial | Decision, section 5  |
 | Tag methods              | `latest`, `stream`, `git-describe`, `yaml-file` (`shell/docker-get-container-tag.sh:27-47`); `yaml-file` reads `container-tag.yaml` from `container-tag-yaml-dir`, else `docker-root`                                                                 | None; one tag set for every repository                                                                                                                        | Gap     | #109, #31, #37       |
 | Release verify           | `gerrit-release-verify` on a change to `releases/*.yaml`: schema check, semver check, pull of each staged image, checkout of `ref`, locally signed tag; votes (`shell/release-job.sh:740-749,557-559,576-578`)                                        | None at verify time. `merge.yaml` `check-release` (`docker-release-detect-action`) validates grammar, one file per commit and registry hosts at merge time    | Gap     | #36                  |
-| Release promotion        | `docker pull`, `docker tag`, `docker push` to `<registry>/<umbrella>/<name>:<tag>`; umbrella from `GERRIT_URL` (`shell/release-job.sh:520-571`)                                                                                                       | `crane copy` to `<registry>/<namespace>/<name>:<tag>`; keeps manifest lists; namespace from `namespace_mode`, names relative to it                            | Parity  | #30 (namespace done) |
-| Skip existing release    | Pull of the release tag first; if present, no copy, and a signature check (`shell/release-job.sh:540-556`)                                                                                                                                            | None; `crane copy` overwrites the release tag                                                                                                                 | Gap     | #30                  |
+| Release promotion        | `docker pull`, `docker tag`, `docker push` to `<registry>/<umbrella>/<name>:<tag>`; umbrella from `GERRIT_URL` (`shell/release-job.sh:520-571`)                                                                                                       | `docker-promote-action` copies by digest to `<registry>/<namespace>/<name>:<tag>`, keeping manifest lists; namespace from `namespace_mode`, names relative    | Parity  | #30 (done)           |
+| Skip existing release    | Pull of the release tag first; if present, no copy, and a signature check (`shell/release-job.sh:540-556`)                                                                                                                                            | `docker-promote-action` skips a release tag holding the staged digest; a different digest fails before any write. No signature check (#110)                   | Parity  | #30 (done)           |
 | Registry overrides       | `container_pull_registry`, `container_push_registry` accepted as given (`shell/release-job.sh:141-151`)                                                                                                                                               | Accepted, but the host must match the workflow input, to protect the credential                                                                               | Exceeds | #36                  |
 | Image signing            | cosign key pair, by digest, on promotion; signs an existing unsigned release on re-merge (`shell/release-job.sh:546-553,567-570`)                                                                                                                     | `merge.yaml` signs nothing. `build-test-release.yaml` signs keyless (OIDC) by digest                                                                          | Gap     | #110                 |
 | Git tag                  | Annotated tag at the release file's `ref`, signed through Sigul, checked with `git tag -v`, pushed on merge; an existing annotated tag passes unverified, a lightweight one fails (`shell/release-job.sh:332-476`)                                    | `merge.yaml` creates no tag. `build-test-release.yaml` starts from an existing signed tag; validation accepts a GPG signature from a key GitHub does not know | Gap     | #110                 |
@@ -179,7 +179,9 @@ Unless noted, Jenkins paths below are global-jjb paths.
    repository path, so an ONAP release file promoted from the wrong
    path. It now applies the lane's image namespace (`namespace_mode`)
    to both sides of the promotion, after any release-file registry
-   override, as the snapshot publish already did.
+   override, as the snapshot publish already did. As in Jenkins, a
+   name is always relative: one already starting with the namespace
+   gains it again, with a notice.
 4. **Release verify (#36).** Jenkins rejects a bad release file
    before it merges; the GitHub lanes find out at merge time, after
    the file is on the branch. The merge lane's `check-release` job
@@ -187,9 +189,15 @@ Unless noted, Jenkins paths below are global-jjb paths.
    validates without network access and documents a verify-lane
    usage; source existence checks belong with promotion (#30). No
    issue yet covers calling either from the verify lane.
-5. **Skip existing (#30).** A second merge of the same release file,
-   or a re-run, copies again and overwrites the release tag.
-   `docker-promote-action` (#30, in progress) adds skip-existing.
+5. **Skip existing (#30, addressed).** A second merge of the same
+   release file, or a re-run, used to copy again and overwrite the
+   release tag. The merge lane now promotes with
+   `docker-promote-action`, which skips an image whose release tag
+   already holds the staged digest. Where Jenkins keeps an existing
+   release tag whatever it holds, the action fails before writing
+   anything when the tag holds a different digest (`on_conflict:
+   fail`). Checking or adding the signature of a skipped image, as
+   Jenkins does, stays with #110.
 6. **Signing and git tag (#110).** The merge lane releases
    without an image signature or a git tag. The release lane signs
    keyless, which conflicts with the key-pair decision recorded in
