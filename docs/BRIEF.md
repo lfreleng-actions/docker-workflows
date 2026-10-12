@@ -387,12 +387,15 @@ check availability and skip-with-warning (family convention).
 - **Signing/provenance** (release lanes): cosign keyless by digest +
   `actions/attest` with `push-to-registry` — identical verification
   story to the other workflow families;
-  Registry support varies and the lane routes around it: GHCR takes
-  both cleanly, Docker Hub and Nexus 3 store cosign signatures under
-  the tag scheme but have no dependable referrers API, so their
-  provenance lives in the GitHub attestation store. Resolved by
-  testing (see question 5 below); the capability matrix lives in
-  README.md
+  Registry support varies and the lane routes around it: cosign v3
+  writes Sigstore bundles as OCI 1.1 referrers, which land under a
+  `sha256-<hex>` fallback tag on registries whose referrers API
+  answers 404 (GHCR, observed in a real publish). Provenance pushes
+  to GHCR alone, sharing that fallback tag; Docker Hub and Nexus 3
+  have no dependable referrers support, so their provenance lives
+  in the GitHub attestation store. Nexus 3 acceptance of the bundle
+  format is untested (#114; see question 5 below); the capability
+  matrix lives in README.md
 - **Egress**: keep block mode; all target registries already in
   allow_list v0.12.1; third-party base images are the un-enumerable
   case → document `build_permit_egress_traffic` as the sanctioned
@@ -455,13 +458,16 @@ Everything else: third-party pinned actions + existing estate.
 4. Timestamped tag format: adopt Jenkins `<ver>-SNAPSHOT-<ts>Z`
    exactly (consumer tooling may parse it) — confirm with release
    engineering
-5. Nexus 3 cosign/OCI-artifact compatibility (5.4) — **resolved**:
-   Nexus 3 has no referrers API (404), but accepts a cosign
-   signature pushed under the tag scheme even with
-   `strictContentTypeValidation` enabled. Provenance therefore
-   routes to the GitHub attestation store for non-GHCR registries,
-   while signing runs everywhere and only fails the release for the
-   registries a caller names in `sigstore_sign_required_registries`
+5. Nexus 3 cosign/OCI-artifact compatibility (5.4) — **partly
+   resolved; re-test open in #114**: Nexus 3 has no referrers API
+   (404), and accepted a legacy cosign signature (`sha256-<hex>.sig`)
+   even with `strictContentTypeValidation` enabled. cosign v3 now
+   writes a Sigstore bundle under a `sha256-<hex>` fallback tag
+   instead, a different artefact shape that has not been tested
+   against Nexus 3 under strict validation. Provenance routes to the
+   GitHub attestation store for non-GHCR registries, while signing
+   runs everywhere and only fails the release for the registries a
+   caller names in `sigstore_sign_required_registries`
 6. Does `policy/docker`-style CSIT image tooling need anything from
    us, or stay project-side?
 
