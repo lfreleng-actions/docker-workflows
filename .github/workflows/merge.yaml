@@ -694,7 +694,7 @@ jobs:
       - name: 'Gather version metadata'
         id: build-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/build-metadata-action@ef53139abdf48a63b097efc740202c140571b0d4  # v0.8.3
+        uses: lfreleng-actions/build-metadata-action@a42f21be0f09b3f463da8d349a6ac5d19ac67d3b  # v0.9.0
         with:
           path_prefix: ${{ inputs.path_prefix }}
           artifact_upload: 'false'
