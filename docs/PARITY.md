@@ -147,7 +147,7 @@ Unless noted, Jenkins paths below are global-jjb paths.
 | Staging push and tag set | Per pom for Maven images (`sdc-docker-base`: `${project.version}-${timestamp}`, `${project.version}-latest`); one tag per job for plain Dockerfiles; ONAP `jjb/include-docker-push.sh` pushes `SNAPSHOT-<ts>Z`, `STAGING-<ts>Z`, `X.Y-STAGING-latest` | `merge.yaml` pushes `X.Y.Z-SNAPSHOT-latest`, `X.Y-STAGING-latest`, `X.Y.Z-<ts>Z` per image on every merge                                                     | Partial | #31, #37             |
 | Staging trigger          | Maven: Gerrit comment, optional cron; plain Dockerfile: every merge plus weekly                                                                                                                                                                       | Every merge                                                                                                                                                   | Partial | Decision, section 5  |
 | Tag methods              | `latest`, `stream`, `git-describe`, `yaml-file` (`shell/docker-get-container-tag.sh:27-47`); `yaml-file` reads `container-tag.yaml` from `container-tag-yaml-dir`, else `docker-root`                                                                 | None; one tag set for every repository                                                                                                                        | Gap     | #109, #31, #37       |
-| Release verify           | `gerrit-release-verify` on a change to `releases/*.yaml`: schema check, semver check, pull of each staged image, checkout of `ref`, locally signed tag; votes (`shell/release-job.sh:740-749,557-559,576-578`)                                        | None at verify time. `merge.yaml` `check-release` (`docker-release-detect-action`) validates grammar, one file per commit and registry hosts at merge time    | Gap     | #36                  |
+| Release verify           | `gerrit-release-verify` on a change to `releases/*.yaml`: schema check, semver check, pull of each staged image, checkout of `ref`, locally signed tag; votes (`shell/release-job.sh:740-749,557-559,576-578`)                                        | `build-test.yaml`, with the release registries set: `check-release` validates the file offline; `release-verify` checks staged images and release tags        | Partial | #119                 |
 | Release promotion        | `docker pull`, `docker tag`, `docker push` to `<registry>/<umbrella>/<name>:<tag>`; umbrella from `GERRIT_URL` (`shell/release-job.sh:520-571`)                                                                                                       | `docker-promote-action` copies by digest to `<registry>/<namespace>/<name>:<tag>`, keeping manifest lists; namespace from `namespace_mode`, names relative    | Parity  | #30 (done)           |
 | Skip existing release    | Pull of the release tag first; if present, no copy, and a signature check (`shell/release-job.sh:540-556`)                                                                                                                                            | `docker-promote-action` skips a release tag holding the staged digest; a different digest fails before any write. No signature check (#110)                   | Parity  | #30 (done)           |
 | Registry overrides       | `container_pull_registry`, `container_push_registry` accepted as given (`shell/release-job.sh:141-151`)                                                                                                                                               | Accepted, but the host must match the workflow input, to protect the credential                                                                               | Exceeds | #36                  |
@@ -182,13 +182,20 @@ Unless noted, Jenkins paths below are global-jjb paths.
    override, as the snapshot publish already did. As in Jenkins, a
    name is always relative: one already starting with the namespace
    gains it again, with a notice.
-4. **Release verify (#36).** Jenkins rejects a bad release file
-   before it merges; the GitHub lanes find out at merge time, after
-   the file is on the branch. The merge lane's `check-release` job
-   now runs `docker-release-detect-action` (#36), which parses and
-   validates without network access and documents a verify-lane
-   usage; source existence checks belong with promotion (#30). No
-   issue yet covers calling either from the verify lane.
+4. **Release verify (#119, addressed in part).** Jenkins rejects a
+   bad release file before it merges. `build-test.yaml` now does
+   too, once the caller passes the registries its merge lane uses:
+   `check-release` runs `docker-release-detect-action` (#36) on the
+   change, offline, as `merge.yaml` runs it on the merge, and
+   `release-verify` runs `docker-promote-action` with `mode: verify`,
+   which writes nothing and fails on a missing staged image or a
+   release tag holding other bits. An image already released with
+   the same digest passes, where Jenkins aborts (D2, section 6.1).
+   The registry checks need the registry credential, so a fork pull
+   request gets the offline check alone, with a warning. Jenkins'
+   semver check of `container_release_tag`, its checkout of `ref`
+   and the schema check (`verify-release-schema-action`) have no
+   counterpart yet.
 5. **Skip existing (#30, addressed).** A second merge of the same
    release file, or a re-run, used to copy again and overwrite the
    release tag. The merge lane now promotes with
