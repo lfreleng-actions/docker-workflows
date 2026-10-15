@@ -17,9 +17,9 @@
 # provenance, lints/scans/SBOMs the images, attaches the SBOMs and digest
 # manifest to a draft GitHub release and promotes it.
 #
-# GHCR publishing authenticates with GITHUB_TOKEN, so the caller grants
-# packages: write below. Docker Hub publishing additionally needs the
-# DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD secrets forwarded.
+# GHCR authenticates with GITHUB_TOKEN (packages: write below). Docker
+# Hub needs DOCKERHUB_USERNAME/DOCKERHUB_PASSWORD forwarded; a Nexus 3
+# registry input needs OP_SERVICE_ACCOUNT_TOKEN/VAULT_MAPPING_JSON.
 # =============================================================================
 name: 'Build/Test/Release'
 
@@ -60,13 +60,18 @@ jobs:
     #   dockerhub_publish: false      # docker.io/<namespace>/<name>
     #   namespace_mode: 'none'        # dockerhub_publish needs auto/manual
     #   namespace: ''                 # manual only: Docker Hub org/user
+    #   registry: ''                  # e.g. nexus3.onap.org:10002 (Nexus 3)
+    #   registry_user: ''             # empty: the repository's name
     #   push_latest: false            # additionally push the latest tag
     #   test_command: ''              # smoke-test hook (IMAGES env = tags)
     #   attestations: true            # SLSA build provenance per image
     #   sigstore_sign: true           # cosign keyless signing per image
     #   sigstore_sign_required_registries: 'ghcr.io docker.io'  # hard-fail
     #   build_permit_egress_traffic: false  # audit egress for build job
-    # Forward the Docker Hub secrets when dockerhub_publish is true:
+    # Forward the Docker Hub secrets when dockerhub_publish is true,
+    # and the 1Password secrets when registry is set:
     # secrets:
     #   DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     #   DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+    #   OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+    #   VAULT_MAPPING_JSON: ${{ secrets.VAULT_MAPPING_JSON }}
