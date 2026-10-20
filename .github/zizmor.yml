@@ -47,8 +47,9 @@ rules:
       # suppression would travel with them, masking a genuine finding in
       # their repository once they replace the placeholder.
       - gerrit.yaml:61
-      - gerrit.yaml:133
+      - gerrit.yaml:132
       - gerrit.yaml:142
-      - github.yaml:43
+      - github.yaml:42
       - github.yaml:52
       - github.yaml:54
+      - github.yaml:63
