@@ -366,6 +366,66 @@ image mode, which writes one CycloneDX 1.7 JSON document per archive,
 `sbom-cyclonedx-<archive-name>.json`, and fails if there is no archive
 to scan. The Grype job scans every one of them.
 
+## Build Artifacts
+
+A common Java pattern packages a jar or war first and then copies it
+into an image with `COPY target/*.jar ...`; Python projects can do the
+same with wheels. The `build_artifacts` input, available in all three
+lanes, hands that output to the image build: the build job downloads
+each listed artefact and places its contents in the checkout before
+any image builds, so a Dockerfile `COPY` and a `build_command` both
+see the files.
+
+The input is a JSON array of objects, each with a `name` and an
+optional `path`. `name` is the artefact's name, limited to letters,
+digits, `.`, `_` and `-`. `path` defaults to `.` and is relative to
+`path_prefix`: an entry's contents land at `<path_prefix>/<path>`.
+An empty string (the default) or `[]` changes nothing: none of the
+download steps runs.
+
+```yaml
+    with:
+      build_artifacts: >-
+        [{"name": "app-jars"}, {"name": "wheels", "path": "py"}]
+```
+
+The artefacts must come from earlier jobs of the **same workflow
+run**. The download passes no `run-id` and no `github-token`, and no
+job gains a permission, so an artefact from another run or repository
+cannot reach the build. The job calling the lane must `needs:` the job
+that uploads the artefact; without it the upload may not have happened
+yet, and the build fails saying so.
+
+The build job checks everything before it builds and fails with an
+`::error::` naming the offending entry when:
+
+- the input is not a JSON array of objects, or an entry lacks a
+  non-empty string `name`;
+- a `name` holds a character outside `[A-Za-z0-9._-]`;
+- a `path` is absolute, contains a `..` segment, or otherwise
+  resolves outside `path_prefix` (through a symlink, say);
+- a named artefact does not exist in this run;
+- a downloaded file would overwrite a file the checkout holds, or
+  two entries would place the same file.
+
+Artefacts add to the source tree and never replace it, so no artefact
+can swap a Dockerfile or script for its own. The job copies nothing
+unless every file passes. The build job alone downloads them:
+discovery, Dockerfile lint, the tests, SBOM and scan jobs read the
+source, where Dockerfiles live, or the built images.
+
+`java-workflows` (v0.7.0 or later) uploads its packaged output with
+`upload_build_artifacts: true`, and reports the artefact as the
+`build_artifact_name`, `build_artifact_shape` and
+`build_artifact_count` outputs. Its `reactor` shape keeps each
+packaged file at its module-relative path below `path_prefix`
+(`app/target/app-1.0.jar`), so the default `path` of `.` puts every
+jar where its module's Dockerfile expects it, when both lanes share a
+`path_prefix`. The `m2repo` shape, a Maven repository tree a deploy
+phase wrote, does not map onto module paths; guard the Docker job on
+`build_artifact_shape == 'reactor'`. `examples/build-artifacts/` shows
+the whole caller.
+
 ## Image Namespace
 
 `namespace_mode` decides the namespace every lane prefixes to image
@@ -434,6 +494,7 @@ same path.
 | `repository`                  | string  | `''`       | Repository to check out (owner/name); empty uses the caller          |
 | `ref`                         | string  | `''`       | Branch/tag/SHA to check out (empty = default branch)                 |
 | `path_prefix`                 | string  | `'.'`      | Path to the project root directory                                   |
+| `build_artifacts`             | string  | `''`       | JSON list of same-run artefacts to place first; see Build Artifacts  |
 | `images`                      | string  | `''`       | JSON image list (see Image Discovery); empty string auto-discovers   |
 | `namespace_mode`              | string  | `'none'`   | `none`, `auto` or `manual`; see Image Namespace                      |
 | `namespace`                   | string  | `''`       | Namespace for `manual` (e.g. `onap` -> `onap/<name>`)                |
@@ -527,9 +588,10 @@ output reports whether the lane detected a release file that passed.
 ### build-test-release.yaml
 
 Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
-`images`, `build_timeout_minutes`, hardening and `gerrit_*` inputs,
-`test_command`/`test_permit_fail`, `lint_enabled`/`lint_permit_fail`
-(and its deprecated `audit_permit_fail` alias), `sbom_enabled`,
+`build_artifacts`, `images`, `build_timeout_minutes`, hardening and
+`gerrit_*` inputs, `test_command`/`test_permit_fail`,
+`lint_enabled`/`lint_permit_fail` (and its deprecated
+`audit_permit_fail` alias), `sbom_enabled`,
 `grype_enabled`/`grype_fail_on`/`grype_permit_fail`/`grype_cache_db`):
 
 <!-- markdownlint-disable MD013 -->
@@ -599,9 +661,9 @@ the job starts logs a warning; the attestation succeeds either way.
 ### merge.yaml
 
 Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
-`images`, `namespace_mode`, `namespace`, `build_command`,
-`build_command_images`, `build_timeout_minutes`, hardening and
-`gerrit_*` inputs, `test_command`/`test_permit_fail`,
+`build_artifacts`, `images`, `namespace_mode`, `namespace`,
+`build_command`, `build_command_images`, `build_timeout_minutes`,
+hardening and `gerrit_*` inputs, `test_command`/`test_permit_fail`,
 `lint_enabled`/`lint_permit_fail` (and its deprecated
 `audit_permit_fail` alias), `sbom_enabled`,
 `grype_enabled`/`grype_fail_on`/`grype_permit_fail`/`grype_cache_db`):
@@ -773,6 +835,15 @@ a follow-on job requires the lane to report that file detected.
 checks: valid and malformed release files against
 `docker-release-detect-action`, and `docker-promote-action` in verify
 mode against a fake `crane`, each at the commit the lane pins.
+
+`build_artifacts` runs end to end too: one job uploads
+`target/hello.txt`, and a `build-test.yaml` call that `needs:` it
+builds `tests/fixtures/build-artifacts/`, whose Dockerfile copies
+that file, then reads it back out of the image in `test_command`.
+`tests/test_build_artifacts.sh` checks the three lanes define the
+input and its steps alike, and runs the validation and placement
+step scripts from each lane against every failure case and the no-op
+inputs.
 
 Both publish lanes are also self-tested, under `dry_run`. Neither
 publishes: they build, audit and test the fixture images, then

@@ -210,6 +210,62 @@ jobs:
       # yamllint disable-line rule:line-length
       grype_cache_db: ${{ matrix.grype_cache_db || 'restore-only' }}
 
+  # build_artifacts end to end. An earlier job uploads target/hello.txt
+  # and the verify lane places it in this repository's fixture before
+  # the build; the fixture Dockerfile copies a file the repository does
+  # not hold, so the image only builds once placement worked, and
+  # test_command reads the file back out of the image. Lint, SBOM and
+  # Grype are off: the build-test legs cover them.
+  build-artifacts-upload:
+    name: 'Build artefact upload'
+    permissions: {}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: '@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Create the build artefact'
+        shell: bash
+        run: |
+          mkdir -p build-artifacts/target
+          echo 'hello from build_artifacts' \
+            > build-artifacts/target/hello.txt
+      - name: 'Upload the build artefact'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: 'build-artifacts-hello'
+          path: 'build-artifacts'
+          retention-days: 1
+          if-no-files-found: 'error'
+
+  build-artifacts:
+    name: 'Build/Test (build artefacts)'
+    needs: 'build-artifacts-upload'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      path_prefix: 'tests/fixtures/build-artifacts'
+      images: '[{"name": "build-artifacts-hello", "context": "."}]'
+      build_artifacts: '[{"name": "build-artifacts-hello"}]'
+      test_command: >-
+        test "$(docker run --rm build-artifacts-hello:verify
+        cat /hello.txt)" = 'hello from build_artifacts'
+      lint_enabled: false
+      sbom_enabled: false
+      grype_enabled: false
+
   # The merge lane, end to end, without publishing anything.
   #
   # dry_run skips credential loading and registry login entirely, so
@@ -639,6 +695,37 @@ jobs:
           persist-credentials: false
       - name: 'Test namespace_mode resolution'
         run: tests/test_namespace_mode.sh
+
+  # build_artifacts in every lane: the input and its three build-job
+  # steps compared across the lanes, then the validate and place step
+  # scripts, extracted from each workflow, run against valid input,
+  # every malformed entry, missing artefacts and artefacts that would
+  # overwrite the checkout.
+  build-artifacts-checks:
+    name: 'Build artefact checks'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: '@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Test build_artifacts validation and placement'
+        run: bash tests/test_build_artifacts.sh
 
   # signature_format in the release lane: the installed cosign release
   # pin, the up-front validation step, and the sign step's arguments
