@@ -231,8 +231,8 @@ on:
           Shell command run from path_prefix after the built images
           load into the Docker daemon (a smoke/integration hook, e.g.
           'make test'). The IMAGES environment variable carries a JSON
-          array of the built image tags. Empty skips the test step
-          with a notice.
+          array of the built image tags. Empty runs no command: the
+          tests job passes with a notice.
         required: false
         type: string
         default: ''

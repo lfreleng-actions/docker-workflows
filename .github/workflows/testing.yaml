@@ -819,3 +819,35 @@ jobs:
           persist-credentials: false
       - name: 'Test release-file checks'
         run: tests/test_verify_release.sh
+
+  # The impostor-commit ignores in .github/zizmor.yml against the
+  # examples' all-zero placeholder 'uses:' lines. The zizmor hook runs
+  # offline, where impostor-commit never runs, so a shifted placeholder
+  # line would otherwise go unnoticed. Every placeholder needs an
+  # entry, every entry a placeholder, and no entry may land on a real
+  # 'uses:' line in an example sharing its base name.
+  zizmor-ignores:
+    name: 'Zizmor placeholder ignores'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: '@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Check zizmor placeholder ignores'
+        run: bash tests/test_zizmor_ignores.sh
