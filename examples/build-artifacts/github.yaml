@@ -1,0 +1,69 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: Build container images from a Java lane's build artefacts
+# =============================================================================
+# Copy this file into your project's .github/workflows/ directory and adjust
+# the `uses:` refs and the optional `with:` overrides to suit your project.
+#
+# The artifact-first pattern: Maven packages the jars, then the Dockerfiles
+# COPY them (`COPY target/*.jar ...`). java-workflows uploads the reactor's
+# packaged files at their module-relative paths below path_prefix
+# (app/target/app-1.0.jar), so downloading that artefact into this lane's
+# path_prefix, the default `path` of '.', puts every jar where its module's
+# Dockerfile expects it.
+#
+# build_artifacts only reaches artefacts uploaded earlier in the SAME
+# workflow run, so the Docker job must `needs:` the job that uploads them.
+# The same input works with merge.yaml and build-test-release.yaml.
+# =============================================================================
+name: 'Build/Test'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  maven-build-test:
+    name: 'Maven Build/Test'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/java-workflows/.github/workflows/maven-build-test.yaml@7bb1071df52ffc3fb4c2280511fe257041e259d8  # v0.7.0
+    with:
+      # Keep the packaged jars as a workflow artefact for the Docker job
+      upload_build_artifacts: true
+
+  docker-build-test:
+    name: 'Docker Build/Test'
+    needs: 'maven-build-test'
+    # A build with a deploy phase uploads the m2repo layout instead, which
+    # build_artifacts does not unpack into module paths
+    if: needs.maven-build-test.outputs.build_artifact_shape == 'reactor'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    # REPLACE the pinned SHA below with a docker-workflows release SHA.
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/docker-workflows/.github/workflows/build-test.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    with:
+      # Each entry takes the artefact name and an optional path, relative
+      # to path_prefix (default '.'). A file the checkout already holds
+      # fails the build: artefacts add to the source tree, never replace it.
+      # yamllint disable-line rule:line-length
+      build_artifacts: '[{"name": "${{ needs.maven-build-test.outputs.build_artifact_name }}"}]'
