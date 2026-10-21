@@ -13,15 +13,20 @@
 #   pinned commit, and no workflow retags 'latest' with crane itself;
 # - the release lane's image 'latest' step, docker-promote-action in
 #   mode latest fetched at its pinned commit and run under dry_run,
-#   accepts the build job's pushed output as it stands;
+#   accepts the build job's pushed output once the 'latest-images'
+#   step has collapsed it to one entry per repository, overlapping
+#   registries included;
 # - the release lane's 'latest-release' step, which decides whether
 #   the release becomes the repository's Latest GitHub release, run
 #   against a stub gh serving a release list;
 # - the release lane's 'latest-recheck' step, which hands Latest to a
-#   higher release a concurrent run published after the decision, or
-#   that an earlier attempt of a re-run left behind, run against a
+#   higher release published outside the promote-release job's queue,
+#   or that an earlier attempt of a re-run left behind, run against a
 #   stub gh whose release list changes between reads and which keeps
-#   the repository's Latest release.
+#   the repository's Latest release;
+# - the promote-release and release-publish jobs' shared concurrency
+#   group, which serialises promotion per target repository and
+#   queues waiting releases.
 # docker-promote-action's own suite covers the image-side comparison.
 #
 # Usage: tests/test_latest_policy.sh
@@ -129,7 +134,7 @@ release_input mode latest
 # shellcheck disable=SC2016
 release_input release_tag '${{ needs.build.outputs.version }}'
 # shellcheck disable=SC2016
-release_input images_json '${{ needs.build.outputs.pushed }}'
+release_input images_json '${{ steps.latest-images.outputs.images }}'
 # shellcheck disable=SC2016
 release_input latest_policy '${{ inputs.latest_policy }}'
 # shellcheck disable=SC2016
@@ -144,6 +149,70 @@ if grep -nE 'crane[[:space:]]+tag[^#]*latest' "${workflows}"/*.yaml; then
 else
   echo "ok: no workflow retags 'latest' with crane directly"
 fi
+
+# --- Collapsing duplicate image destinations ------------------------------
+
+step_field build-test-release.yaml promote-release latest-images run \
+  > "${work}/collapse.sh"
+if [ ! -s "${work}/collapse.sh" ]; then
+  echo "FAIL: no 'latest-images' step in the promote-release job"
+  exit 1
+fi
+
+digest="sha256:$(printf 'a%.0s' $(seq 64))"
+other="sha256:$(printf 'b%.0s' $(seq 64))"
+# entry IMAGE [DIGEST]: one entry of the build job's pushed output
+entry() {
+  printf '{"name":"api","image":"%s","digest":"%s"}' "$1" \
+    "${2:-${digest}}"
+}
+# pushed IMAGE...: the build job's pushed output naming each IMAGE
+pushed() {
+  local image separator=''
+  printf '['
+  for image in "$@"; do
+    printf '%s%s' "${separator}" "$(entry "${image}")"
+    separator=','
+  done
+  printf ']'
+}
+
+# collapse_case DESCRIPTION EXPECTED PUSHED: EXPECTED is the images
+# kept, space-separated in order, or 'error'
+collapse_case() {
+  local status=0 actual
+  : > "${work}/output"
+  env -i PATH="${PATH}" HOME="${work}" GITHUB_OUTPUT="${work}/output" \
+    PUSHED="$3" bash --noprofile --norc -eo pipefail "${work}/collapse.sh" \
+    > "${work}/log" 2>&1 || status=$?
+  actual=$(sed -n 's/^images=//p' "${work}/output" |
+    jq -r '[.[].image] | join(" ")' 2>/dev/null || true)
+  if { [ "$2" = 'error' ] && [ "${status}" -ne 0 ] &&
+    grep -q '^::error::' "${work}/log"; } ||
+    { [ "$2" != 'error' ] && [ "${status}" -eq 0 ] &&
+      [ "${actual}" = "$2" ]; }; then
+    echo "ok: latest images: $1"
+  else
+    echo "FAIL: latest images: $1: expected '$2', got '${actual}'" \
+      "(exit ${status})"
+    sed 's/^/  | /' "${work}/log"
+    failures=$((failures + 1))
+  fi
+}
+
+collapse_case 'distinct registries are all kept, in order' \
+  'ghcr.io/org/api docker.io/org/api' \
+  "$(pushed ghcr.io/org/api docker.io/org/api)"
+collapse_case 'ghcr_publish and a ghcr.io registry name one repository' \
+  'ghcr.io/org/api' "$(pushed ghcr.io/org/api ghcr.io/org/api)"
+collapse_case 'a host differing only in case is the same repository' \
+  'ghcr.io/org/api' "$(pushed ghcr.io/org/api GHCR.io/org/api)"
+collapse_case "Docker Hub's index.docker.io is docker.io" \
+  'docker.io/org/api' "$(pushed docker.io/org/api index.docker.io/org/api)"
+collapse_case "Docker Hub's library/ form is the short form" \
+  'docker.io/api' "$(pushed docker.io/api docker.io/library/api)"
+collapse_case 'one repository with two digests fails' error \
+  "[$(entry ghcr.io/org/api),$(entry ghcr.io/org/api "${other}")]"
 
 # --- docker-promote-action, mode latest ------------------------------------
 
@@ -162,24 +231,42 @@ if [ "${head}" != "${pin}" ]; then
   exit 1
 fi
 
-# The build job's pushed output, {name, image, digest} per image
-digest="sha256:$(printf 'a%.0s' $(seq 64))"
-pushed="[{\"name\":\"api\",\"image\":\"ghcr.io/org/api\",\"digest\":\"${digest}\"}"
-pushed+=",{\"name\":\"api\",\"image\":\"docker.io/org/api\",\"digest\":\"${digest}\"}]"
-status=0
-env -i PATH="${PATH}" HOME="${work}" \
-  GITHUB_OUTPUT="${work}/output" GITHUB_STEP_SUMMARY="${work}/summary" \
-  INPUT_MODE=latest INPUT_RELEASE_TAG=1.2.3 INPUT_IMAGES_JSON="${pushed}" \
-  INPUT_LATEST_POLICY=highest INPUT_DRY_RUN=true INPUT_INSTALL_CRANE=false \
-  python3 -I "${action}/entrypoint.py" > "${work}/log" 2>&1 || status=$?
-if [ "${status}" -eq 0 ] && ! grep -q '^::error::' "${work}/log"; then
-  echo "ok: build-test-release: mode latest accepts the pushed output"
-else
-  echo "FAIL: build-test-release: mode latest rejects the pushed output" \
-    "(exit ${status})"
-  sed 's/^/  | /' "${work}/log"
-  failures=$((failures + 1))
-fi
+# latest_case DESCRIPTION EXPECTED IMAGES: runs the action in mode
+# latest under dry_run; EXPECTED is 'ok' or 'error'
+latest_case() {
+  local status=0
+  env -i PATH="${PATH}" HOME="${work}" \
+    GITHUB_OUTPUT="${work}/output" GITHUB_STEP_SUMMARY="${work}/summary" \
+    INPUT_MODE=latest INPUT_RELEASE_TAG=1.2.3 INPUT_IMAGES_JSON="$3" \
+    INPUT_LATEST_POLICY=highest INPUT_DRY_RUN=true INPUT_INSTALL_CRANE=false \
+    python3 -I "${action}/entrypoint.py" > "${work}/log" 2>&1 || status=$?
+  if { [ "$2" = 'ok' ] && [ "${status}" -eq 0 ] &&
+    ! grep -q '^::error::' "${work}/log"; } ||
+    { [ "$2" = 'error' ] && [ "${status}" -ne 0 ]; }; then
+    echo "ok: build-test-release: mode latest: $1"
+  else
+    echo "FAIL: build-test-release: mode latest: $1 (exit ${status})"
+    sed 's/^/  | /' "${work}/log"
+    failures=$((failures + 1))
+  fi
+}
+
+# collapsed PUSHED: PUSHED as the latest-images step hands it on
+collapsed() {
+  : > "${work}/output"
+  env -i PATH="${PATH}" HOME="${work}" GITHUB_OUTPUT="${work}/output" \
+    PUSHED="$1" bash --noprofile --norc -eo pipefail "${work}/collapse.sh" \
+    > /dev/null 2>&1
+  sed -n 's/^images=//p' "${work}/output"
+}
+
+latest_case 'accepts the pushed output of distinct registries' ok \
+  "$(collapsed "$(pushed ghcr.io/org/api docker.io/org/api)")"
+latest_case 'accepts the collapsed output of overlapping registries' ok \
+  "$(collapsed "$(pushed ghcr.io/org/api ghcr.io/org/api)")"
+# Why the step exists: the action refuses the overlap as it stands
+latest_case 'refuses overlapping registries left uncollapsed' error \
+  "$(pushed ghcr.io/org/api ghcr.io/org/api)"
 
 # --- The Latest GitHub release ----------------------------------------------
 
@@ -464,6 +551,154 @@ check 'Latest recheck: no published SemVer release keeps the Latest' \
   "$(cat "${work}/latest")" nightly
 GH_FAIL=true recheck_case 'an unreadable release list fails' \
   error '' v2.0.0 v2.0.0
+
+# --- Marking a published release Latest under 'always' ------------------
+
+step_field build-test-release.yaml promote-release latest-always run \
+  > "${work}/always.sh"
+if [ ! -s "${work}/always.sh" ]; then
+  echo "FAIL: no 'latest-always' step in the promote-release job"
+  exit 1
+fi
+: > "${work}/edits"
+echo v2.0.0 > "${work}/latest"
+status=0
+env -i PATH="${work}/bin:${PATH}" HOME="${work}" GH_TOKEN=token \
+  TAG=v1.2.5 EDITS="${work}/edits" LATEST="${work}/latest" \
+  bash --noprofile --norc -eo pipefail "${work}/always.sh" \
+  > "${work}/log" 2>&1 || status=$?
+if [ "${status}" -eq 0 ] && [ "$(cat "${work}/edits")" = v1.2.5 ] &&
+  [ "$(cat "${work}/latest")" = v1.2.5 ]; then
+  echo "ok: Latest always: a re-run marks the published release Latest"
+else
+  echo "FAIL: Latest always: a re-run did not mark v1.2.5 Latest" \
+    "(exit ${status}, edits '$(cat "${work}/edits")')"
+  sed 's/^/  | /' "${work}/log"
+  failures=$((failures + 1))
+fi
+
+# --- Which steps act on the Latest decision -------------------------------
+
+# Each 'if:' of the steps that write the Latest release, evaluated as
+# GitHub would over every input and step output they read. Every
+# non-dry run whose decision is 'true' must leave something marking
+# or confirming Latest, a fresh release and a re-run alike, and a
+# dry run must write nothing.
+status=0
+IF_PROMOTE=$(step_field build-test-release.yaml promote-release \
+  promote-release if) \
+IF_NOT_LATEST=$(step_field build-test-release.yaml promote-release \
+  promote-release-not-latest if) \
+IF_ALWAYS=$(step_field build-test-release.yaml promote-release \
+  latest-always if) \
+IF_RECHECK=$(step_field build-test-release.yaml promote-release \
+  latest-recheck if) \
+  python3 - > "${work}/log" 2>&1 <<'EOF' || status=$?
+import itertools
+import os
+import re
+import sys
+
+TOKEN = re.compile(
+    r"\s+|\(|\)|&&|\|\||==|!=|!|'[^']*'"
+    r"|inputs\.[A-Za-z0-9_]+|steps\.[A-Za-z0-9_-]+\.outputs\.[A-Za-z0-9_]+"
+)
+
+
+def compile_if(source):
+    body = re.fullmatch(r"\$\{\{(.*)\}\}", source.strip(), re.S)
+    if not body:
+        sys.exit(f"FAIL: not a ${{{{ }}}} expression: {source}")
+    body, out, pos = body.group(1), [], 0
+    while pos < len(body):
+        match = TOKEN.match(body, pos)
+        if not match:
+            sys.exit(f"FAIL: unsupported syntax at: {body[pos:pos + 40]!r}")
+        token = match.group(0)
+        pos = match.end()
+        if token.isspace():
+            continue
+        out.append({"&&": " and ", "||": " or ", "!": " not "}.get(
+            token,
+            f"v[{token!r}]" if token[0] in "is" else token,
+        ))
+    return compile("".join(out).strip(), source, "eval")
+
+
+steps = {
+    name: compile_if(os.environ[f"IF_{name}"])
+    for name in ("PROMOTE", "NOT_LATEST", "ALWAYS", "RECHECK")
+}
+failures = 0
+for dry, policy, promoted, latest in itertools.product(
+    (False, True), ("highest", "always"), ("true", "false", ""),
+    ("true", "false"),
+):
+    if policy == "always" and latest == "false":
+        continue  # 'always' always decides 'true'
+    if not dry and promoted == "":
+        continue  # check-promoted always runs outside a dry run
+    v = {
+        "inputs.dry_run": dry,
+        "inputs.latest_policy": policy,
+        "steps.check-promoted.outputs.already_promoted": promoted,
+        "steps.latest-release.outputs.latest": latest,
+    }
+    runs = {name for name, code in steps.items() if eval(code)}
+    case = (f"dry_run={dry} policy={policy} "
+            f"already_promoted={promoted!r} latest={latest}")
+    if dry:
+        problem = runs and f"a dry run writes: {sorted(runs)}"
+    elif latest == "true":
+        problem = not runs & {"PROMOTE", "ALWAYS", "RECHECK"} and (
+            "nothing marks or confirms Latest")
+    else:
+        problem = runs & {"PROMOTE", "ALWAYS"} and (
+            f"a 'false' decision marks Latest: {sorted(runs)}")
+    publishes = runs & {"PROMOTE", "NOT_LATEST"}
+    if not dry and promoted == "false" and len(publishes) != 1:
+        problem = f"a draft publishes {len(publishes)} times"
+    if not dry and promoted == "true" and publishes:
+        problem = "a published release publishes again"
+    if problem:
+        failures += 1
+        print(f"FAIL: Latest gates: {case}: {problem}")
+    else:
+        print(f"ok: Latest gates: {case}: {sorted(runs)}")
+sys.exit(1 if failures else 0)
+EOF
+if [ "${status}" -eq 0 ]; then
+  grep -c '^ok:' "${work}/log" | xargs -I{} \
+    echo "ok: Latest gates: {} input combinations act on the decision"
+else
+  echo "FAIL: Latest gates (exit ${status})"
+  sed 's/^/  | /' "${work}/log"
+  failures=$((failures + 1))
+fi
+
+# --- Serialising promotion ------------------------------------------------
+
+# job_field FILE JOB FIELD: one field of a job
+job_field() {
+  yq -r ".jobs.\"$2\".$3" "${workflows}/$1"
+}
+
+# One promotion at a time per target repository, in one group both
+# lanes share; a dry run, which writes nothing, queues only behind its
+# own run
+for lane in 'build-test-release.yaml promote-release' \
+  'merge.yaml release-publish'; do
+  read -r file job <<< "${lane}"
+  # shellcheck disable=SC2016
+  check "${file}: ${job} serialised per target repository" \
+    "$(job_field "${file}" "${job}" concurrency.group)" \
+    "\${{ inputs.dry_run && format('docker-release-promote-dry-run-{0}-{1}', github.run_id, github.run_attempt) || format('docker-release-promote-{0}', inputs.repository || github.repository) }}"
+  check "${file}: ${job} queues waiting releases rather than cancel" \
+    "$(job_field "${file}" "${job}" concurrency.queue)" max
+  check "${file}: ${job} never cancels a running promotion" \
+    "$(job_field "${file}" "${job}" 'concurrency."cancel-in-progress"')" \
+    false
+done
 
 if [ "${failures}" -gt 0 ]; then
   echo "${failures} failure(s)"

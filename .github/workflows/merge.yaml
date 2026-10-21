@@ -1849,6 +1849,20 @@ jobs:
     if: ${{ !cancelled() && needs.check-release.outputs.has_release == 'true' }}
     permissions:
       contents: read
+    # docker-promote-action lists each image's release tags, then
+    # moves 'latest' on what it read, so two promotions at once (a
+    # 1.2.5 release file merging on one branch while 2.0.0 merges on
+    # another) could move it back. Promotion therefore runs one at a
+    # time per target repository, across branches, in the group the
+    # release lane's promote-release job also uses. queue: max keeps
+    # every waiting promotion, up to 100, where GitHub's default
+    # would cancel all but the newest pending one. A dry run writes
+    # nothing and waits only on its own run.
+    concurrency:
+      # yamllint disable-line rule:line-length
+      group: ${{ inputs.dry_run && format('docker-release-promote-dry-run-{0}-{1}', github.run_id, github.run_attempt) || format('docker-release-promote-{0}', inputs.repository || github.repository) }}
+      cancel-in-progress: false
+      queue: max
     timeout-minutes: 15
     steps:
       - name: 'Load egress allow-list'

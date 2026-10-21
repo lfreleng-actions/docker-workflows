@@ -2349,6 +2349,21 @@ jobs:
     permissions:
       contents: write  # IMPORTANT: needed for draft release promotion
       packages: write  # Apply the latest tag to GHCR images
+    # Runs for different tags each read the published releases and
+    # each image's tags, then move Latest and 'latest' on what they
+    # read, so two at once could act on a stale read. Promotion
+    # therefore runs one release at a time per target repository:
+    # decision, publication, recheck and image 'latest' together.
+    # The merge lane's release-publish job shares the group, so the
+    # two lanes never move one repository's 'latest' at once.
+    # queue: max keeps every waiting release, up to 100, where
+    # GitHub's default would cancel all but the newest pending one.
+    # A dry run writes nothing and waits only on its own run.
+    concurrency:
+      # yamllint disable-line rule:line-length
+      group: ${{ inputs.dry_run && format('docker-release-promote-dry-run-{0}-{1}', github.run_id, github.run_attempt) || format('docker-release-promote-{0}', inputs.repository || github.repository) }}
+      cancel-in-progress: false
+      queue: max
     timeout-minutes: 5
     outputs:
       # yamllint disable-line rule:line-length
@@ -2389,6 +2404,57 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+
+      # Registries can overlap: with ghcr_publish and a registry of
+      # ghcr.io/<owner>, the build pushes each image to one repository
+      # twice and lists it twice in 'pushed'. docker-promote-action
+      # refuses a repository named twice, as each has one 'latest', so
+      # collapse 'pushed' to one entry per repository, compared as the
+      # action compares them (case-insensitive host, Docker Hub's
+      # docker.io, index.docker.io and library/ forms alike). One
+      # repository holding two digests is a real conflict, so it fails
+      # here, before the GitHub release publishes, not after.
+      - name: 'Collapse duplicate image destinations'
+        id: 'latest-images'
+        # yamllint disable-line rule:line-length
+        if: ${{ inputs.push_latest && needs.build.outputs.pushed_count != '0' }}
+        shell: bash
+        env:
+          PUSHED: ${{ needs.build.outputs.pushed }}
+        run: |
+          # One entry per image repository for the latest-tags step
+          # shellcheck disable=SC2016  # jq variables, not the shell's
+          canonical='
+            def canonical:
+              (.image | split("/")) as $part
+              | ($part[0] | ascii_downcase) as $host
+              | ($part[1:] | join("/")) as $path
+              | if $host == "docker.io" or $host == "index.docker.io"
+                then "docker.io/"
+                  + (if ($path | contains("/")) then $path
+                     else "library/" + $path end)
+                else $host + "/" + $path end;
+            map(. + {repository: canonical})'
+          conflicts=$(jq -r "${canonical}"'
+            | group_by(.repository)[]
+            | select((map(.digest) | unique | length) > 1)
+            | .[0].repository' <<< "${PUSHED}")
+          if [ -n "${conflicts}" ]; then
+            while IFS= read -r repository; do
+              echo "::error::${repository} was pushed with more than" \
+                "one digest, so its 'latest' has no single target"
+            done <<< "${conflicts}"
+            exit 1
+          fi
+          images=$(jq -c "${canonical}"'
+            | reduce .[] as $image ({seen: {}, images: []};
+                if .seen[$image.repository] then .
+                else .seen[$image.repository] = true
+                  | .images += [$image | del(.repository)] end)
+            | .images' <<< "${PUSHED}")
+          echo "Images for 'latest': $(jq length <<< "${images}")" \
+            "of $(jq length <<< "${PUSHED}") pushed"
+          echo "images=${images}" >> "$GITHUB_OUTPUT"
 
       - name: 'Check if release is already promoted'
         id: 'check-promoted'
@@ -2557,23 +2623,38 @@ jobs:
           echo "Promoted: ${RELEASE_URL} (not marked Latest) ✅"
           echo "release_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
 
-      # A run for another tag can publish a higher release between
-      # this run's decision and its publication; both decided against
-      # the same list, so this run's stale 'true' would take Latest
-      # back. Re-reading after the write closes that: if the
-      # repository's Latest release is below the highest published
-      # one, hand Latest to the highest and read again, so every
-      # write that marks a release Latest, in any run, is followed by
-      # a read in the same run. Whichever write lands last, its run's
-      # next read sees every release published before it and either
-      # confirms it or moves Latest on; a release published after
-      # that read marks itself Latest in its own run. Concurrent runs
-      # therefore converge on the highest release without serialising
-      # them: a concurrency group keeps one pending run and cancels
-      # the others, dropping releases. The check starts from the
-      # repository's actual Latest release, not this run's tag, so a
-      # re-run of an already promoted release repairs a Latest that an
-      # earlier attempt left behind when it failed after publishing.
+      # latest_policy 'always' points Latest at this release whatever
+      # its version, and image 'latest' below follows it. Publishing a
+      # draft does that with --latest; a re-run of a release already
+      # published publishes nothing, and the recheck runs only under
+      # 'highest', so mark it Latest here, or the GitHub release and
+      # the images would disagree.
+      - name: 'Mark the published release Latest (always)'
+        id: 'latest-always'
+        # yamllint disable-line rule:line-length
+        if: ${{ !inputs.dry_run && inputs.latest_policy == 'always' && steps.check-promoted.outputs.already_promoted == 'true' && steps.latest-release.outputs.latest == 'true' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.tag-validate.outputs.tag }}
+        run: |
+          # Point the repository's Latest release at this release
+          gh release edit "$TAG" --latest
+          echo "Marked ${TAG} the Latest release (latest_policy: always)"
+
+      # The job's concurrency group serialises this lane's runs for
+      # the target repository, so no run of it publishes between this
+      # run's decision and its write. A release can still publish
+      # outside that queue: by hand, or from a caller in another
+      # repository that releases here through 'repository', since
+      # concurrency groups are per repository. Re-reading after the
+      # write catches that: if the repository's Latest release is
+      # below the highest published one, hand Latest to the highest
+      # and read again, so every write is followed by a read. The
+      # check starts from the repository's actual Latest release, not
+      # this run's tag, so a re-run of an already promoted release
+      # repairs a Latest that an earlier attempt left behind when it
+      # failed after publishing.
       - name: 'Recheck the Latest GitHub release'
         id: 'latest-recheck'
         # yamllint disable-line rule:line-length
@@ -2762,6 +2843,6 @@ jobs:
         with:
           mode: 'latest'
           release_tag: ${{ needs.build.outputs.version }}
-          images_json: ${{ needs.build.outputs.pushed }}
+          images_json: ${{ steps.latest-images.outputs.images }}
           latest_policy: ${{ inputs.latest_policy }}
           install_crane: 'false'

@@ -780,7 +780,9 @@ writes anything, then copies by digest with `crane copy`:
 - `latest` (`push_latest`) moves once every image has released, and
   not before, as `latest_policy` allows: by default, never for an
   image whose repository holds a higher release (see
-  [Moving `latest`](#moving-latest)).
+  [Moving `latest`](#moving-latest)). Promotion runs one release at a
+  time per repository, across branches and alongside the release
+  lane, so two release files merging at once cannot move it back.
 
 The step summary lists each image with its source, destination,
 digest and status. The action logs in to each registry's
@@ -812,23 +814,32 @@ rule to the repository's Latest GitHub release, whatever
   release equal to the highest does, so re-running the highest
   release converges. A first release always moves it.
 - `always` moves `latest` for any release, older ones included, with
-  a warning. Reserve it for pointing `latest` back on purpose.
+  a warning. Reserve it for pointing `latest` back on purpose. In the
+  release lane, a re-run of a release already published marks it the
+  Latest GitHub release too, so the release and the images agree.
 
 Any other value fails the `gerrit-validate` job before anything
 writes. Images move through
 [docker-promote-action](https://github.com/lfreleng-actions/docker-promote-action),
 which reads each image's tags with `crane ls`; the release lane's
-`promote-release` job decides the Latest GitHub release itself. After
-marking a release Latest, and on a re-run of a release already
-published, it reads the published releases and the repository's
-Latest release again and, if a higher release than Latest has
-published (a concurrent run for another tag, or an earlier attempt
-that failed after publishing), hands Latest to that release, so runs
-for different tags settle on the highest. If higher releases keep
-publishing through five such moves, the job fails before any image
-`latest` moves. Each writes its decisions to the step summary,
-and a release lane dry run reports the Latest GitHub release decision
-in its promotion plan.
+`promote-release` job decides the Latest GitHub release itself.
+That job runs one release at a time per target repository, in a
+concurrency group with `queue: max` that the merge lane's promotion
+shares, so a run for another tag cannot publish between a decision
+and the write it makes, and GitHub keeps waiting releases in the
+queue (up to 100) instead of cancelling them. Where registries
+overlap, so one image repository appears twice among the pushed
+images, it moves that repository's `latest` once; two different
+digests for one repository fail the job before the release
+publishes. After marking a release Latest, and on a re-run of a
+release already published, it reads the published releases and the
+repository's Latest release again and, if a higher release than
+Latest has published (by hand, from another repository's caller, or
+by an earlier attempt that failed after publishing), hands Latest to
+that release. If higher releases keep publishing through five such
+moves, the job fails before any image `latest` moves. Each writes its
+decisions to the step summary, and a release lane dry run reports the
+Latest GitHub release decision in its promotion plan.
 
 ## Usage
 
