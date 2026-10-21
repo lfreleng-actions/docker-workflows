@@ -1479,7 +1479,7 @@ jobs:
       - name: 'Verify staged images and release tags'
         if: steps.creds.outputs.available == 'true'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-promote-action@3c1ed2d6deb3bb281a92e9e56f3040942afe74aa  # v0.2.0
+        uses: lfreleng-actions/docker-promote-action@07e454c897ecfcbf2171d9980bcc50cac1130733  # v0.2.1
         with:
           mode: 'verify'
           containers_json: ${{ needs.check-release.outputs.containers_json }}

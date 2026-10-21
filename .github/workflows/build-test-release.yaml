@@ -187,13 +187,29 @@ on:
         default: ''
       push_latest:
         description: >-
-          Additionally publish the 'latest' tag per image. The tag
-          applies registry-side during release promotion, after every
-          gate (lint, scan, tests, signing) has passed, so a failed
-          release never moves 'latest'.
+          Additionally publish the 'latest' tag per image, as
+          latest_policy allows. The tag applies registry-side during
+          release promotion, after every gate (lint, scan, tests,
+          signing) has passed, so a failed release never moves
+          'latest'. Nothing moves 'latest' unless this is true.
         required: false
         type: boolean
         default: false
+      latest_policy:
+        description: >-
+          When push_latest moves each image's 'latest', and when the
+          release becomes the repository's Latest GitHub release.
+          'highest' moves it only when the release is a SemVer
+          release at least as high as every release version already
+          there (each image's repository; the repository's published
+          releases); pre-releases never move it, tags that are not
+          SemVer are ignored and build metadata does not count.
+          'always' moves it for any release, older ones included,
+          with a warning: use it only to point 'latest' back on
+          purpose.
+        required: false
+        type: string
+        default: 'highest'
       dry_run:
         description: >-
           Run the release lane without publishing. Dry runs skip
@@ -509,6 +525,25 @@ jobs:
               ;;
           esac
           echo "Signature format: ${SIGNATURE_FORMAT} ✅"
+
+      # Checked before anything writes: promote-release applies it
+      # only once the release has published
+      - name: 'Validate latest_policy input'
+        id: latest-policy
+        shell: bash
+        env:
+          LATEST_POLICY: ${{ inputs.latest_policy }}
+        run: |
+          # highest or always, as docker-promote-action accepts
+          case "${LATEST_POLICY}" in
+            highest|always) ;;
+            *)
+              echo "::error::Invalid latest_policy" \
+                "'${LATEST_POLICY}' (expected highest or always)"
+              exit 1
+              ;;
+          esac
+          echo "latest_policy: ${LATEST_POLICY} ✅"
 
       # Mirrors merge.yaml's check of its registry inputs, so the two
       # lanes accept the same values, save that the host must also be
@@ -956,6 +991,9 @@ jobs:
       image_count: ${{ steps.build.outputs.image_count }}
       pushed: ${{ steps.build.outputs.pushed }}
       pushed_count: ${{ steps.build.outputs.pushed_count }}
+      # The registry tag every image pushed under, which
+      # promote-release's latest move checks each image holds
+      version: ${{ steps.version.outputs.version }}
       # Which registries published ('true'/'false'), and how the jobs
       # that push or tag after the build (sign, promote-release)
       # authenticate to the registry input: empty unless images
@@ -2314,7 +2352,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       # yamllint disable-line rule:line-length
-      release_url: ${{ steps.promote-release.outputs.release_url || steps.set-promoted-url.outputs.release_url }}
+      release_url: ${{ steps.promote-release.outputs.release_url || steps.promote-release-not-latest.outputs.release_url || steps.set-promoted-url.outputs.release_url }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -2371,16 +2409,233 @@ jobs:
             echo "already_promoted=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The repository's Latest GitHub release follows the rule
+      # docker-promote-action applies to each image's 'latest': with
+      # latest_policy 'highest', only a SemVer release at least as
+      # high as every published release (drafts and pre-releases
+      # excluded) becomes Latest, so an older line's patch, or a
+      # re-run of an old tag, never takes it back. Reading releases
+      # writes nothing, so a dry run decides too.
+      - name: 'Decide the Latest GitHub release'
+        id: 'latest-release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.tag-validate.outputs.tag }}
+          LATEST_POLICY: ${{ inputs.latest_policy }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
+        run: |
+          # Decide whether the release becomes the Latest release
+          #
+          # SemVer 2.0.0's grammar with docker-promote-action's
+          # allowances: an optional leading 'v', and '_' as well as
+          # '+' before build metadata
+          number='(0|[1-9][0-9]*)'
+          ident='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          semver="^v?${number}\.${number}\.${number}"
+          semver+="(-${ident}(\.${ident})*)?"
+          semver+="([+_][0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"
+          # release TAG: 'major minor patch' when TAG is a SemVer
+          # release; fails for a pre-release or a tag that is not
+          # SemVer. Build metadata plays no part in precedence.
+          release() {
+            [[ "$1" =~ ${semver} ]] && [ -z "${BASH_REMATCH[4]}" ] &&
+              echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]} ${BASH_REMATCH[3]}"
+          }
+          # compare A B: 1, 0 or -1 as release A ranks above, equal
+          # to or below release B. The grammar forbids leading zeros,
+          # so a longer number is the larger, whatever its size.
+          compare() {
+            local -a a b
+            local i
+            read -ra a <<< "$1"
+            read -ra b <<< "$2"
+            for i in 0 1 2; do
+              if [ "${#a[i]}" -ne "${#b[i]}" ]; then
+                [ "${#a[i]}" -gt "${#b[i]}" ] && echo 1 || echo -1
+                return
+              elif [[ "${a[i]}" > "${b[i]}" ]]; then
+                echo 1
+                return
+              elif [[ "${a[i]}" < "${b[i]}" ]]; then
+                echo -1
+                return
+              fi
+            done
+            echo 0
+          }
+          # highest_published: sets best to the highest published
+          # release's 'major minor patch' and highest to its tag, both
+          # empty when none is a SemVer release
+          highest_published() {
+            local tags tag version
+            tags=$(gh api --paginate "repos/${REPOSITORY}/releases" \
+              --jq '.[] | select((.draft or .prerelease) | not)
+                | .tag_name')
+            best=''
+            highest=''
+            while IFS= read -r tag; do
+              version=$(release "${tag}") || continue
+              if [ -z "${best}" ] ||
+                [ "$(compare "${version}" "${best}")" = 1 ]; then
+                best="${version}"
+                highest="${tag}"
+              fi
+            done <<< "${tags}"
+          }
+          # The 'latest-recheck' step applies the same rules after
+          # publishing
+          {
+            declare -p semver
+            declare -f release compare highest_published
+          } > "${RUNNER_TEMP}/latest-release-rules.sh"
+
+          highest=''
+          if [ "${LATEST_POLICY}" = 'always' ]; then
+            latest=true
+            reason='latest_policy: always'
+            echo "::warning::latest_policy is always: ${TAG} becomes" \
+              "the Latest release whatever its version"
+          elif ! candidate=$(release "${TAG}"); then
+            latest=false
+            reason="${TAG} is a pre-release or not SemVer"
+          else
+            highest_published
+            if [ -z "${best}" ]; then
+              latest=true
+              reason='no published release yet'
+            else
+              case "$(compare "${candidate}" "${best}")" in
+                1) latest=true; reason="newer than ${highest}" ;;
+                0) latest=true; reason="equals the highest, ${highest}" ;;
+                *) latest=false; reason="older than ${highest}" ;;
+              esac
+            fi
+          fi
+          echo "${TAG}: Latest ${latest} (${reason})"
+          {
+            echo "latest=${latest}"
+            echo "candidate=${TAG}"
+            echo "highest=${highest}"
+            echo "reason=${reason}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Latest GitHub release"
+            echo ""
+            echo "| Candidate | Highest published | Latest | Why |"
+            echo "| --------- | ----------------- | ------ | --- |"
+            echo "| \`${TAG}\` | ${highest:-n/a} | ${latest} | ${reason} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: 'Promote draft release'
         id: 'promote-release'
         # yamllint disable-line rule:line-length
-        if: ${{ !inputs.dry_run && steps.check-promoted.outputs.already_promoted == 'false' }}
+        if: ${{ !inputs.dry_run && steps.check-promoted.outputs.already_promoted == 'false' && steps.latest-release.outputs.latest == 'true' }}
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/draft-release-promote-action@e420b392557c9b1eea642f0d54dec4ff39086d5f  # v0.1.5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ needs.tag-validate.outputs.tag }}
           latest: true
+
+      # draft-release-promote-action with latest false publishes
+      # without --latest, leaving GitHub's own default, which marks a
+      # newly published release Latest. Only an explicit
+      # --latest=false keeps the current Latest release in place.
+      - name: 'Promote draft release (not Latest)'
+        id: 'promote-release-not-latest'
+        # yamllint disable-line rule:line-length
+        if: ${{ !inputs.dry_run && steps.check-promoted.outputs.already_promoted == 'false' && steps.latest-release.outputs.latest == 'false' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.tag-validate.outputs.tag }}
+        run: |
+          # Publish the draft release, leaving Latest where it is
+          gh release edit "$TAG" --draft=false --latest=false
+          RELEASE_URL=$(gh release view "$TAG" --json url --jq '.url')
+          echo "Promoted: ${RELEASE_URL} (not marked Latest) ✅"
+          echo "release_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
+
+      # A run for another tag can publish a higher release between
+      # this run's decision and its publication; both decided against
+      # the same list, so this run's stale 'true' would take Latest
+      # back. Re-reading after the write closes that: if the
+      # repository's Latest release is below the highest published
+      # one, hand Latest to the highest and read again, so every
+      # write that marks a release Latest, in any run, is followed by
+      # a read in the same run. Whichever write lands last, its run's
+      # next read sees every release published before it and either
+      # confirms it or moves Latest on; a release published after
+      # that read marks itself Latest in its own run. Concurrent runs
+      # therefore converge on the highest release without serialising
+      # them: a concurrency group keeps one pending run and cancels
+      # the others, dropping releases. The check starts from the
+      # repository's actual Latest release, not this run's tag, so a
+      # re-run of an already promoted release repairs a Latest that an
+      # earlier attempt left behind when it failed after publishing.
+      - name: 'Recheck the Latest GitHub release'
+        id: 'latest-recheck'
+        # yamllint disable-line rule:line-length
+        if: ${{ !inputs.dry_run && inputs.latest_policy == 'highest' && (steps.check-promoted.outputs.already_promoted == 'true' || steps.latest-release.outputs.latest == 'true') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ inputs.repository || github.repository }}
+        run: |
+          # Keep Latest on the highest published release
+          # shellcheck source=/dev/null
+          . "${RUNNER_TEMP}/latest-release-rules.sh"
+          moves=5
+          initial=''
+          # Every move is followed by a read, so the last read always
+          # judges the last write
+          for attempt in $(seq 0 "${moves}"); do
+            highest_published
+            if [ -z "${best}" ]; then
+              echo "Latest: no published SemVer release to compare ✅"
+              exit 0
+            fi
+            latest=$(gh api "repos/${REPOSITORY}/releases/latest" \
+              --jq '.tag_name')
+            [ -n "${initial}" ] || initial="${latest}"
+            # A Latest release that is not a SemVer release ranks
+            # below every one that is
+            if current=$(release "${latest}") &&
+              [ "$(compare "${current}" "${best}")" != -1 ]; then
+              echo "Latest: ${latest} is the highest published" \
+                "release ✅"
+              echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+              if [ "${latest}" != "${initial}" ]; then
+                {
+                  echo ""
+                  echo "\`${initial}\` was the Latest release, below" \
+                    "the highest published, so Latest moved on to" \
+                    "\`${latest}\`."
+                } >> "$GITHUB_STEP_SUMMARY"
+              fi
+              exit 0
+            fi
+            [ "${attempt}" -lt "${moves}" ] || break
+            echo "::warning::${latest} is the Latest release, but" \
+              "${highest} is published; marking ${highest} the" \
+              "Latest release (move $((attempt + 1)))"
+            gh release edit "${highest}" --latest
+          done
+          # Reached only when higher releases keep publishing through
+          # every move; each runs its own recheck, but a human must
+          # confirm the outcome, so the job stops here
+          echo "::error::Latest is ${latest}, but ${highest} published" \
+            "after ${moves} moves; check the repository's Latest" \
+            "release"
+          {
+            echo ""
+            echo "Latest is unconfirmed: \`${highest}\` published" \
+              "after ${moves} moves, while \`${latest}\` is Latest." \
+              "Check the repository's Latest release."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+          exit 1
 
       - name: 'Set release URL for already promoted release'
         id: 'set-promoted-url'
@@ -2405,16 +2660,27 @@ jobs:
         env:
           TAG: ${{ needs.tag-validate.outputs.tag }}
           PUSH_LATEST: ${{ inputs.push_latest }}
+          LATEST_POLICY: ${{ inputs.latest_policy }}
+          LATEST: ${{ steps.latest-release.outputs.latest }}
+          LATEST_REASON: ${{ steps.latest-release.outputs.reason }}
         run: |
           # Report what a real release would promote
           {
             echo "## Promotion plan (dry run)"
             echo ""
-            echo "- Would promote draft release \`${TAG}\` and mark" \
-              "it latest"
+            if [ "${LATEST}" = 'true' ]; then
+              echo "- Would promote draft release \`${TAG}\` and mark" \
+                "it the Latest release (${LATEST_REASON})"
+            else
+              echo "- Would promote draft release \`${TAG}\` without" \
+                "marking it the Latest release (${LATEST_REASON})"
+            fi
             if [ "${PUSH_LATEST}" = 'true' ]; then
-              echo "- Would retag each published image as" \
-                "\`latest\` by digest"
+              echo "- Would move each published image's \`latest\`" \
+                "tag by digest as latest_policy" \
+                "\`${LATEST_POLICY}\` allows: with \`highest\`, only" \
+                "where the release is at least the highest release" \
+                "already in that image's repository"
             else
               echo "- Would not move the \`latest\` image tag" \
                 "(push_latest is false)"
@@ -2427,9 +2693,10 @@ jobs:
 
       # The GitHub release is now promoted (or already was), so the
       # mutable consumer-facing 'latest' tag can move as the final
-      # act: crane retags the already-pushed version tag
-      # registry-side, preserving manifest lists. A failed promotion
-      # above therefore never moves 'latest'.
+      # act: docker-promote-action retags each pushed image
+      # registry-side, preserving manifest lists, as latest_policy
+      # allows. A failed promotion above therefore never moves
+      # 'latest'.
       - name: 'Login to GHCR'
         if: ${{ inputs.push_latest && needs.build.outputs.ghcr == 'true' }}
         # yamllint disable-line rule:line-length
@@ -2478,18 +2745,23 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b  # v0.7
 
+      # mode: latest checks each pushed image's version tag still
+      # holds the digest this run scanned, signed and attested, then
+      # points 'latest' at that digest, never at the mutable version
+      # tag, where latest_policy allows. With 'highest', an image
+      # whose repository already holds a higher release keeps its
+      # 'latest', so a re-run of an old tag moves nothing back; the
+      # step summary says why for each image. It uses the logins
+      # above and the crane set up for it.
       - name: 'Apply latest tags'
+        id: 'latest-tags'
         # yamllint disable-line rule:line-length
         if: ${{ inputs.push_latest && needs.build.outputs.pushed_count != '0' }}
-        shell: bash
-        env:
-          PUSHED: ${{ needs.build.outputs.pushed }}
-        run: |
-          # Retag every pushed image as latest by the immutable
-          # digest this run scanned, signed and attested — never by
-          # the mutable version tag, which another writer could move
-          while IFS=$'\t' read -r image digest; do
-            echo "Tagging ${image}@${digest} as latest"
-            crane tag "${image}@${digest}" latest
-          done < <(jq -r '.[] | [.image, .digest] | @tsv' \
-            <<< "${PUSHED}")
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/docker-promote-action@07e454c897ecfcbf2171d9980bcc50cac1130733  # v0.2.1
+        with:
+          mode: 'latest'
+          release_tag: ${{ needs.build.outputs.version }}
+          images_json: ${{ needs.build.outputs.pushed }}
+          latest_policy: ${{ inputs.latest_policy }}
+          install_crane: 'false'

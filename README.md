@@ -50,7 +50,9 @@ Two release models cover the LF project estate:
   image signs with Sigstore cosign (keyless, by digest) and gains an
   SLSA build provenance attestation, and the audits gate promotion of
   the draft GitHub release (with per-image SBOMs and a digest
-  manifest attached).
+  manifest attached). See [Moving `latest`](#moving-latest) for when
+  the release becomes the Latest GitHub release and each image's
+  `latest` tag moves.
 - **Model B (merge-driven)** — `merge.yaml`. The Jenkins-heritage
   LF/Gerrit flow: every merge builds the images, gates them on
   hadolint, the test hook and a Grype scan of their SBOMs, and pushes
@@ -605,7 +607,8 @@ Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 | `namespace`         | string  | `''`            | Namespace for `manual`; one component when publishing to Docker Hub      |
 | `registry`          | string  | `''`            | Further registry as `host[:port][/path]`, e.g. `nexus3.onap.org:10002`   |
 | `registry_user`     | string  | `''`            | Username override for `registry`; empty derives from the repository name |
-| `push_latest`       | boolean | `false`         | Apply the `latest` tag per image at promotion, after all gates pass      |
+| `push_latest`       | boolean | `false`         | Move each image's `latest` at promotion, as `latest_policy` allows       |
+| `latest_policy`     | string  | `'highest'`     | `highest` or `always`; see [Moving `latest`](#moving-latest)             |
 | `dry_run`           | boolean | `false`         | Run the lane without publishing: no push, release, promotion or tag      |
 | `attestations`      | boolean | `true`          | SLSA build provenance per pushed image (by digest)                       |
 | `sigstore_sign`     | boolean | `true`          | Sigstore cosign keyless signature per pushed image (by digest)           |
@@ -670,14 +673,15 @@ hardening and `gerrit_*` inputs, `test_command`/`test_permit_fail`,
 
 <!-- markdownlint-disable MD013 -->
 
-| Input               | Type    | Default | Description                                                                             |
-| ------------------- | ------- | ------- | --------------------------------------------------------------------------------------- |
-| `snapshot_registry` | string  | (none)  | Required. Snapshot/staging registry, `host[:port][/path]`, e.g. `nexus3.onap.org:10003` |
-| `release_registry`  | string  | (none)  | Required. Release registry, `host[:port][/path]`, e.g. `nexus3.onap.org:10002`          |
-| `registry_user`     | string  | `''`    | Registry username override; empty derives from the repository name                      |
-| `nexus_user`        | string  | `''`    | Deprecated alias for `registry_user`                                                    |
-| `push_latest`       | boolean | `false` | Tag promoted release images as `latest` too                                             |
-| `dry_run`           | boolean | `false` | Exercise the publish/promotion lanes without credentials or pushes                      |
+| Input               | Type    | Default     | Description                                                                             |
+| ------------------- | ------- | ----------- | --------------------------------------------------------------------------------------- |
+| `snapshot_registry` | string  | (none)      | Required. Snapshot/staging registry, `host[:port][/path]`, e.g. `nexus3.onap.org:10003` |
+| `release_registry`  | string  | (none)      | Required. Release registry, `host[:port][/path]`, e.g. `nexus3.onap.org:10002`          |
+| `registry_user`     | string  | `''`        | Registry username override; empty derives from the repository name                      |
+| `nexus_user`        | string  | `''`        | Deprecated alias for `registry_user`                                                    |
+| `push_latest`       | boolean | `false`     | Move each promoted image's `latest` too, as `latest_policy` allows                      |
+| `latest_policy`     | string  | `'highest'` | `highest` or `always`; see [Moving `latest`](#moving-latest)                            |
+| `dry_run`           | boolean | `false`     | Exercise the publish/promotion lanes without credentials or pushes                      |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -774,7 +778,9 @@ writes anything, then copies by digest with `crane copy`:
   tag instead;
 - a missing staged image fails the job before writing any image;
 - `latest` (`push_latest`) moves once every image has released, and
-  not before.
+  not before, as `latest_policy` allows: by default, never for an
+  image whose repository holds a higher release (see
+  [Moving `latest`](#moving-latest)).
 
 The step summary lists each image with its source, destination,
 digest and status. The action logs in to each registry's
@@ -784,6 +790,45 @@ GitHub releases, so a custom `harden_runner_allowlist` must permit
 `github.com` and `release-assets.githubusercontent.com`. A dry run
 prints the plan without downloading, logging in or reading a
 registry.
+
+### Moving `latest`
+
+Nothing moves `latest` unless `push_latest` is `true`. With it set,
+`latest_policy` decides, per image, whether `latest` moves to this
+release, in both publishing lanes. The release lane applies the same
+rule to the repository's Latest GitHub release, whatever
+`push_latest` says.
+
+- `highest` (the default) moves `latest` when the release is a
+  SemVer release at least as high as every release version already
+  there, and never otherwise: the release tags in that image's
+  repository for an image, the repository's published releases
+  (drafts and pre-releases excluded) for the Latest GitHub release.
+  A patch on an older line (1.2.5 after 2.0.0), or a re-run or
+  re-promotion of an old release, leaves `latest` in place. A leading
+  `v` makes no difference, build metadata does not count, the rule
+  skips tags that are not SemVer (`X.Y-STAGING-latest`, `sha256-…`
+  signature tags and the like), pre-releases never move it, and a
+  release equal to the highest does, so re-running the highest
+  release converges. A first release always moves it.
+- `always` moves `latest` for any release, older ones included, with
+  a warning. Reserve it for pointing `latest` back on purpose.
+
+Any other value fails the `gerrit-validate` job before anything
+writes. Images move through
+[docker-promote-action](https://github.com/lfreleng-actions/docker-promote-action),
+which reads each image's tags with `crane ls`; the release lane's
+`promote-release` job decides the Latest GitHub release itself. After
+marking a release Latest, and on a re-run of a release already
+published, it reads the published releases and the repository's
+Latest release again and, if a higher release than Latest has
+published (a concurrent run for another tag, or an earlier attempt
+that failed after publishing), hands Latest to that release, so runs
+for different tags settle on the highest. If higher releases keep
+publishing through five such moves, the job fails before any image
+`latest` moves. Each writes its decisions to the step summary,
+and a release lane dry run reports the Latest GitHub release decision
+in its promotion plan.
 
 ## Usage
 
@@ -861,6 +906,9 @@ covers that case: it evaluates the publish condition from
 checks that no failed or cancelled gate admits a publish. A further
 `build-test-release.yaml` leg plans a Nexus 3 `registry` with GHCR
 off, and a follow-up job asserts its `registry_plan` output.
+`tests/test_latest_policy.sh` checks that both lanes refuse a bad
+`latest_policy` and hand it to `docker-promote-action`, and runs the
+release lane's Latest GitHub release decision against a stub `gh`.
 
 A dry run cannot reach the behaviour that appears after images
 push: cosign signing, SLSA provenance, per-registry digest capture,

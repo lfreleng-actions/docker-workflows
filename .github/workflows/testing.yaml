@@ -304,6 +304,10 @@ jobs:
       release_registry: 'nexus3.onap.org:10002'
       namespace_mode: 'auto'
       dry_run: true
+      # Carry the latest inputs through validation to the promotion
+      # step; 'always' takes the non-default branch of both
+      push_latest: true
+      latest_policy: 'always'
       # namespace_mode auto archives the images as
       # lfreleng-actions/<name>:verify only, so the test script needs
       # the namespace to find them
@@ -498,6 +502,10 @@ jobs:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
       dry_run: true
+      # The dry-run plan reports both 'latest' decisions; the Latest
+      # GitHub release one reads the fixture's published releases
+      push_latest: true
+      latest_policy: 'highest'
       # A manual namespace aliases the images as lfreleng/<name>;
       # the test command checks the plain aliases still resolve
       namespace_mode: 'manual'
@@ -695,6 +703,37 @@ jobs:
           persist-credentials: false
       - name: 'Test namespace_mode resolution'
         run: tests/test_namespace_mode.sh
+
+  # latest_policy in both publishing lanes (#115): the input and its
+  # gerrit-validate check, the wiring of docker-promote-action at its
+  # pinned commit (run in mode latest under dry_run), and the release
+  # lane's Latest GitHub release decision, extracted from the
+  # workflow and run against a stub gh serving release lists.
+  latest-policy:
+    name: 'Latest policy'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          config: '@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Test latest_policy validation and decisions'
+        run: bash tests/test_latest_policy.sh
 
   # build_artifacts in every lane: the input and its three build-job
   # steps compared across the lanes, then the validate and place step
