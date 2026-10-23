@@ -285,10 +285,24 @@ on:
       push_latest:
         description: >-
           Additionally tag promoted release images as 'latest' on the
-          release registry
+          release registry, as latest_policy allows. Nothing moves
+          'latest' unless this is true.
         required: false
         type: boolean
         default: false
+      latest_policy:
+        description: >-
+          When push_latest moves each image's 'latest'. 'highest'
+          moves it only when the release is a SemVer release at least
+          as high as every release version already in that image's
+          repository; pre-releases never move it, tags that are not
+          SemVer are ignored and build metadata does not count.
+          'always' moves it for any release, older ones included,
+          with a warning: use it only to point 'latest' back on
+          purpose.
+        required: false
+        type: string
+        default: 'highest'
       dry_run:
         description: >-
           Run the publish/promotion steps without pushing. Dry runs
@@ -429,6 +443,25 @@ jobs:
             fi
           done
           echo "Registry inputs validated ✅"
+
+      # Checked here rather than left to docker-promote-action, which
+      # would refuse it only once a release is already being promoted
+      - name: 'Validate latest_policy input'
+        id: latest-policy
+        shell: bash
+        env:
+          LATEST_POLICY: ${{ inputs.latest_policy }}
+        run: |
+          # highest or always, as docker-promote-action accepts
+          case "${LATEST_POLICY}" in
+            highest|always) ;;
+            *)
+              echo "::error::Invalid latest_policy" \
+                "'${LATEST_POLICY}' (expected highest or always)"
+              exit 1
+              ;;
+          esac
+          echo "latest_policy: ${LATEST_POLICY} ✅"
 
       - name: 'Require Gerrit project, branch and URL'
         if: inputs.gerrit_refspec != ''
@@ -1816,6 +1849,20 @@ jobs:
     if: ${{ !cancelled() && needs.check-release.outputs.has_release == 'true' }}
     permissions:
       contents: read
+    # docker-promote-action lists each image's release tags, then
+    # moves 'latest' on what it read, so two promotions at once (a
+    # 1.2.5 release file merging on one branch while 2.0.0 merges on
+    # another) could move it back. Promotion therefore runs one at a
+    # time per target repository, across branches, in the group the
+    # release lane's promote-release job also uses. queue: max keeps
+    # every waiting promotion, up to 100, where GitHub's default
+    # would cancel all but the newest pending one. A dry run writes
+    # nothing and waits only on its own run.
+    concurrency:
+      # yamllint disable-line rule:line-length
+      group: ${{ inputs.dry_run && format('docker-release-promote-dry-run-{0}-{1}', github.run_id, github.run_attempt) || format('docker-release-promote-{0}', inputs.repository || github.repository) }}
+      cancel-in-progress: false
+      queue: max
     timeout-minutes: 15
     steps:
       - name: 'Load egress allow-list'
@@ -1925,12 +1972,20 @@ jobs:
 
       # docker-promote-action reads every staged image and release tag
       # before it writes anything, copies by digest, and moves latest
-      # only once every image has released. A release tag already
-      # holding the staged digest is skipped, so a re-run or a second
-      # merge of the same release file copies nothing again;
-      # on_conflict 'fail' refuses a release tag that holds other
-      # bits, since release tags are immutable. A dry run plans
-      # without downloading crane, logging in or reading a registry.
+      # only once every image has released. With push_latest true,
+      # latest_policy 'highest' moves each image's latest only when
+      # the release tag is a SemVer release at least as high as every
+      # release version already in that image's repository, so an
+      # older line's patch, or a re-promoted old release, never
+      # points latest back; 'always' moves it for any release. The
+      # step summary records each image's decision.
+      #
+      # A release tag already holding the staged digest is skipped,
+      # so a re-run or a second merge of the same release file copies
+      # nothing again; on_conflict 'fail' refuses a release tag that
+      # holds other bits, since release tags are immutable. A dry run
+      # plans without downloading crane, logging in or reading a
+      # registry, so it cannot read the tags latest_policy compares.
       #
       # The action logs in to the login endpoint (host[:port]) of each
       # registry base, in a docker config private to the step, while
@@ -1947,7 +2002,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: steps.creds.outputs.available == 'true' || inputs.dry_run
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-promote-action@3c1ed2d6deb3bb281a92e9e56f3040942afe74aa  # v0.2.0
+        uses: lfreleng-actions/docker-promote-action@07e454c897ecfcbf2171d9980bcc50cac1130733  # v0.2.1
         with:
           # yamllint disable-line rule:line-length
           containers_json: ${{ needs.check-release.outputs.containers_json }}
@@ -1958,6 +2013,7 @@ jobs:
           push_registry: ${{ needs.check-release.outputs.push_registry || inputs.release_registry }}
           namespace: ${{ needs.gerrit-validate.outputs.namespace }}
           push_latest: ${{ inputs.push_latest }}
+          latest_policy: ${{ inputs.latest_policy }}
           dry_run: ${{ inputs.dry_run }}
           on_conflict: 'fail'
           registry_user: ${{ steps.publish-params.outputs.registry_user }}

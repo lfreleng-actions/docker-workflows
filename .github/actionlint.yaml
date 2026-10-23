@@ -24,3 +24,14 @@ paths:
       - 'reusable workflow call "\$/\.github/workflows/build\-test\-release\.yaml" at "uses" is not following the format'
       # yamllint disable-line rule:line-length
       - 'reusable workflow call "\$/\.github/workflows/merge\.yaml" at "uses" is not following the format'
+  .github/workflows/{build-test-release,merge}.yaml:
+    ignore:
+      # GitHub's concurrency 'queue' key ('max' keeps up to 100
+      # pending runs instead of cancelling all but the newest) is
+      # documented in the workflow syntax reference; actionlint
+      # 1.7.12 does not know it yet (rhysd/actionlint#657, fix in
+      # #654). The pattern names the key alone, so any other
+      # unexpected key in a concurrency block still fails. Remove it
+      # once actionlint learns the key.
+      # yamllint disable-line rule:line-length
+      - 'unexpected key "queue" for "concurrency" section\. expected one of "cancel\-in\-progress", "group"'
