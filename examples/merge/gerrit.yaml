@@ -86,14 +86,13 @@ on:
 # Merge publishes serialize per target branch: concurrent runs could
 # otherwise finish out of order and regress the rolling
 # SNAPSHOT-latest/STAGING-latest tags. cancel-in-progress stays false
-# so an in-flight publish completes. GitHub keeps a single pending
-# slot per group, so a rapid merge burst can supersede an
-# intermediate pending run; if that run carried a container release
-# file, re-trigger it (Gerrit remerge or workflow re-run) to publish
-# the promotion.
+# so an in-flight publish completes, and 'queue: max' keeps up to 100
+# pending runs in order instead of replacing all but the newest, so a
+# merge burst never skips a run that carries a container release file.
 concurrency:
   group: "merge-${{ inputs.GERRIT_PROJECT }}-${{ inputs.GERRIT_BRANCH }}"
   cancel-in-progress: false
+  queue: max
 
 permissions: {}
 

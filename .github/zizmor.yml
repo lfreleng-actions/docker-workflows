@@ -48,10 +48,10 @@ rules:
       # on purpose. Consumers copy these files wholesale, and an inline
       # suppression would travel with them, masking a genuine finding in
       # their repository once they replace the placeholder.
-      - gerrit.yaml:61
+      - gerrit.yaml:66
       - gerrit.yaml:132
-      - gerrit.yaml:142
+      - gerrit.yaml:141
       - github.yaml:42
-      - github.yaml:52
       - github.yaml:54
+      - github.yaml:57
       - github.yaml:63

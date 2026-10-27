@@ -890,3 +890,33 @@ jobs:
           persist-credentials: false
       - name: 'Check zizmor placeholder ignores'
         run: bash tests/test_zizmor_ignores.sh
+
+  # The merge and release caller examples' workflow-level concurrency
+  # (#138): each must queue pending runs ('queue: max') and never
+  # cancel one in progress, so a merge burst cannot drop a release
+  # file and a re-pushed tag cannot cancel a release mid-publish.
+  example-concurrency:
+    name: 'Example concurrency settings'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: '@2b0713787e2cb5946a5beb1db217807b3401f4aa'  # v0.18.1
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Check example concurrency settings'
+        run: bash tests/test_example_concurrency.sh
