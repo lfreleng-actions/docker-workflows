@@ -830,17 +830,19 @@ shares, so a run for another tag cannot publish between a decision
 and the write it makes, and GitHub keeps waiting releases in the
 queue (up to 100) instead of cancelling them. Where registries
 overlap, so one image repository appears twice among the pushed
-images, it moves that repository's `latest` once; two different
-digests for one repository fail the job before the release
+images, `docker-promote-action` collapses the duplicates and moves
+that repository's `latest` once. It refuses two different digests
+for one repository, and the job fails before the release
 publishes. After marking a release Latest, and on a re-run of a
-release already published, it reads the published releases and the
-repository's Latest release again and, if a higher release than
-Latest has published (by hand, from another repository's caller, or
-by an earlier attempt that failed after publishing), hands Latest to
-that release. If higher releases keep publishing through five such
-moves, the job fails before any image `latest` moves. Each writes its
-decisions to the step summary, and a release lane dry run reports the
-Latest GitHub release decision in its promotion plan.
+release already published, the job reads the published releases
+and the repository's Latest release again and, if a higher release
+than Latest has published (by hand, from another repository's
+caller, or by an earlier attempt that failed after publishing),
+hands Latest to that release. If higher releases keep publishing
+through five such moves, the job fails before any image `latest`
+moves. Each writes its decisions to the step summary, and a release
+lane dry run reports the Latest GitHub release decision in its
+promotion plan.
 
 ## Usage
 

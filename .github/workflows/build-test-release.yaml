@@ -2405,56 +2405,28 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # Registries can overlap: with ghcr_publish and a registry of
-      # ghcr.io/<owner>, the build pushes each image to one repository
-      # twice and lists it twice in 'pushed'. docker-promote-action
-      # refuses a repository named twice, as each has one 'latest', so
-      # collapse 'pushed' to one entry per repository, compared as the
-      # action compares them (case-insensitive host, Docker Hub's
-      # docker.io, index.docker.io and library/ forms alike). One
-      # repository holding two digests is a real conflict, so it fails
-      # here, before the GitHub release publishes, not after.
-      - name: 'Collapse duplicate image destinations'
-        id: 'latest-images'
+      # Check the pushed images before anything publishes. Registries
+      # can overlap: with ghcr_publish and a registry of ghcr.io/<owner>,
+      # the build lists one repository twice in 'pushed'.
+      # docker-promote-action collapses entries that share a digest,
+      # but refuses one repository pushed with two digests, as each
+      # has one 'latest'. Under dry_run it validates images_json and
+      # contacts no registry, so that conflict fails here, before the
+      # GitHub release publishes, not at 'Apply latest tags' after.
+      - name: 'Check pushed images for latest'
+        id: 'latest-check'
         # yamllint disable-line rule:line-length
         if: ${{ inputs.push_latest && needs.build.outputs.pushed_count != '0' }}
-        shell: bash
-        env:
-          PUSHED: ${{ needs.build.outputs.pushed }}
-        run: |
-          # One entry per image repository for the latest-tags step
-          # shellcheck disable=SC2016  # jq variables, not the shell's
-          canonical='
-            def canonical:
-              (.image | split("/")) as $part
-              | ($part[0] | ascii_downcase) as $host
-              | ($part[1:] | join("/")) as $path
-              | if $host == "docker.io" or $host == "index.docker.io"
-                then "docker.io/"
-                  + (if ($path | contains("/")) then $path
-                     else "library/" + $path end)
-                else $host + "/" + $path end;
-            map(. + {repository: canonical})'
-          conflicts=$(jq -r "${canonical}"'
-            | group_by(.repository)[]
-            | select((map(.digest) | unique | length) > 1)
-            | .[0].repository' <<< "${PUSHED}")
-          if [ -n "${conflicts}" ]; then
-            while IFS= read -r repository; do
-              echo "::error::${repository} was pushed with more than" \
-                "one digest, so its 'latest' has no single target"
-            done <<< "${conflicts}"
-            exit 1
-          fi
-          images=$(jq -c "${canonical}"'
-            | reduce .[] as $image ({seen: {}, images: []};
-                if .seen[$image.repository] then .
-                else .seen[$image.repository] = true
-                  | .images += [$image | del(.repository)] end)
-            | .images' <<< "${PUSHED}")
-          echo "Images for 'latest': $(jq length <<< "${images}")" \
-            "of $(jq length <<< "${PUSHED}") pushed"
-          echo "images=${images}" >> "$GITHUB_OUTPUT"
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/docker-promote-action@f0151778a87e23bf83db3aa0d13401128362687c  # v0.3.0
+        with:
+          mode: 'latest'
+          dry_run: 'true'
+          release_tag: ${{ needs.build.outputs.version }}
+          images_json: ${{ needs.build.outputs.pushed }}
+          latest_policy: ${{ inputs.latest_policy }}
+          install_crane: 'false'
+          summary: 'false'
 
       - name: 'Check if release is already promoted'
         id: 'check-promoted'
@@ -2839,10 +2811,10 @@ jobs:
         # yamllint disable-line rule:line-length
         if: ${{ inputs.push_latest && needs.build.outputs.pushed_count != '0' }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-promote-action@07e454c897ecfcbf2171d9980bcc50cac1130733  # v0.2.1
+        uses: lfreleng-actions/docker-promote-action@f0151778a87e23bf83db3aa0d13401128362687c  # v0.3.0
         with:
           mode: 'latest'
           release_tag: ${{ needs.build.outputs.version }}
-          images_json: ${{ steps.latest-images.outputs.images }}
+          images_json: ${{ needs.build.outputs.pushed }}
           latest_policy: ${{ inputs.latest_policy }}
           install_crane: 'false'
