@@ -11,11 +11,12 @@
 #   and fails anything else with an ::error:: annotation;
 # - both lanes hand the policy to docker-promote-action at the same
 #   pinned commit, and no workflow retags 'latest' with crane itself;
-# - the release lane's image 'latest' step, docker-promote-action in
-#   mode latest fetched at its pinned commit and run under dry_run,
-#   accepts the build job's pushed output once the 'latest-images'
-#   step has collapsed it to one entry per repository, overlapping
-#   registries included;
+# - the release lane checks the pushed images with
+#   docker-promote-action under dry_run before the GitHub release
+#   publishes, and the action, in mode latest fetched at its pinned
+#   commit and run under dry_run, accepts the build job's pushed
+#   output, overlapping registries included, and refuses one
+#   repository pushed with two digests;
 # - the release lane's 'latest-release' step, which decides whether
 #   the release becomes the repository's Latest GitHub release, run
 #   against a stub gh serving a release list;
@@ -134,7 +135,7 @@ release_input mode latest
 # shellcheck disable=SC2016
 release_input release_tag '${{ needs.build.outputs.version }}'
 # shellcheck disable=SC2016
-release_input images_json '${{ steps.latest-images.outputs.images }}'
+release_input images_json '${{ needs.build.outputs.pushed }}'
 # shellcheck disable=SC2016
 release_input latest_policy '${{ inputs.latest_policy }}'
 # shellcheck disable=SC2016
@@ -150,14 +151,29 @@ else
   echo "ok: no workflow retags 'latest' with crane directly"
 fi
 
-# --- Collapsing duplicate image destinations ------------------------------
+# --- Checking pushed images before publication ----------------------------
 
-step_field build-test-release.yaml promote-release latest-images run \
-  > "${work}/collapse.sh"
-if [ ! -s "${work}/collapse.sh" ]; then
-  echo "FAIL: no 'latest-images' step in the promote-release job"
-  exit 1
-fi
+# check_input NAME VALUE: the latest-check step passes VALUE as NAME
+check_input() {
+  check "build-test-release: the latest-check step passes $1" \
+    "$(step_field build-test-release.yaml promote-release latest-check \
+      "with.$1")" "$2"
+}
+check 'build-test-release: the latest-check step pins the same action' \
+  "$(step_field build-test-release.yaml promote-release latest-check \
+    uses)" "${release_uses}"
+check_input mode latest
+check_input dry_run true
+# shellcheck disable=SC2016
+check_input images_json '${{ needs.build.outputs.pushed }}'
+# shellcheck disable=SC2016
+check_input latest_policy '${{ inputs.latest_policy }}'
+
+check 'build-test-release: pushed images are checked before publishing' \
+  "$(yq -r '.jobs."promote-release".steps | to_entries
+    | (map(select(.value.id == "latest-check")) | .[0].key)
+      < (map(select(.value.id == "promote-release")) | .[0].key)' \
+    "${workflows}/build-test-release.yaml")" true
 
 digest="sha256:$(printf 'a%.0s' $(seq 64))"
 other="sha256:$(printf 'b%.0s' $(seq 64))"
@@ -176,43 +192,6 @@ pushed() {
   done
   printf ']'
 }
-
-# collapse_case DESCRIPTION EXPECTED PUSHED: EXPECTED is the images
-# kept, space-separated in order, or 'error'
-collapse_case() {
-  local status=0 actual
-  : > "${work}/output"
-  env -i PATH="${PATH}" HOME="${work}" GITHUB_OUTPUT="${work}/output" \
-    PUSHED="$3" bash --noprofile --norc -eo pipefail "${work}/collapse.sh" \
-    > "${work}/log" 2>&1 || status=$?
-  actual=$(sed -n 's/^images=//p' "${work}/output" |
-    jq -r '[.[].image] | join(" ")' 2>/dev/null || true)
-  if { [ "$2" = 'error' ] && [ "${status}" -ne 0 ] &&
-    grep -q '^::error::' "${work}/log"; } ||
-    { [ "$2" != 'error' ] && [ "${status}" -eq 0 ] &&
-      [ "${actual}" = "$2" ]; }; then
-    echo "ok: latest images: $1"
-  else
-    echo "FAIL: latest images: $1: expected '$2', got '${actual}'" \
-      "(exit ${status})"
-    sed 's/^/  | /' "${work}/log"
-    failures=$((failures + 1))
-  fi
-}
-
-collapse_case 'distinct registries are all kept, in order' \
-  'ghcr.io/org/api docker.io/org/api' \
-  "$(pushed ghcr.io/org/api docker.io/org/api)"
-collapse_case 'ghcr_publish and a ghcr.io registry name one repository' \
-  'ghcr.io/org/api' "$(pushed ghcr.io/org/api ghcr.io/org/api)"
-collapse_case 'a host differing only in case is the same repository' \
-  'ghcr.io/org/api' "$(pushed ghcr.io/org/api GHCR.io/org/api)"
-collapse_case "Docker Hub's index.docker.io is docker.io" \
-  'docker.io/org/api' "$(pushed docker.io/org/api index.docker.io/org/api)"
-collapse_case "Docker Hub's library/ form is the short form" \
-  'docker.io/api' "$(pushed docker.io/api docker.io/library/api)"
-collapse_case 'one repository with two digests fails' error \
-  "[$(entry ghcr.io/org/api),$(entry ghcr.io/org/api "${other}")]"
 
 # --- docker-promote-action, mode latest ------------------------------------
 
@@ -251,22 +230,12 @@ latest_case() {
   fi
 }
 
-# collapsed PUSHED: PUSHED as the latest-images step hands it on
-collapsed() {
-  : > "${work}/output"
-  env -i PATH="${PATH}" HOME="${work}" GITHUB_OUTPUT="${work}/output" \
-    PUSHED="$1" bash --noprofile --norc -eo pipefail "${work}/collapse.sh" \
-    > /dev/null 2>&1
-  sed -n 's/^images=//p' "${work}/output"
-}
-
 latest_case 'accepts the pushed output of distinct registries' ok \
-  "$(collapsed "$(pushed ghcr.io/org/api docker.io/org/api)")"
-latest_case 'accepts the collapsed output of overlapping registries' ok \
-  "$(collapsed "$(pushed ghcr.io/org/api ghcr.io/org/api)")"
-# Why the step exists: the action refuses the overlap as it stands
-latest_case 'refuses overlapping registries left uncollapsed' error \
+  "$(pushed ghcr.io/org/api docker.io/org/api)"
+latest_case 'accepts overlapping registries with one digest' ok \
   "$(pushed ghcr.io/org/api ghcr.io/org/api)"
+latest_case 'refuses one repository pushed with two digests' error \
+  "[$(entry ghcr.io/org/api),$(entry ghcr.io/org/api "${other}")]"
 
 # --- The Latest GitHub release ----------------------------------------------
 
