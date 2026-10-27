@@ -293,7 +293,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@2b0713787e2cb5946a5beb1db217807b3401f4aa'  # v0.18.1
       build_permit_egress_traffic:
         description: >-
           Run harden-runner in audit mode for the build job only,
