@@ -718,11 +718,12 @@ Addressing a registry is half the job: under the default
 `harden_runner_egress: block`, the host must also appear in the
 allow-list `harden_runner_allowlist` pins, and that list enumerates
 hosts and ports rather than wildcards. Today it carries four JFrog
-tenants at `:443` — `aswf`, `hyperledger`, `odpi` and `zowe` —
-alongside the Nexus 3 hosts at ports 10001-10004.
+tenants at `:443` — `hyperledger`, `linuxfoundation`, `odpi` and
+`zowe` — alongside the Nexus 3 hosts at ports 10001-10004.
 
 So a project on one of those tenants using the repository-path form
-(`aswf.jfrog.io/docker-local`) needs no extra setup, while these do:
+(for example `linuxfoundation.jfrog.io/docker-local`) needs no extra
+setup, while these do:
 
 - **any other tenant**, since there is no `*.jfrog.io` entry
 - **the subdomain method**, where each repository is a distinct host
