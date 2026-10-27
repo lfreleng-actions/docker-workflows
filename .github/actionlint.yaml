@@ -35,3 +35,11 @@ paths:
       # once actionlint learns the key.
       # yamllint disable-line rule:line-length
       - 'unexpected key "queue" for "concurrency" section\. expected one of "cancel\-in\-progress", "group"'
+  examples/{merge,build-test-release}/*.yaml:
+    ignore:
+      # The same 'queue' key in the merge and release caller examples,
+      # which the pre-commit actionlint hook also lints. Scoped to that
+      # one diagnostic, as above; remove it with the entry above once
+      # actionlint learns the key.
+      # yamllint disable-line rule:line-length
+      - 'unexpected key "queue" for "concurrency" section\. expected one of "cancel\-in\-progress", "group"'

@@ -875,6 +875,27 @@ requires the verify caller filename to contain both `gerrit` and
 variant under `examples/build-test/`, including vote/comment
 plumbing.
 
+### Caller concurrency
+
+The merge and release callers publish, so their workflow-level
+`concurrency` block must neither drop a pending run nor cancel one in
+progress. Without `queue`, GitHub keeps one pending run per group and
+a newer run replaces it, skipping any container release file that
+run would have promoted.
+
+- **Merge callers** (`examples/merge/`): group per branch, so the
+  rolling `SNAPSHOT-latest`/`STAGING-latest` tags cannot regress, with
+  `cancel-in-progress: false` and `queue: max`.
+- **Release callers** (`examples/build-test-release/`): group per tag,
+  with `cancel-in-progress: false` and `queue: max`, so re-pushing a
+  tag never cancels a release that is already publishing.
+
+`queue: max` keeps up to 100 pending runs, first in, first out. The
+workflows themselves serialise release promotion and the `latest`
+move per target repository, across both lanes, so callers need no
+repository-wide group. `tests/test_example_concurrency.sh` pins these
+settings in the examples.
+
 ## Self-testing
 
 `.github/workflows/testing.yaml` exercises `build-test.yaml` on pull

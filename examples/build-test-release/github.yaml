@@ -29,9 +29,14 @@ on:
     tags:
       - '**'
 
+# Never cancel an in-flight release: a cancelled run can leave a
+# release half published. Each tag already has its own group, so
+# distinct releases still run in parallel; 'queue: max' keeps a
+# re-pushed or re-run tag waiting for the run before it.
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
+  cancel-in-progress: false
+  queue: max
 
 permissions: {}
 
