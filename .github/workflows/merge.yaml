@@ -388,6 +388,36 @@ on:
           warning when unset, so PR/self-test contexts still work.
         required: false
 
+    outputs:
+      lint_result:
+        description: >-
+          Result of the Dockerfile Lint job: success, failure,
+          cancelled, or skipped when lint_enabled is false
+        value: ${{ jobs.dockerfile-lint.result }}
+      tests_result:
+        description: 'Result of the Tests job'
+        value: ${{ jobs.tests.result }}
+      sbom_result:
+        description: >-
+          Result of the Image SBOM job; skipped when sbom_enabled is
+          false
+        value: ${{ jobs.sbom.result }}
+      grype_result:
+        description: >-
+          Result of the Grype Audit SBOM job; skipped when grype_enabled
+          or sbom_enabled is false
+        value: ${{ jobs.grype.result }}
+      snapshot_publish_result:
+        description: >-
+          Result of the Publish Snapshot job; skipped when a gate did
+          not pass
+        value: ${{ jobs.snapshot-publish.result }}
+      release_publish_result:
+        description: >-
+          Result of the Promote Release job; skipped when the change
+          carries no container release file
+        value: ${{ jobs.release-publish.result }}
+
 permissions: {}
 
 jobs:

@@ -35,6 +35,16 @@ paths:
       # once actionlint learns the key.
       # yamllint disable-line rule:line-length
       - 'unexpected key "queue" for "concurrency" section\. expected one of "cancel\-in\-progress", "group"'
+  .github/workflows/merge.yaml:
+    ignore:
+      # The workflow_call outputs report each gate's and publish
+      # job's result through 'jobs.<job_id>.result', which GitHub
+      # documents for reusable-workflow outputs; actionlint 1.7.12
+      # types the 'jobs' context as outputs alone and rejects it. The
+      # pattern names that one diagnostic, so a mistyped job id still
+      # fails. Remove it once actionlint learns the property.
+      # yamllint disable-line rule:line-length
+      - 'property "result" is not defined in object type \{outputs: \{\}\}'
   examples/{merge,build-test-release}/*.yaml:
     ignore:
       # The same 'queue' key in the merge and release caller examples,

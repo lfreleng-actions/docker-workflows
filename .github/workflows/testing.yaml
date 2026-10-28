@@ -185,6 +185,16 @@ jobs:
     with:
       repository: ${{ matrix.repository }}
       ref: ${{ matrix.ref }}
+      # Every fixture call caps its build job at five minutes. In
+      # Testing run #262, a clean run, the slowest build job took
+      # 44 s and the three release-lane builds, the emulated
+      # linux/arm64 one included, at most 43 s. The default of 30
+      # exists for consumers' real builds; here it only holds a
+      # hung run open for 35 minutes (timeout-minutes plus GitHub's
+      # five-minute grace) before anyone can re-run it. Five minutes
+      # leaves the fixtures a sevenfold margin and reports a hung
+      # build in ten.
+      build_timeout_minutes: 5
       # Legs that do not set path_prefix keep the workflow default
       path_prefix: ${{ matrix.path_prefix || '.' }}
       images: ${{ matrix.images }}
@@ -259,6 +269,7 @@ jobs:
       path_prefix: 'tests/fixtures/build-artifacts'
       images: '[{"name": "build-artifacts-hello", "context": "."}]'
       build_artifacts: '[{"name": "build-artifacts-hello"}]'
+      build_timeout_minutes: 5
       test_command: >-
         test "$(docker run --rm build-artifacts-hello:verify
         cat /hello.txt)" = 'hello from build_artifacts'
@@ -300,6 +311,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
       namespace_mode: 'auto'
@@ -337,6 +349,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
       namespace_mode: 'auto'
@@ -347,61 +360,63 @@ jobs:
 
   # A skipped job renders green, so the two merge legs passing proves
   # nothing about whether snapshot-publish ran. This job reads the
-  # conclusions of their jobs from the run itself and checks that
-  # the gates ran or skipped as configured and that the publish ran
-  # in both.
+  # gate and publish results the merge lane reports as workflow
+  # outputs, and checks that the gates ran or skipped as configured
+  # and that both publish jobs ran in both legs. Listing the run's
+  # jobs through the REST API instead fails with HTTP 502 on re-run
+  # attempts of a run this size (#178).
   merge-gating:
     name: 'Merge gating'
     needs: ['merge-dry-run', 'merge-dry-run-gates-off']
-    permissions:
-      actions: read  # list this run's jobs and their conclusions
+    permissions: {}
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 5
+    timeout-minutes: 2
     steps:
-      # yamllint disable-line rule:line-length
-      - uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
-        with:
-          config: '@2b0713787e2cb5946a5beb1db217807b3401f4aa'  # v0.18.1
-      - name: 'Harden runner (block)'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
-        with:
-          egress-policy: 'block'
-          allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
-      - name: 'Check merge job conclusions'
+      - name: 'Check merge job results'
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          ON_LINT: ${{ needs.merge-dry-run.outputs.lint_result }}
+          ON_TESTS: ${{ needs.merge-dry-run.outputs.tests_result }}
+          ON_SBOM: ${{ needs.merge-dry-run.outputs.sbom_result }}
+          ON_GRYPE: ${{ needs.merge-dry-run.outputs.grype_result }}
+          # yamllint disable-line rule:line-length
+          ON_SNAPSHOT: ${{ needs.merge-dry-run.outputs.snapshot_publish_result }}
+          ON_RELEASE: ${{ needs.merge-dry-run.outputs.release_publish_result }}
+          OFF_LINT: ${{ needs.merge-dry-run-gates-off.outputs.lint_result }}
+          OFF_TESTS: ${{ needs.merge-dry-run-gates-off.outputs.tests_result }}
+          OFF_SBOM: ${{ needs.merge-dry-run-gates-off.outputs.sbom_result }}
+          OFF_GRYPE: ${{ needs.merge-dry-run-gates-off.outputs.grype_result }}
+          # yamllint disable-line rule:line-length
+          OFF_SNAPSHOT: ${{ needs.merge-dry-run-gates-off.outputs.snapshot_publish_result }}
+          # yamllint disable-line rule:line-length
+          OFF_RELEASE: ${{ needs.merge-dry-run-gates-off.outputs.release_publish_result }}
         run: |
-          # One line per job of this run attempt: name, conclusion.
-          # Jobs of a called workflow are named '<caller> / <job>'.
-          path="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          path+="/attempts/${GITHUB_RUN_ATTEMPT}/jobs?per_page=100"
-          jobs=$(gh api --paginate "${path}" \
-            --jq '.jobs[] | [.name, (.conclusion // "none")] | @tsv')
+          # An empty output reads as 'absent' and fails the check
           failures=0
           expect() {
-            local name="$1 / $2" actual
-            actual=$(awk -F'\t' -v n="${name}" '$1 == n { print $2 }' \
-              <<< "${jobs}")
-            if [ "${actual}" = "$3" ]; then
+            local name="$1 / $2" actual="$3"
+            if [ "${actual}" = "$4" ]; then
               echo "ok: ${name}: ${actual}"
             else
-              echo "::error::${name}: expected '$3'" \
+              echo "::error::${name}: expected '$4'" \
                 "but got '${actual:-absent}'"
               failures=$((failures + 1))
             fi
           }
-          for gate in 'Dockerfile Lint' 'Tests' 'Image SBOM' \
-            'Grype Audit SBOM' 'Publish Snapshot'; do
-            expect 'Merge (dry run)' "${gate}" success
-          done
-          for gate in 'Dockerfile Lint' 'Image SBOM' 'Grype Audit SBOM'; do
-            expect 'Merge (dry run, gates off)' "${gate}" skipped
-          done
-          expect 'Merge (dry run, gates off)' 'Tests' success
-          expect 'Merge (dry run, gates off)' 'Publish Snapshot' success
+          on='merge-dry-run'
+          expect "${on}" lint_result "${ON_LINT}" success
+          expect "${on}" tests_result "${ON_TESTS}" success
+          expect "${on}" sbom_result "${ON_SBOM}" success
+          expect "${on}" grype_result "${ON_GRYPE}" success
+          expect "${on}" snapshot_publish_result "${ON_SNAPSHOT}" success
+          expect "${on}" release_publish_result "${ON_RELEASE}" success
+          off='merge-dry-run-gates-off'
+          expect "${off}" lint_result "${OFF_LINT}" skipped
+          expect "${off}" tests_result "${OFF_TESTS}" success
+          expect "${off}" sbom_result "${OFF_SBOM}" skipped
+          expect "${off}" grype_result "${OFF_GRYPE}" skipped
+          expect "${off}" snapshot_publish_result "${OFF_SNAPSHOT}" success
+          expect "${off}" release_publish_result "${OFF_RELEASE}" success
           [ "${failures}" -eq 0 ]
 
   # The verify lane's release-file checks, end to end, on the fixture
@@ -422,6 +437,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
       namespace_mode: 'auto'
@@ -501,6 +517,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       dry_run: true
       # The dry-run plan reports both 'latest' decisions; the Latest
       # GitHub release one reads the fixture's published releases
@@ -560,6 +577,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       dry_run: true
       platforms: 'linux/arm64'
       lint_enabled: false
@@ -590,6 +608,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       dry_run: true
       registry: 'nexus3.onap.org:10002'
       ghcr_publish: false
