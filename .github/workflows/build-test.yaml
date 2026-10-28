@@ -924,7 +924,7 @@ jobs:
       - name: 'Build images'
         id: build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-build-images-action@8f11f8b9e402f99b65819c6fcb91ab84c91aefad  # v0.1.0
+        uses: lfreleng-actions/docker-build-images-action@6c77f960e5d71bd47c55c32ffb8ccea13b76a7ed  # v0.2.0
         with:
           images: ${{ needs.docker-metadata.outputs.images_json }}
           path_prefix: ${{ inputs.path_prefix }}
