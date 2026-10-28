@@ -773,7 +773,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -831,7 +831,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -854,7 +854,7 @@ jobs:
       - name: 'Verify pushed tag'
         id: 'tag-validate'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/tag-validate-action@63470621b8ebc5c4fc86ebb616727dd0a7285dd9  # v1.1.7
+        uses: lfreleng-actions/tag-validate-action@eab7d92e02c8b447a4de04e68bd5ee7eae3450eb  # v1.1.8
         with:
           # A tag push leaves tag_location empty and the action infers
           # the tag from GITHUB_REF. A dry run has no such context, so
@@ -934,7 +934,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -1041,7 +1041,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -1542,7 +1542,7 @@ jobs:
       - name: 'Login to GHCR'
         if: steps.registries.outputs.ghcr == 'true'
         # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1550,7 +1550,7 @@ jobs:
       - name: 'Login to Docker Hub'
         if: steps.registries.outputs.dockerhub == 'true'
         # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
@@ -1575,7 +1575,7 @@ jobs:
       - name: 'Login to release registry'
         if: steps.registries.outputs.registry == 'true'
         # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           registry: ${{ steps.registries.outputs.registry_login }}
           username: ${{ steps.registries.outputs.registry_user }}
@@ -1683,7 +1683,7 @@ jobs:
       - name: 'Login to GHCR'
         if: startsWith(matrix.image, 'ghcr.io/')
         # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1691,7 +1691,7 @@ jobs:
       - name: 'Login to Docker Hub'
         if: startsWith(matrix.image, 'docker.io/')
         # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
@@ -1724,7 +1724,7 @@ jobs:
         if: inputs.sigstore_sign && needs.build.outputs.registry_login != '' && startsWith(matrix.image, format('{0}/', inputs.registry))
         continue-on-error: true
         # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           registry: ${{ needs.build.outputs.registry_login }}
           username: ${{ needs.build.outputs.registry_user }}
@@ -1878,7 +1878,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -2097,7 +2097,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -2227,7 +2227,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -2387,7 +2387,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -2418,7 +2418,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: ${{ inputs.push_latest && needs.build.outputs.pushed_count != '0' }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-promote-action@f0151778a87e23bf83db3aa0d13401128362687c  # v0.3.0
+        uses: lfreleng-actions/docker-promote-action@d11a50cb8b840395c48865f349001ff58043af6a  # v0.4.0
         with:
           mode: 'latest'
           dry_run: 'true'
@@ -2753,7 +2753,7 @@ jobs:
       - name: 'Login to GHCR'
         if: ${{ inputs.push_latest && needs.build.outputs.ghcr == 'true' }}
         # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2761,7 +2761,7 @@ jobs:
       - name: 'Login to Docker Hub'
         if: ${{ inputs.push_latest && needs.build.outputs.dockerhub == 'true' }}
         # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
@@ -2786,7 +2786,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: ${{ inputs.push_latest && needs.build.outputs.registry_login != '' }}
         # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           registry: ${{ needs.build.outputs.registry_login }}
           username: ${{ needs.build.outputs.registry_user }}
@@ -2811,7 +2811,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: ${{ inputs.push_latest && needs.build.outputs.pushed_count != '0' }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-promote-action@f0151778a87e23bf83db3aa0d13401128362687c  # v0.3.0
+        uses: lfreleng-actions/docker-promote-action@d11a50cb8b840395c48865f349001ff58043af6a  # v0.4.0
         with:
           mode: 'latest'
           release_tag: ${{ needs.build.outputs.version }}

@@ -601,7 +601,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -666,7 +666,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -743,7 +743,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -771,7 +771,7 @@ jobs:
       - name: 'Gather version metadata'
         id: build-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/build-metadata-action@83c38291c4af5773c010764f7cc482198a03d76c  # v0.11.0
+        uses: lfreleng-actions/build-metadata-action@f5788fd76522ba71a079caaa77b7e50d7a7c5d0f  # v0.11.1
         with:
           path_prefix: ${{ inputs.path_prefix }}
           artifact_upload: 'false'
@@ -841,7 +841,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -1217,7 +1217,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -1316,7 +1316,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -1659,7 +1659,7 @@ jobs:
       - name: 'Login to snapshot registry'
         if: steps.creds.outputs.available == 'true'
         # yamllint disable-line rule:line-length
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
         with:
           registry: ${{ steps.publish-params.outputs.login_endpoint }}
           username: ${{ steps.publish-params.outputs.registry_user }}
@@ -1827,7 +1827,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -2032,7 +2032,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: steps.creds.outputs.available == 'true' || inputs.dry_run
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-promote-action@f0151778a87e23bf83db3aa0d13401128362687c  # v0.3.0
+        uses: lfreleng-actions/docker-promote-action@d11a50cb8b840395c48865f349001ff58043af6a  # v0.4.0
         with:
           # yamllint disable-line rule:line-length
           containers_json: ${{ needs.check-release.outputs.containers_json }}
