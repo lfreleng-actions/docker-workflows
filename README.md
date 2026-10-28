@@ -685,6 +685,22 @@ hardening and `gerrit_*` inputs, `test_command`/`test_permit_fail`,
 
 <!-- markdownlint-enable MD013 -->
 
+Outputs, each a job result (`success`, `failure`, `cancelled` or
+`skipped`):
+
+<!-- markdownlint-disable MD013 -->
+
+| Output                    | Description                                                    |
+| ------------------------- | -------------------------------------------------------------- |
+| `lint_result`             | Dockerfile Lint; skipped when `lint_enabled` is false          |
+| `tests_result`            | Tests                                                          |
+| `sbom_result`             | Image SBOM; skipped when `sbom_enabled` is false               |
+| `grype_result`            | Grype Audit SBOM; skipped when `grype_enabled` or SBOM is off  |
+| `snapshot_publish_result` | Publish Snapshot; skipped when a gate did not pass             |
+| `release_publish_result`  | Promote Release; skipped when the change has no release file   |
+
+<!-- markdownlint-enable MD013 -->
+
 A failing lint, test, SBOM or Grype job blocks the snapshot publish
 and nothing stages. The `*_permit_fail` inputs, or the
 `NO_BLOCK_AUDIT_FAIL` repository variable, let staging go ahead
@@ -931,9 +947,10 @@ report the tags, assets and promotion a real run would produce.
 `merge.yaml` runs against the fixture commit that adds a release
 descriptor, and `build-test-release.yaml` against its signed `v0.1.0`
 tag, so tag validation applies at full strength. A second merge leg
-switches lint, SBOM and Grype off, and a final job reads the run's
-job conclusions. It checks that the gates ran or skipped as
-configured and that the snapshot publish ran in both legs, because a
+switches lint, SBOM and Grype off, and a final job reads the gate
+and publish results `merge.yaml` reports as workflow outputs. It
+checks that the gates ran or skipped as configured and that the
+snapshot publish and release promotion ran in both legs, because a
 wrongly skipped job still shows green. A failing gate cannot run in
 the self-test without failing it, so `tests/test_merge_gating.sh`
 covers that case: it evaluates the publish condition from
