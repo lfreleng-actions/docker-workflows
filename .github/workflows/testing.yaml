@@ -185,6 +185,16 @@ jobs:
     with:
       repository: ${{ matrix.repository }}
       ref: ${{ matrix.ref }}
+      # Every fixture call caps its build job at five minutes. In
+      # Testing run #262, a clean run, the slowest build job took
+      # 44 s and the three release-lane builds, the emulated
+      # linux/arm64 one included, at most 43 s. The default of 30
+      # exists for consumers' real builds; here it only holds a
+      # hung run open for 35 minutes (timeout-minutes plus GitHub's
+      # five-minute grace) before anyone can re-run it. Five minutes
+      # leaves the fixtures a sevenfold margin and reports a hung
+      # build in ten.
+      build_timeout_minutes: 5
       # Legs that do not set path_prefix keep the workflow default
       path_prefix: ${{ matrix.path_prefix || '.' }}
       images: ${{ matrix.images }}
@@ -259,6 +269,7 @@ jobs:
       path_prefix: 'tests/fixtures/build-artifacts'
       images: '[{"name": "build-artifacts-hello", "context": "."}]'
       build_artifacts: '[{"name": "build-artifacts-hello"}]'
+      build_timeout_minutes: 5
       test_command: >-
         test "$(docker run --rm build-artifacts-hello:verify
         cat /hello.txt)" = 'hello from build_artifacts'
@@ -300,6 +311,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
       namespace_mode: 'auto'
@@ -337,6 +349,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
       namespace_mode: 'auto'
@@ -424,6 +437,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
       namespace_mode: 'auto'
@@ -503,6 +517,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       dry_run: true
       # The dry-run plan reports both 'latest' decisions; the Latest
       # GitHub release one reads the fixture's published releases
@@ -562,6 +577,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       dry_run: true
       platforms: 'linux/arm64'
       lint_enabled: false
@@ -592,6 +608,7 @@ jobs:
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
       ref: 'v0.1.0'
+      build_timeout_minutes: 5
       dry_run: true
       registry: 'nexus3.onap.org:10002'
       ghcr_publish: false
