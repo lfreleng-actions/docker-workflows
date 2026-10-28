@@ -1858,7 +1858,7 @@ jobs:
       - name: 'Detect container release file in merged commit'
         id: detect
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-release-detect-action@bd5ea8d531f49d5eabbaa9e7a58447654c07fd34  # v0.0.1
+        uses: lfreleng-actions/docker-release-detect-action@e38df9c42ac98d94fa026b321e592931feea0b4e  # v0.0.2
         with:
           snapshot_registry: ${{ inputs.snapshot_registry }}
           release_registry: ${{ inputs.release_registry }}
