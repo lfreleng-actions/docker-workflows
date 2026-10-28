@@ -43,7 +43,7 @@ jobs:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/java-workflows/.github/workflows/maven-build-test.yaml@7bb1071df52ffc3fb4c2280511fe257041e259d8  # v0.7.0
+    uses: lfreleng-actions/java-workflows/.github/workflows/maven-build-test.yaml@79d27baec0859916aeb03e359c50a73e17932aaf  # v0.7.2
     with:
       # Keep the packaged jars as a workflow artefact for the Docker job
       upload_build_artifacts: true
