@@ -961,7 +961,7 @@ jobs:
       - name: 'Discover images'
         id: discover
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-build-matrix-action@2c0b0496c460cd9d1405352476e77c913964507e  # v0.0.1
+        uses: lfreleng-actions/docker-build-matrix-action@2c4e2fc6082967f6520243db11721457949b93c9  # v0.1.0
         with:
           path_prefix: ${{ inputs.path_prefix }}
           images: ${{ inputs.images }}
