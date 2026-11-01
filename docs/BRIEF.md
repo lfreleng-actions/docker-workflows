@@ -228,7 +228,10 @@ housekeeping workflows, `examples/{...}/{github,gerrit}.yaml`,
 `testing.yaml`, hygiene files. The established vocabulary to keep:
 
 - **Inputs**: `repository`, `ref`, `path_prefix`,
-  `harden_runner_egress` + pinned `harden_runner_allowlist`,
+  `harden_runner_egress` + pinned `harden_runner_allowlist` +
+  `harden_runner_supplemental_allowlist`,
+  `harden_runner_supplemental_unpinned` and
+  `harden_runner_extra_endpoints`,
   `build_permit_egress_traffic` (single harden-runner step per job
   with **computed** egress policy — the java-workflows fixed
   pattern), `gerrit_refspec|project|branch|url`, `*_permit_fail`
