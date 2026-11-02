@@ -491,39 +491,42 @@ same path.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                         | Type    | Default    | Description                                                          |
-| ----------------------------- | ------- | ---------- | -------------------------------------------------------------------- |
-| `repository`                  | string  | `''`       | Repository to check out (owner/name); empty uses the caller          |
-| `ref`                         | string  | `''`       | Branch/tag/SHA to check out (empty = default branch)                 |
-| `path_prefix`                 | string  | `'.'`      | Path to the project root directory                                   |
-| `build_artifacts`             | string  | `''`       | JSON list of same-run artefacts to place first; see Build Artifacts  |
-| `images`                      | string  | `''`       | JSON image list (see Image Discovery); empty string auto-discovers   |
-| `namespace_mode`              | string  | `'none'`   | `none`, `auto` or `manual`; see Image Namespace                      |
-| `namespace`                   | string  | `''`       | Namespace for `manual` (e.g. `onap` -> `onap/<name>`)                |
-| `build_command`               | string  | `''`       | Escape hatch: project tooling builds the images (make/mvn/gradle)    |
-| `build_command_images`        | string  | `''`       | Images `build_command` produces; declaring them skips inference      |
-| `build_timeout_minutes`       | number  | `30`       | Timeout for the build job in whole minutes                           |
-| `build_permit_fail`           | boolean | `false`    | Permit image build failures; images that build carry on downstream   |
-| `test_command`                | string  | `''`       | Smoke-test hook; built images load first, IMAGES env carries tags    |
-| `test_permit_fail`            | boolean | `false`    | Permit test failures without failing the workflow                    |
-| `lint_enabled`                | boolean | `true`     | Run the Dockerfile lint job; false skips it                          |
-| `lint_permit_fail`            | boolean | `false`    | Permit hadolint findings (the NO_BLOCK pattern)                      |
-| `audit_permit_fail`           | boolean | `false`    | DEPRECATED alias for `lint_permit_fail`; removed at the next major   |
-| `sbom_enabled`                | boolean | `true`     | Generate image SBOMs; false skips generation and the Grype scan      |
-| `grype_enabled`               | boolean | `true`     | Run the Grype scan; false keeps the SBOMs but skips the scan         |
-| `grype_fail_on`               | string  | `'medium'` | Severity threshold that fails the Grype scan                         |
-| `grype_permit_fail`           | boolean | `false`    | Permit Grype findings without failing the job                        |
-| `grype_cache_db`              | string  | `'true'`   | Grype database cache mode; parallel callers need a single writer     |
-| `snapshot_registry`           | string  | `''`       | merge.yaml's snapshot registry; enables release-file checks          |
-| `release_registry`            | string  | `''`       | merge.yaml's release registry; enables release-file checks           |
-| `registry_user`               | string  | `''`       | Registry username override; empty derives from the repository name   |
-| `harden_runner_egress`        | string  | `'block'`  | Harden-runner egress policy: `block` or `audit`                      |
-| `harden_runner_allowlist`     | string  | (pinned)   | Out-of-band harden-runner allow-list configuration                   |
-| `build_permit_egress_traffic` | boolean | `false`    | Audit egress scoped to the build job (un-enumerable base registries) |
-| `gerrit_refspec`              | string  | `''`       | Gerrit refspec of the change under test                              |
-| `gerrit_project`              | string  | `''`       | Gerrit project name                                                  |
-| `gerrit_branch`               | string  | `''`       | Gerrit target branch                                                 |
-| `gerrit_url`                  | string  | `''`       | Gerrit server URL; empty falls back to the `GERRIT_URL` variable     |
+| Input                                  | Type    | Default    | Description                                                                                        |
+| -------------------------------------- | ------- | ---------- | -------------------------------------------------------------------------------------------------- |
+| `repository`                           | string  | `''`       | Repository to check out (owner/name); empty uses the caller                                        |
+| `ref`                                  | string  | `''`       | Branch/tag/SHA to check out (empty = default branch)                                               |
+| `path_prefix`                          | string  | `'.'`      | Path to the project root directory                                                                 |
+| `build_artifacts`                      | string  | `''`       | JSON list of same-run artefacts to place first; see Build Artifacts                                |
+| `images`                               | string  | `''`       | JSON image list (see Image Discovery); empty string auto-discovers                                 |
+| `namespace_mode`                       | string  | `'none'`   | `none`, `auto` or `manual`; see Image Namespace                                                    |
+| `namespace`                            | string  | `''`       | Namespace for `manual` (e.g. `onap` -> `onap/<name>`)                                              |
+| `build_command`                        | string  | `''`       | Escape hatch: project tooling builds the images (make/mvn/gradle)                                  |
+| `build_command_images`                 | string  | `''`       | Images `build_command` produces; declaring them skips inference                                    |
+| `build_timeout_minutes`                | number  | `30`       | Timeout for the build job in whole minutes                                                         |
+| `build_permit_fail`                    | boolean | `false`    | Permit image build failures; images that build carry on downstream                                 |
+| `test_command`                         | string  | `''`       | Smoke-test hook; built images load first, IMAGES env carries tags                                  |
+| `test_permit_fail`                     | boolean | `false`    | Permit test failures without failing the workflow                                                  |
+| `lint_enabled`                         | boolean | `true`     | Run the Dockerfile lint job; false skips it                                                        |
+| `lint_permit_fail`                     | boolean | `false`    | Permit hadolint findings (the NO_BLOCK pattern)                                                    |
+| `audit_permit_fail`                    | boolean | `false`    | DEPRECATED alias for `lint_permit_fail`; removed at the next major                                 |
+| `sbom_enabled`                         | boolean | `true`     | Generate image SBOMs; false skips generation and the Grype scan                                    |
+| `grype_enabled`                        | boolean | `true`     | Run the Grype scan; false keeps the SBOMs but skips the scan                                       |
+| `grype_fail_on`                        | string  | `'medium'` | Severity threshold that fails the Grype scan                                                       |
+| `grype_permit_fail`                    | boolean | `false`    | Permit Grype findings without failing the job                                                      |
+| `grype_cache_db`                       | string  | `'true'`   | Grype database cache mode; parallel callers need a single writer                                   |
+| `snapshot_registry`                    | string  | `''`       | merge.yaml's snapshot registry; enables release-file checks                                        |
+| `release_registry`                     | string  | `''`       | merge.yaml's release registry; enables release-file checks                                         |
+| `registry_user`                        | string  | `''`       | Registry username override; empty derives from the repository name                                 |
+| `harden_runner_egress`                 | string  | `'block'`  | Harden-runner egress policy: `block` or `audit`; see [Egress allow-list](#egress-allow-list)       |
+| `harden_runner_allowlist`              | string  | (pinned)   | Baseline harden-runner allow-list; see [Egress allow-list](#egress-allow-list)                     |
+| `harden_runner_supplemental_allowlist` | string  | `''`       | Further allow-list merged with the baseline; see [Egress allow-list](#egress-allow-list)           |
+| `harden_runner_supplemental_unpinned`  | boolean | `false`    | Let a same-organisation supplemental list omit `@ref`; see [Egress allow-list](#egress-allow-list) |
+| `harden_runner_extra_endpoints`        | string  | `''`       | Inline `host[:port]` endpoints for short-lived fixes; see [Egress allow-list](#egress-allow-list)  |
+| `build_permit_egress_traffic`          | boolean | `false`    | Audit egress scoped to the build job (un-enumerable base registries)                               |
+| `gerrit_refspec`                       | string  | `''`       | Gerrit refspec of the change under test                                                            |
+| `gerrit_project`                       | string  | `''`       | Gerrit project name                                                                                |
+| `gerrit_branch`                        | string  | `''`       | Gerrit target branch                                                                               |
+| `gerrit_url`                           | string  | `''`       | Gerrit server URL; empty falls back to the `GERRIT_URL` variable                                   |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -590,8 +593,10 @@ output reports whether the lane detected a release file that passed.
 ### build-test-release.yaml
 
 Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
-`build_artifacts`, `images`, `build_timeout_minutes`, hardening and
-`gerrit_*` inputs, `test_command`/`test_permit_fail`,
+`build_artifacts`, `images`, `build_timeout_minutes`, the five
+`harden_runner_*` inputs (see [Egress allow-list](#egress-allow-list)),
+`build_permit_egress_traffic`, the `gerrit_*` inputs,
+`test_command`/`test_permit_fail`,
 `lint_enabled`/`lint_permit_fail` (and its deprecated
 `audit_permit_fail` alias), `sbom_enabled`,
 `grype_enabled`/`grype_fail_on`/`grype_permit_fail`/`grype_cache_db`):
@@ -666,7 +671,9 @@ the job starts logs a warning; the attestation succeeds either way.
 Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 `build_artifacts`, `images`, `namespace_mode`, `namespace`,
 `build_command`, `build_command_images`, `build_timeout_minutes`,
-hardening and `gerrit_*` inputs, `test_command`/`test_permit_fail`,
+the five `harden_runner_*` inputs (see
+[Egress allow-list](#egress-allow-list)), `build_permit_egress_traffic`,
+the `gerrit_*` inputs, `test_command`/`test_permit_fail`,
 `lint_enabled`/`lint_permit_fail` (and its deprecated
 `audit_permit_fail` alias), `sbom_enabled`,
 `grype_enabled`/`grype_fail_on`/`grype_permit_fail`/`grype_cache_db`):
@@ -746,10 +753,61 @@ setup, while these do:
   (`docker-snapshot.acme.jfrog.io`) and so a distinct entry
 - **any port other than 443**
 
-In those cases pass a `harden_runner_allowlist` that permits the
-endpoint, or the publish fails at the network layer before the
-registry ever answers. Preferring the repository-path form keeps the
-allow-list to one entry per instance rather than one per repository.
+In those cases extend the allow-list as below, or pass a
+`harden_runner_allowlist` that permits the endpoint; otherwise the
+publish fails at the network layer before the registry ever answers.
+Preferring the repository-path form keeps the allow-list to one
+entry per instance rather than one per repository.
+
+All three lanes take the same five inputs and pass each one to
+[harden-runner-block-action](https://github.com/lfreleng-actions/harden-runner-block-action)
+on every job:
+
+<!-- markdownlint-disable MD013 -->
+
+| Input                                  | Type    | Default   | Description                                                              |
+| -------------------------------------- | ------- | --------- | ------------------------------------------------------------------------ |
+| `harden_runner_egress`                 | string  | `'block'` | `block` enforces the allow-list; `audit` logs egress without blocking it |
+| `harden_runner_allowlist`              | string  | (pinned)  | Baseline allow-list: the organisation list, pinned to a release          |
+| `harden_runner_supplemental_allowlist` | string  | `''`      | Further allow-list merged with the baseline, in the same grammar         |
+| `harden_runner_supplemental_unpinned`  | boolean | `false`   | Let the supplemental list omit `@ref` and follow its default branch      |
+| `harden_runner_extra_endpoints`        | string  | `''`      | Inline `host[:port]` tokens, space or newline separated, merged in       |
+
+<!-- markdownlint-enable MD013 -->
+
+A project whose organisation keeps its own list names that list as
+the supplemental one, and keeps the baseline. A list in the
+caller's own organisation may follow its default branch, so an ONAP
+project picks up a new entry, such as `registry.nordix.org`, as soon
+as it merges there:
+
+```yaml
+    with:
+      harden_runner_supplemental_allowlist: 'onap//'
+      harden_runner_supplemental_unpinned: true
+```
+
+A list in any other organisation has to carry an `@ref` commit SHA,
+as the baseline does: the action refuses to follow another
+organisation's branch, so nobody outside the caller's organisation
+can widen its egress without a reviewed pin change.
+
+Naming a supplemental list makes it mandatory. The lanes set the
+action's `supplemental_required` whenever the input is non-empty, so
+a list that does not resolve fails the job at the allow-list step,
+not later at the first blocked connection.
+
+`harden_runner_extra_endpoints` suits a short-term fix: a caller can
+unblock a build the same day by writing the endpoint inline, for
+example `harden_runner_extra_endpoints: 'mirror.example.org:443'`.
+The lasting fix adds the endpoint to the organisation's list, after
+which the inline token can go.
+
+An unpinned list changes between runs, so the action records which
+revision each run used: its `supplemental_source` and
+`supplemental_sha` outputs name the list it loaded and the commit it
+resolved, the audit trail for any later question about what a job
+could reach.
 
 A release file's `container_pull_registry`/`container_push_registry`
 overrides may change the port or the repository path, but not the
@@ -940,6 +998,17 @@ that file, then reads it back out of the image in `test_command`.
 input and its steps alike, and runs the validation and placement
 step scripts from each lane against every failure case and the no-op
 inputs.
+
+The same `build_artifacts` call, in block mode, also passes the
+three allow-list extension inputs: the organisation's own list as an
+unpinned supplemental list and `github.com:443` as an inline
+endpoint. Both duplicate entries the baseline already carries, so
+the call grants nothing new but proves the lane forwards each
+input. `tests/test-harden-runner-inputs.sh`, run as
+`bash tests/test-harden-runner-inputs.sh` and by a prek hook, checks
+that every reusable workflow exposes the five `harden_runner_*`
+inputs and passes each to every harden-runner-block-action step,
+then mutates a copy of one workflow and expects each mutant to fail.
 
 Both publish lanes are also self-tested, under `dry_run`. Neither
 publishes: they build, audit and test the fixture images, then
