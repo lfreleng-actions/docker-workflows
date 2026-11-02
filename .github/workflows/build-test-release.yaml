@@ -339,7 +339,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@2b0713787e2cb5946a5beb1db217807b3401f4aa'  # v0.18.1
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
       harden_runner_supplemental_allowlist:
         description: >-
           Extra harden-runner allow-list merged with
