@@ -491,42 +491,49 @@ same path.
 
 <!-- markdownlint-disable MD013 -->
 
-| Input                                  | Type    | Default    | Description                                                                                        |
-| -------------------------------------- | ------- | ---------- | -------------------------------------------------------------------------------------------------- |
-| `repository`                           | string  | `''`       | Repository to check out (owner/name); empty uses the caller                                        |
-| `ref`                                  | string  | `''`       | Branch/tag/SHA to check out (empty = default branch)                                               |
-| `path_prefix`                          | string  | `'.'`      | Path to the project root directory                                                                 |
-| `build_artifacts`                      | string  | `''`       | JSON list of same-run artefacts to place first; see Build Artifacts                                |
-| `images`                               | string  | `''`       | JSON image list (see Image Discovery); empty string auto-discovers                                 |
-| `namespace_mode`                       | string  | `'none'`   | `none`, `auto` or `manual`; see Image Namespace                                                    |
-| `namespace`                            | string  | `''`       | Namespace for `manual` (e.g. `onap` -> `onap/<name>`)                                              |
-| `build_command`                        | string  | `''`       | Escape hatch: project tooling builds the images (make/mvn/gradle)                                  |
-| `build_command_images`                 | string  | `''`       | Images `build_command` produces; declaring them skips inference                                    |
-| `build_timeout_minutes`                | number  | `30`       | Timeout for the build job in whole minutes                                                         |
-| `build_permit_fail`                    | boolean | `false`    | Permit image build failures; images that build carry on downstream                                 |
-| `test_command`                         | string  | `''`       | Smoke-test hook; built images load first, IMAGES env carries tags                                  |
-| `test_permit_fail`                     | boolean | `false`    | Permit test failures without failing the workflow                                                  |
-| `lint_enabled`                         | boolean | `true`     | Run the Dockerfile lint job; false skips it                                                        |
-| `lint_permit_fail`                     | boolean | `false`    | Permit hadolint findings (the NO_BLOCK pattern)                                                    |
-| `audit_permit_fail`                    | boolean | `false`    | DEPRECATED alias for `lint_permit_fail`; removed at the next major                                 |
-| `sbom_enabled`                         | boolean | `true`     | Generate image SBOMs; false skips generation and the Grype scan                                    |
-| `grype_enabled`                        | boolean | `true`     | Run the Grype scan; false keeps the SBOMs but skips the scan                                       |
-| `grype_fail_on`                        | string  | `'medium'` | Severity threshold that fails the Grype scan                                                       |
-| `grype_permit_fail`                    | boolean | `false`    | Permit Grype findings without failing the job                                                      |
-| `grype_cache_db`                       | string  | `'true'`   | Grype database cache mode; parallel callers need a single writer                                   |
-| `snapshot_registry`                    | string  | `''`       | merge.yaml's snapshot registry; enables release-file checks                                        |
-| `release_registry`                     | string  | `''`       | merge.yaml's release registry; enables release-file checks                                         |
-| `registry_user`                        | string  | `''`       | Registry username override; empty derives from the repository name                                 |
-| `harden_runner_egress`                 | string  | `'block'`  | Harden-runner egress policy: `block` or `audit`; see [Egress allow-list](#egress-allow-list)       |
-| `harden_runner_allowlist`              | string  | (pinned)   | Baseline harden-runner allow-list; see [Egress allow-list](#egress-allow-list)                     |
-| `harden_runner_supplemental_allowlist` | string  | `''`       | Further allow-list merged with the baseline; see [Egress allow-list](#egress-allow-list)           |
-| `harden_runner_supplemental_unpinned`  | boolean | `false`    | Let a same-organisation supplemental list omit `@ref`; see [Egress allow-list](#egress-allow-list) |
-| `harden_runner_extra_endpoints`        | string  | `''`       | Inline `host[:port]` endpoints for short-lived fixes; see [Egress allow-list](#egress-allow-list)  |
-| `build_permit_egress_traffic`          | boolean | `false`    | Audit egress scoped to the build job (un-enumerable base registries)                               |
-| `gerrit_refspec`                       | string  | `''`       | Gerrit refspec of the change under test                                                            |
-| `gerrit_project`                       | string  | `''`       | Gerrit project name                                                                                |
-| `gerrit_branch`                        | string  | `''`       | Gerrit target branch                                                                               |
-| `gerrit_url`                           | string  | `''`       | Gerrit server URL; empty falls back to the `GERRIT_URL` variable                                   |
+| Input                                  | Type    | Default      | Description                                                                                        |
+| -------------------------------------- | ------- | ------------ | -------------------------------------------------------------------------------------------------- |
+| `repository`                           | string  | `''`         | Repository to check out (owner/name); empty uses the caller                                        |
+| `ref`                                  | string  | `''`         | Branch/tag/SHA to check out (empty = default branch)                                               |
+| `path_prefix`                          | string  | `'.'`        | Path to the project root directory                                                                 |
+| `build_artifacts`                      | string  | `''`         | JSON list of same-run artefacts to place first; see Build Artifacts                                |
+| `images`                               | string  | `''`         | JSON image list (see Image Discovery); empty string auto-discovers                                 |
+| `namespace_mode`                       | string  | `'none'`     | `none`, `auto` or `manual`; see Image Namespace                                                    |
+| `namespace`                            | string  | `''`         | Namespace for `manual` (e.g. `onap` -> `onap/<name>`)                                              |
+| `build_command`                        | string  | `''`         | Escape hatch: project tooling builds the images (make/mvn/gradle)                                  |
+| `build_command_images`                 | string  | `''`         | Images `build_command` produces; declaring them skips inference                                    |
+| `build_timeout_minutes`                | number  | `30`         | Timeout for the build job in whole minutes                                                         |
+| `build_permit_fail`                    | boolean | `false`      | Permit image build failures; images that build carry on downstream                                 |
+| `test_command`                         | string  | `''`         | Smoke-test hook; built images load first, IMAGES env carries tags                                  |
+| `test_permit_fail`                     | boolean | `false`      | Permit test failures without failing the workflow                                                  |
+| `lint_enabled`                         | boolean | `true`       | Run the Dockerfile lint job; false skips it                                                        |
+| `lint_permit_fail`                     | boolean | `false`      | Permit hadolint findings (the NO_BLOCK pattern)                                                    |
+| `audit_permit_fail`                    | boolean | `false`      | DEPRECATED alias for `lint_permit_fail`; removed at the next major                                 |
+| `sbom_enabled`                         | boolean | `true`       | Generate image SBOMs; false skips generation and the Grype scan                                    |
+| `grype_enabled`                        | boolean | `true`       | Run the Grype scan; false keeps the SBOMs but skips the scan                                       |
+| `grype_fail_on`                        | string  | `'medium'`   | Severity threshold that fails the Grype scan                                                       |
+| `grype_permit_fail`                    | boolean | `false`      | Permit Grype findings without failing the job                                                      |
+| `grype_cache_db`                       | string  | `'true'`     | Grype database cache mode; parallel callers need a single writer                                   |
+| `grype_gate_when`                      | string  | `'always'`   | `always` or `dependencies-changed`; see [Dependency-change gating](#dependency-change-gating)      |
+| `grype_dependency_ecosystems`          | string  | `'docker'`   | Presets the gate watches besides `docker` (csv); see Dependency-change gating                      |
+| `grype_dependency_policy`              | string  | `'declared'` | `declared` or `all`: which findings count against `grype_fail_on`; see Dependency-change gating    |
+| `grype_transitive_fail_on`             | string  | `'critical'` | Inherited-package bar under `declared`; no effect on image SBOMs, see Dependency-change gating     |
+| `grype_only_fixed`                     | boolean | `true`       | Count findings that have a fix alone; see Dependency-change gating                                 |
+| `grype_remediation_window_days`        | string  | `''`         | Grace days for a withheld gate under `dependencies-changed` alone; empty disables the window       |
+| `grype_remediation_window_start`       | string  | `''`         | `YYYY-MM-DD` start of the remediation window for findings that predate it                          |
+| `snapshot_registry`                    | string  | `''`         | merge.yaml's snapshot registry; enables release-file checks                                        |
+| `release_registry`                     | string  | `''`         | merge.yaml's release registry; enables release-file checks                                         |
+| `registry_user`                        | string  | `''`         | Registry username override; empty derives from the repository name                                 |
+| `harden_runner_egress`                 | string  | `'block'`    | Harden-runner egress policy: `block` or `audit`; see [Egress allow-list](#egress-allow-list)       |
+| `harden_runner_allowlist`              | string  | (pinned)     | Baseline harden-runner allow-list; see [Egress allow-list](#egress-allow-list)                     |
+| `harden_runner_supplemental_allowlist` | string  | `''`         | Further allow-list merged with the baseline; see [Egress allow-list](#egress-allow-list)           |
+| `harden_runner_supplemental_unpinned`  | boolean | `false`      | Let a same-organisation supplemental list omit `@ref`; see [Egress allow-list](#egress-allow-list) |
+| `harden_runner_extra_endpoints`        | string  | `''`         | Inline `host[:port]` endpoints for short-lived fixes; see [Egress allow-list](#egress-allow-list)  |
+| `build_permit_egress_traffic`          | boolean | `false`      | Audit egress scoped to the build job (un-enumerable base registries)                               |
+| `gerrit_refspec`                       | string  | `''`         | Gerrit refspec of the change under test                                                            |
+| `gerrit_project`                       | string  | `''`         | Gerrit project name                                                                                |
+| `gerrit_branch`                        | string  | `''`         | Gerrit target branch                                                                               |
+| `gerrit_url`                           | string  | `''`         | Gerrit server URL; empty falls back to the `GERRIT_URL` variable                                   |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -550,6 +557,120 @@ fails the scan rather than slowing it.
 
 The input's own description names the three modes, and
 `examples/build-test/` shows the parallel arrangement.
+
+#### Dependency-change gating
+
+The Grype scan gates every run by default. `grype_gate_when:
+'dependencies-changed'` keeps the scan running on every change but
+lets it fail the run when the change touched the dependency chain
+and report without failing otherwise, so a documentation fix does
+not block on a vulnerability that landed in a base image overnight.
+Detection runs in the `docker-metadata` job through
+<!-- markdownlint-disable-next-line MD013 -->
+[dependency-change-action](https://github.com/lfreleng-actions/dependency-change-action),
+which compares the commit under test with its base: the first parent
+on a Gerrit patch set or a pull request's merge commit, and the
+commit the branch held before a push. The `docker-metadata` checkout
+fetches two commits, enough for the first parent; a push of more
+than one commit leaves its base outside the checkout, and a
+`repository` or
+`ref` input, a scheduled run or a manual one has no base at all, so
+each of those gates. Its result travels to the scan as the
+`dependency-change-<build_id>` artefact, which the scan reads with
+`dependency-change-manifest`; the `grype_gate_active` and
+`grype_gate_reason` workflow outputs report the decision.
+
+`grype_dependency_ecosystems` names the file presets of the
+application the images build, `docker,python` say. The `docker`
+preset is always included, whatever the input says: it covers
+`Dockerfile`, `Dockerfile.*`, `*.Dockerfile`, `Containerfile`,
+`Containerfile.*` and the lower-case `*.dockerfile`, at any depth
+under `path_prefix`. Where the `images` input names a `dockerfile`
+the preset would miss, `docker/alpine.df` say, the lane passes that
+path to the action as an extra pattern, so a change to it counts. An
+image's `context` holds the application's manifests, and its
+`Dockerfile` when the entry names no `dockerfile`, and a local
+`--build-context name=source` in its `build_flags` names a directory
+the recipe copies from; a context, named build context or recipe
+outside `path_prefix` (`../shared`, or `../shared/Image.df`) lies
+outside the scope the presets search, so the lane widens the
+detection to the repository root and makes every pattern
+repository-relative; over-matching costs one strict run. An
+`oci-layout://` build context is a local directory too, scoped the
+same way. A remote
+build context (an image, a URL, a git reference, another stage) is
+not a path and does not count. A path no
+pattern can express at all, one outside the repository, with a `[`,
+`]`, `?`, `**` or `\` in its name, with a newline or another control
+character, or one the action would read as another path (whitespace
+at either end of the name, or a Unicode line separator inside it,
+which the action's line-per-pattern input strips or splits), and a
+`--build-context` value buildx would refuse, skips
+the detection, with a notice in the step summary naming the file,
+and the gate stays on. So does `build_command`: the command builds
+whatever it likes from wherever it likes, so discovery does not
+describe its dependency set, and a caller with a custom build stays
+on the full gate, with a notice in the step summary. The sidecar travels
+when the action names a manifest it wrote, and never otherwise, so a
+`dependency-change.json` committed to the repository cannot stand in
+for one. The action's README lists every preset's files,
+its base selection and the rule for symlinks. Detection watches the
+files that declare or lock dependencies and does not follow
+build-time indirection: a base image a caller's `build_args` selects
+for a `FROM`, or a build artefact a sibling project outside
+`path_prefix` produces, lies beyond it, so a repository whose image
+dependencies arrive that way stays on `grype_gate_when: 'always'`,
+the default, or widens `path_prefix`. The lane trusts no
+claim it cannot verify: when the action finds no base to compare
+with, the scan treats the change as having touched the dependency
+chain and gates. Two self-test calls cover the round trip:
+`build-test-dependency-gate` builds a fixture checked out at a tag,
+which has no base, and asserts the gate stays active with the reason
+`the dependency-change signal was unavailable`;
+`build-test-dependency-gate-resolved` builds
+`tests/fixtures/dependency-gate` from the pull request's own commit,
+where the action resolves the base, and requires `grype_gate_active`
+`false` with the reason `this change did not touch the dependency
+chain`, or `true` when the pull request edits a recipe the action
+sees from that fixture: one under it, or one directly in
+`tests/fixtures`, `tests` or the repository root, where the action
+anchors its presets as well.
+
+The remaining inputs pass through to grype-scan-action. Both verify
+lanes accept them, but a release always gates, so the remediation
+window below changes nothing there:
+
+- `grype_only_fixed` (default `true`) counts a finding when a fix
+  exists and lets an unfixable finding report without failing.
+- `grype_remediation_window_days` and
+  `grype_remediation_window_start` bound the leniency of one case:
+  a `grype_gate_when: 'dependencies-changed'` run whose change left
+  the dependency chain alone, where the signal withholds the gate.
+  There a fixed finding stays a warning for that count of days,
+  counted from its fix date or from the start date for findings that
+  predate it, and then gates as in an armed run. On an `always` run,
+  on a release, and on a change that touched the dependency chain, a
+  qualifying finding fails at once, window or not. An empty days
+  input disables the window. The lane rejects a start the calendar
+  lacks.
+- `grype_dependency_policy` and `grype_transitive_fail_on` default
+  to `declared` and `critical` in these workflows; the action's own
+  defaults are `all` and `none`. Under `declared` the action gates a
+  finding in a package the project declares at `grype_fail_on` and
+  one in an inherited package at `grype_transitive_fail_on`, but it
+  reads the declared set from a CycloneDX dependency graph solely
+  for the generators and schema versions it has measured (CycloneDX
+  1.4 to 1.6 from the Maven, Gradle, Python and Cargo generators).
+  The image SBOMs here come from syft at CycloneDX 1.7, which it
+  cannot classify, so it falls back to counting every package as
+  declared: every finding gates at `grype_fail_on`,
+  `grype_transitive_fail_on` has no effect, and `declared` behaves
+  like `all`. Set `grype_dependency_policy: 'all'` to say so
+  outright; the relief for an image comes from `grype_gate_when`,
+  not from the policy.
+
+`gerrit-validate` checks each of these inputs before any job runs
+and fails with an annotation naming the input.
 
 #### Release-file checks
 
@@ -599,7 +720,13 @@ Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 `test_command`/`test_permit_fail`,
 `lint_enabled`/`lint_permit_fail` (and its deprecated
 `audit_permit_fail` alias), `sbom_enabled`,
-`grype_enabled`/`grype_fail_on`/`grype_permit_fail`/`grype_cache_db`):
+`grype_enabled`/`grype_fail_on`/`grype_permit_fail`/`grype_cache_db`,
+and the five Grype policy inputs `grype_dependency_policy`,
+`grype_transitive_fail_on`, `grype_only_fixed`,
+`grype_remediation_window_days` and `grype_remediation_window_start`
+(see [Dependency-change gating](#dependency-change-gating)); a
+release always gates, so `grype_gate_when` and
+`grype_dependency_ecosystems` do not apply):
 
 <!-- markdownlint-disable MD013 -->
 
@@ -989,6 +1116,27 @@ a follow-on job requires the lane to report that file detected.
 checks: valid and malformed release files against
 `docker-release-detect-action`, and `docker-promote-action` in verify
 mode against a fake `crane`, each at the commit the lane pins.
+
+A further `build-test.yaml` call sets `grype_gate_when:
+'dependencies-changed'`, and a follow-on job requires the gate to
+stay active with the reason that the dependency-change signal was
+unavailable, which a fixture checked out at a tag guarantees; that
+proves the sidecar travelled from `docker-metadata` to the scan.
+`tests/test_dependency_change.sh`, run as
+`bash tests/test_dependency_change.sh`, checks both verify lanes
+declare the Grype policy inputs alike and pass each to the scan,
+runs the `gerrit-validate` steps that check them against valid and
+invalid values, checks the wiring of `dependency-change-action` and
+its sidecar in `build-test.yaml`, runs the step that resolves the
+detection scope (the `docker` preset joined to the caller's, custom
+Dockerfile names turned into patterns, the scope widened for a recipe,
+context or named build context outside `path_prefix`, and detection
+skipped for a name no pattern can express or a `build_command`), runs
+the action at its pinned commit against a scratch repository to show a
+Dockerfile with a custom name, in or beside `path_prefix`, goes
+unnoticed until those
+patterns reach it, and runs the resolved self-test's verdict check
+against the action to show both read the same recipes.
 
 `build_artifacts` runs end to end too: one job uploads
 `target/hello.txt`, and a `build-test.yaml` call that `needs:` it
