@@ -477,6 +477,185 @@ jobs:
           fi
           echo "Release file detected and validated ✅"
 
+  # The Grype dependency-change gate (#200) end to end, on the
+  # unresolved path. The lane asks to gate only when the change
+  # touched the dependency chain, so docker-metadata runs
+  # dependency-change-action and the grype job reads its sidecar.
+  # Against a fixture checked out at a tag, the action finds no base
+  # to compare with (the checkout's HEAD is not this run's commit), so
+  # it writes no sidecar and the scan fails closed: the gate stays
+  # active and names that reason. The job below asserts both. The
+  # SBOM stays on: the grype job runs only after the sbom job, and
+  # without it the outputs asserted below are empty. The resolved
+  # path, where a sidecar travels, is the next call.
+  build-test-dependency-gate:
+    name: 'Build/Test (dependency gate)'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-docker-project'
+      ref: 'v0.1.0'
+      build_timeout_minutes: 5
+      lint_enabled: false
+      grype_gate_when: 'dependencies-changed'
+      grype_permit_fail: true
+      grype_cache_db: 'restore-only'
+
+  build-test-dependency-gate-checks:
+    name: 'Dependency gate fails closed'
+    needs: build-test-dependency-gate
+    permissions: {}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 2
+    steps:
+      - name: 'Require an active gate with the unresolved reason'
+        shell: bash
+        env:
+          # yamllint disable-line rule:line-length
+          GATE_ACTIVE: ${{ needs.build-test-dependency-gate.outputs.grype_gate_active }}
+          # yamllint disable-line rule:line-length
+          GATE_REASON: ${{ needs.build-test-dependency-gate.outputs.grype_gate_reason }}
+        run: |
+          status=0
+          if [ "${GATE_ACTIVE}" != 'true' ]; then
+            echo "::error::The dependency gate did not stay active on an" \
+              "unresolved result (grype_gate_active '${GATE_ACTIVE}')"
+            status=1
+          fi
+          expected='the dependency-change signal was unavailable'
+          if [ "${GATE_REASON}" != "${expected}" ]; then
+            echo "::error::The dependency gate gave reason" \
+              "'${GATE_REASON}', expected '${expected}'"
+            status=1
+          fi
+          if [ "${status}" -ne 0 ]; then
+            exit "${status}"
+          fi
+          echo "Dependency gate failed closed as designed ✅"
+
+  # The same gate with a resolved result. An unresolved result writes
+  # no sidecar, so the call above passes whether or not a sidecar
+  # could travel: this call proves the transport. It builds a fixture
+  # in this repository at the run's own commit, so the checkout's
+  # HEAD is GITHUB_SHA and the action compares it with the base
+  # branch, the first parent of the pull request's merge commit. The
+  # docker preset matches the fixture Dockerfile, any recipe added
+  # under the fixture, and one directly in an ancestor directory
+  # (tests/fixtures, tests, the root), so the sidecar reads 'changed:
+  # false' unless the pull request edits one of those, and the scan
+  # withholds the gate only once it has read the sidecar; one that
+  # failed to travel leaves the gate active with the unresolved
+  # reason, which the job below rejects. That job diffs the same two
+  # commits under the same names to know which verdict to require, so
+  # a pull request that edits such a recipe passes by expecting an
+  # armed gate, and nothing else passes.
+  build-test-dependency-gate-resolved:
+    name: 'Build/Test (dependency gate, resolved)'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      path_prefix: 'tests/fixtures/dependency-gate'
+      images: '[{"name": "dependency-gate", "context": "."}]'
+      build_timeout_minutes: 5
+      lint_enabled: false
+      grype_gate_when: 'dependencies-changed'
+      grype_permit_fail: true
+      grype_cache_db: 'restore-only'
+
+  build-test-dependency-gate-resolved-checks:
+    name: 'Dependency gate reads the sidecar'
+    needs: build-test-dependency-gate-resolved
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        with:
+          config: '@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The same two commits the lane's docker-metadata compared
+          fetch-depth: 2
+          persist-credentials: false
+      - name: 'Require the verdict the diff predicts'
+        shell: bash
+        env:
+          # yamllint disable-line rule:line-length
+          GATE_ACTIVE: ${{ needs.build-test-dependency-gate-resolved.outputs.grype_gate_active }}
+          # yamllint disable-line rule:line-length
+          GATE_REASON: ${{ needs.build-test-dependency-gate-resolved.outputs.grype_gate_reason }}
+        run: |
+          # The docker preset's file names between the base branch and
+          # this commit decide the verdict the action must have
+          # reached: the action matches them at any depth under the
+          # fixture directory and directly in each of its ancestors,
+          # the repository root included, so the diff covers both.
+          # tests/test_dependency_change.sh checks the prefix against
+          # the call's path_prefix and this oracle against the action.
+          prefix='tests/fixtures/dependency-gate'
+          names=(Dockerfile 'Dockerfile.*' '*.Dockerfile' '*.dockerfile'
+            Containerfile 'Containerfile.*')
+          specs=()
+          for name in "${names[@]}"; do
+            specs+=(":(glob)${prefix}/**/${name}")
+          done
+          ancestor="${prefix}"
+          while [[ "${ancestor}" == */* ]]; do
+            ancestor="${ancestor%/*}"
+            for name in "${names[@]}"; do
+              specs+=(":(glob)${ancestor}/${name}")
+            done
+          done
+          for name in "${names[@]}"; do
+            specs+=(":(glob)${name}")
+          done
+          touched=$(git diff --name-only HEAD^1 HEAD -- "${specs[@]}")
+          if [ -n "${touched}" ]; then
+            expected_active='true'
+            expected_reason='this change touched the dependency chain'
+            echo "This change edits a recipe the fixture's detection" \
+              "sees, so the gate must be armed:"
+            while IFS= read -r file; do
+              echo "  ${file}"
+            done <<< "${touched}"
+          else
+            expected_active='false'
+            expected_reason='this change did not touch the dependency chain'
+            echo "This change leaves every recipe the fixture's" \
+              "detection sees alone, so the gate must be withheld"
+          fi
+          status=0
+          if [ "${GATE_ACTIVE}" != "${expected_active}" ]; then
+            echo "::error::The dependency gate reported grype_gate_active" \
+              "'${GATE_ACTIVE}', expected '${expected_active}'; the" \
+              "sidecar did not reach the scan or said something else"
+            status=1
+          fi
+          if [ "${GATE_REASON}" != "${expected_reason}" ]; then
+            echo "::error::The dependency gate gave reason" \
+              "'${GATE_REASON}', expected '${expected_reason}'"
+            status=1
+          fi
+          if [ "${status}" -ne 0 ]; then
+            exit "${status}"
+          fi
+          echo "Dependency gate read the sidecar ✅"
+
   # The release lane, end to end, without publishing anything.
   #
   # dry_run resolves no target registry, so the lane discovers and
@@ -763,6 +942,41 @@ jobs:
           persist-credentials: false
       - name: 'Test latest_policy validation and decisions'
         run: bash tests/test_latest_policy.sh
+
+  # The Grype dependency-change gate: the policy inputs and their route
+  # to grype-scan-action in both lanes, the gerrit-validate steps that
+  # check them run against valid and invalid values, the verify lane's
+  # wiring of dependency-change-action and its sidecar, the two calls
+  # above that prove the sidecar's round trip, the step that turns
+  # custom Dockerfile names into the action's patterns, and the
+  # action itself at its pin, run against a scratch repository to show
+  # a Dockerfile with a custom name counts only once those patterns
+  # reach it. Needs github.com to fetch the action at its pin.
+  dependency-change:
+    name: 'Dependency change gate'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        with:
+          config: '@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Test the dependency-change gate wiring and the action'
+        run: bash tests/test_dependency_change.sh
 
   # build_artifacts in every lane: the input and its three build-job
   # steps compared across the lanes, then the validate and place step

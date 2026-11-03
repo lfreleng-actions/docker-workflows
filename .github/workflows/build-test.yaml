@@ -42,6 +42,17 @@
 # platform). Multi-architecture builds and manifest assembly belong to
 # the publish lanes.
 #
+# Grype gating: grype_gate_when 'dependencies-changed' blocks on
+# findings only when the change touched a Dockerfile or a dependency
+# file of the ecosystems grype_dependency_ecosystems names. The sbom
+# job has no checkout, so docker-metadata runs
+# dependency-change-action against its depth-2 checkout and uploads
+# the sidecar it writes as the dependency-change-<build_id> artefact;
+# the grype job downloads it beside the SBOMs. A change the action
+# cannot resolve writes no sidecar, and the gate stays on; so does a
+# context or Dockerfile the images input names that no pattern can
+# express, since the upload takes the action's own manifest alone.
+#
 # Call this from a thin caller workflow; see examples/build-test/ for
 # both a plain GitHub-native caller and a Gerrit-wrapped caller.
 name: '[R] Docker Build/Test'
@@ -243,6 +254,71 @@ on:
         required: false
         type: string
         default: 'true'
+      grype_gate_when:
+        description: >-
+          When Grype findings block the job: 'always', or
+          'dependencies-changed' to report them as warnings unless the
+          change under review touched a Dockerfile or a dependency
+          file of the ecosystems grype_dependency_ecosystems names. A
+          change the workflow cannot compare against its base keeps
+          the gate on.
+        required: false
+        type: string
+        default: 'always'
+      grype_dependency_ecosystems:
+        description: >-
+          Comma-separated dependency-change-action presets that make
+          up the images' dependency set under grype_gate_when
+          'dependencies-changed': the ecosystems of the application
+          the images build, e.g. 'docker,python'. The 'docker' preset
+          for the image recipes is always included, and Dockerfiles
+          the images input names reach the detection whatever this
+          says.
+        required: false
+        type: string
+        default: 'docker'
+      grype_dependency_policy:
+        description: >-
+          Which Grype findings gate: 'all', or 'declared' to gate only
+          on packages the project declares and report inherited ones
+          as warnings. An image SBOM declares no dependency graph, so
+          'all' is the sensible choice here; see the README.
+        required: false
+        type: string
+        default: 'declared'
+      grype_transitive_fail_on:
+        description: >-
+          Minimum severity at which an inherited package still gates
+          under grype_dependency_policy 'declared': 'none',
+          'negligible', 'low', 'medium', 'high' or 'critical'
+        required: false
+        type: string
+        default: 'critical'
+      grype_only_fixed:
+        description: >-
+          Gate only on findings with a published fix; one nobody can
+          act on yet is reported as a warning instead
+        required: false
+        type: boolean
+        default: true
+      grype_remediation_window_days:
+        description: >-
+          Under grype_gate_when 'dependencies-changed', on a change
+          that left the dependency chain alone, a finding stays a
+          warning for this many days after its fix became available
+          and then gates. A whole number of days; empty (the default)
+          turns the window off. 'always' runs ignore it.
+        required: false
+        type: string
+        default: ''
+      grype_remediation_window_start:
+        description: >-
+          Optional YYYY-MM-DD floor for the remediation window clock,
+          which starts at the later of the fix date and this date.
+          Empty (the default) starts it at the fix date.
+        required: false
+        type: string
+        default: ''
 
       # --- Release-file verification (off unless the registries are set) ---
       snapshot_registry:
@@ -381,6 +457,17 @@ on:
           file and it passed the offline check; 'false' when it
           carries none; empty when the release-file checks are off
         value: ${{ jobs.check-release.outputs.has_release }}
+      grype_gate_active:
+        description: >-
+          'true' when a Grype finding could have blocked this run,
+          'false' when the dependencies-changed gate withheld it;
+          empty when the scan did not run
+        value: ${{ jobs.grype.outputs.gate_active }}
+      grype_gate_reason:
+        description: >-
+          Why the Grype gate was or was not armed; empty when the scan
+          did not run
+        value: ${{ jobs.grype.outputs.gate_reason }}
 
 permissions: {}
 
@@ -427,6 +514,118 @@ jobs:
             exit 1
           fi
           echo "Gerrit inputs validated ✅"
+
+      # The Grype gate inputs reach grype-scan-action only after the
+      # build and SBOM jobs have run, and the ecosystems reach
+      # dependency-change-action in docker-metadata, so a typo fails
+      # here in seconds instead. The release lane always gates, so it
+      # has neither input and this step stays this lane's own.
+      - name: 'Validate Grype gate inputs'
+        id: validate-grype-gate
+        shell: bash
+        env:
+          GRYPE_GATE_WHEN: ${{ inputs.grype_gate_when }}
+          GRYPE_DEPENDENCY_ECOSYSTEMS: ${{ inputs.grype_dependency_ecosystems }}
+        run: |
+          # gate_when takes one of two words; the ecosystems a
+          # comma-separated list of the action's seven preset names
+          errors=0
+          # reject NAME VALUE: records an invalid input
+          reject() {
+            # A newline in the value could forge a workflow command
+            echo "::error::Invalid $1 input:" \
+              "$(printf '%s' "$2" | tr -d '\r\n')"
+            errors=1
+          }
+          case "${GRYPE_GATE_WHEN}" in
+            always|dependencies-changed) ;;
+            *) reject grype_gate_when "${GRYPE_GATE_WHEN}" ;;
+          esac
+          if [[ ! "${GRYPE_DEPENDENCY_ECOSYSTEMS}" =~ ^[a-z]+(,[a-z]+)*$ ]]
+          then
+            reject grype_dependency_ecosystems "${GRYPE_DEPENDENCY_ECOSYSTEMS}"
+          else
+            IFS=',' read -r -a ecosystems <<< "${GRYPE_DEPENDENCY_ECOSYSTEMS}"
+            for ecosystem in "${ecosystems[@]}"; do
+              case "${ecosystem}" in
+                node|python|go|maven|gradle|rust|docker) ;;
+                *)
+                  detail="(unknown preset ${ecosystem})"
+                  reject grype_dependency_ecosystems \
+                    "${GRYPE_DEPENDENCY_ECOSYSTEMS} ${detail}"
+                  break
+                  ;;
+              esac
+            done
+          fi
+          if [ "${errors}" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Grype gate: ${GRYPE_GATE_WHEN}," \
+            "ecosystems ${GRYPE_DEPENDENCY_ECOSYSTEMS} ✅"
+
+      # The Grype policy inputs reach grype-scan-action only after the
+      # build and SBOM jobs have run, so a bad value fails here first.
+      # build-test-release.yaml carries this step verbatim, and
+      # tests/test_dependency_change.sh checks the two stay identical.
+      - name: 'Validate Grype policy inputs'
+        id: validate-grype-policy
+        shell: bash
+        env:
+          GRYPE_DEPENDENCY_POLICY: ${{ inputs.grype_dependency_policy }}
+          GRYPE_TRANSITIVE_FAIL_ON: ${{ inputs.grype_transitive_fail_on }}
+          GRYPE_ONLY_FIXED: ${{ inputs.grype_only_fixed }}
+          # yamllint disable-line rule:line-length
+          GRYPE_REMEDIATION_WINDOW_DAYS: ${{ inputs.grype_remediation_window_days }}
+          # yamllint disable-line rule:line-length
+          GRYPE_REMEDIATION_WINDOW_START: ${{ inputs.grype_remediation_window_start }}
+        run: |
+          # Each input takes a closed set of words or a small grammar;
+          # whether a window start lies in the future is the action's
+          # check, once it knows the day it runs
+          errors=0
+          # reject NAME VALUE: records an invalid input
+          reject() {
+            # A newline in the value could forge a workflow command
+            echo "::error::Invalid $1 input:" \
+              "$(printf '%s' "$2" | tr -d '\r\n')"
+            errors=1
+          }
+          # check NAME VALUE ALLOWED...: VALUE must be one of ALLOWED
+          check() {
+            local name="$1" value="$2" allowed
+            shift 2
+            for allowed in "$@"; do
+              if [ "${value}" = "${allowed}" ]; then
+                return 0
+              fi
+            done
+            reject "${name}" "${value}"
+          }
+          check grype_dependency_policy "${GRYPE_DEPENDENCY_POLICY}" \
+            all declared
+          check grype_transitive_fail_on "${GRYPE_TRANSITIVE_FAIL_ON}" \
+            none negligible low medium high critical
+          check grype_only_fixed "${GRYPE_ONLY_FIXED}" true false
+          # A whole number of days, or empty for no window
+          if [[ ! "${GRYPE_REMEDIATION_WINDOW_DAYS}" =~ ^[0-9]*$ ]]; then
+            reject grype_remediation_window_days \
+              "${GRYPE_REMEDIATION_WINDOW_DAYS}"
+          fi
+          # A calendar date as YYYY-MM-DD, or empty. The pattern runs
+          # first, so date only ever sees digits and hyphens; it then
+          # rejects a day the calendar lacks, such as 2026-02-30.
+          start="${GRYPE_REMEDIATION_WINDOW_START}"
+          if [ -n "${start}" ] &&
+            { [[ ! "${start}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
+              [ "$(date -u -d "${start}" +%F 2>/dev/null)" != "${start}" ]
+            }; then
+            reject grype_remediation_window_start "${start}"
+          fi
+          if [ "${errors}" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Grype policy inputs validated ✅"
 
       # Resolved once here, the root every job descends from; each
       # job that names an image reads this job's namespace output
@@ -596,6 +795,11 @@ jobs:
         with:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
+          # dependency-change-action compares HEAD with its parent, so
+          # the depth stays at 2 or more; the Gerrit checkout fetches
+          # that depth by default. tests/test_dependency_change.sh
+          # asserts both.
+          fetch-depth: 2
           persist-credentials: false
 
       # An explicit 'images' input wins; otherwise the action walks
@@ -620,6 +824,387 @@ jobs:
           # error: the build job enumerates what the command created
           build_command: ${{ inputs.build_command }}
           build_command_images: ${{ inputs.build_command_images }}
+
+      # The docker preset matches the conventional Dockerfile names at
+      # any depth inside the detection scope, which covers discovered
+      # images, and it joins the presets the caller names whatever
+      # they say: the image recipe is always part of the dependency
+      # set. An image whose 'dockerfile' has another name reaches the
+      # detection as an extra pattern, so a change to it counts too;
+      # an image without one builds the Dockerfile in its 'context',
+      # which the preset matches. A local named build context in the
+      # image's build_flags ('--build-context deps=../shared') is a
+      # directory the recipe copies from, so it counts as a context
+      # too, and so does an 'oci-layout://' source, a local directory
+      # holding an image layout; a remote one (an image, a URL,
+      # another stage) holds nothing the checkout carries. The images
+      # input gives every path relative to path_prefix; a context or
+      # recipe outside it (a sibling directory, say) lies outside the
+      # scope the presets search, so the scope widens to the
+      # repository root and every pattern becomes repository-relative.
+      # Over-matching costs one strict run. A path no pattern can name
+      # at all, outside the repository or with a character the dialect
+      # refuses, a name with a control character, which the action's
+      # line-per-pattern input cannot carry, and a name the action's
+      # reading of that input would alter (whitespace at either end,
+      # or a Unicode line separator) skip the detection: no sidecar,
+      # so the gate stays on. So does a build_command: the command
+      # builds whatever it likes from wherever it likes, so the
+      # discovered images do not describe the dependency set, and a
+      # caller with one stays on the full gate. Runs after discovery,
+      # which has validated the images input.
+      - name: 'Resolve dependency change scope'
+        id: dependency-scope
+        # yamllint disable-line rule:line-length
+        if: inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed'
+        shell: bash
+        env:
+          IMAGES: ${{ inputs.images }}
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+          GRYPE_DEPENDENCY_ECOSYSTEMS: ${{ inputs.grype_dependency_ecosystems }}
+        run: |
+          # Outputs: ecosystems (docker plus the caller's presets),
+          # path_prefix (the detection scope), patterns (one per named
+          # Dockerfile, relative to that scope, one per line) and skip
+          # ('true' when a path has no pattern or a build_command
+          # replaces the discovered builds, so detection must not run)
+
+          # normalise PATH: resolves '.' and '..' segments lexically
+          # and drops empty ones; a '..' that climbs past the start
+          # stays in front, so a result beginning '..' left its root
+          normalise() {
+            local -a segments=() out=()
+            local segment
+            IFS='/' read -r -a segments <<< "$1"
+            for segment in "${segments[@]}"; do
+              case "${segment}" in
+                ''|.) ;;
+                ..)
+                  if [ "${#out[@]}" -gt 0 ] && [ "${out[-1]}" != '..' ]; then
+                    unset 'out[-1]'
+                  else
+                    out+=('..')
+                  fi
+                  ;;
+                *) out+=("${segment}") ;;
+              esac
+            done
+            local IFS='/'
+            echo "${out[*]}"
+          }
+          # outside PATH: true when a normalised repository-relative
+          # path climbs past the repository root
+          outside() {
+            case "$1" in
+              ..|../*) return 0 ;;
+            esac
+            return 1
+          }
+          # dialect_ok PATTERN: the action takes a relative path of
+          # plain segments: no leading '/', no '.' or '..' segment,
+          # and none of '**', '?', '[', ']' or '\'
+          dialect_ok() {
+            case "$1" in
+              ''|/*|*//*|*'**'*|*'?'*|*'['*|*']'*|*\\*) return 1 ;;
+            esac
+            case "/$1/" in
+              *'/./'*|*'/../'*) return 1 ;;
+            esac
+          }
+          # intact PATTERN: the action reads its patterns input as
+          # Python does, splitting it into lines and stripping each,
+          # so a pattern must come through that unchanged: no line
+          # separator anywhere (U+0085, U+2028, U+2029; the ASCII
+          # ones are control characters, refused before this) and no
+          # whitespace at either end (U+0020, U+00A0, U+1680, U+2000
+          # to U+200A, U+202F, U+205F, U+3000). Otherwise the action
+          # watches another path and a change to this one reports
+          # 'changed: false'. tests/test_dependency_change.sh checks
+          # the two lists against Python.
+          intact() {
+            jq -e -n --arg p "$1" '
+              def edge: . == 32 or . == 160 or . == 5760
+                or (. >= 8192 and . <= 8202) or . == 8239 or . == 8287
+                or . == 12288;
+              ($p | explode) as $c
+              | ($c | any(. == 133 or . == 8232 or . == 8233) | not)
+                and ($c | first | edge | not)
+                and ($c | last | edge | not)' > /dev/null
+          }
+          # Always docker, then the caller's presets, each once
+          ecosystems='docker'
+          IFS=',' read -r -a named <<< "${GRYPE_DEPENDENCY_ECOSYSTEMS}"
+          for name in "${named[@]}"; do
+            case ",${ecosystems}," in
+              *",${name},"*|,,) ;;
+              *) ecosystems+=",${name}" ;;
+            esac
+          done
+          prefix=$(normalise "${PATH_PREFIX}")
+          widen=false
+          skipped=''
+          scoped=''
+          rooted=''
+          custom_build=false
+          if [ -n "${BUILD_COMMAND}" ]; then
+            # The command replaces the discovered builds: it may build
+            # any recipe from any directory, so the images input, the
+            # presets and path_prefix describe nothing of what it
+            # builds, and no scope can be proved
+            custom_build=true
+            echo "::notice::build_command replaces the discovered image" \
+              "builds, so the dependency change detection cannot tell" \
+              "which recipes and contexts the build reads; detection" \
+              "is skipped and the Grype gate stays on"
+          elif [ -n "${IMAGES}" ]; then
+            # One compact JSON object per line keeps a name with a
+            # newline in one piece, where a raw string would split
+            # into two lines that match nothing
+            while IFS= read -r image; do
+              # The values of every '--build-context' in the image's
+              # build_flags, as buildx reads them: the flag's own
+              # value after '=', or the next element; one without a
+              # next element reads as empty
+              sources=$(jq -c '(.build_flags // []) as $flags
+                | if ($flags | type) != "array" then [] else
+                  [range($flags | length) as $i | $flags[$i] | strings
+                    | if . == "--build-context" then
+                        ($flags[$i + 1]
+                          | if type == "string" then . else "" end)
+                      elif startswith("--build-context=") then .[16:]
+                      else empty end]
+                  end' <<< "${image}")
+              # The action takes one pattern per line, so a name with
+              # a control character has no pattern; the check runs on
+              # the JSON strings, before anything splits them
+              strings=$(jq -c --argjson sources "${sources}" '
+                ([.context, .dockerfile] | map(select(. != null)
+                  | tostring)) + $sources' <<< "${image}")
+              if jq -e 'any(.[]; explode | any(. < 32 or . == 127))' \
+                <<< "${strings}" > /dev/null; then
+                label=$(jq -r 'map(select(explode
+                  | any(. < 32 or . == 127))) | first' <<< "${strings}" \
+                  | tr -d '\000-\037\177')
+                echo "::notice::images names the path ${label} with a" \
+                  "control character, which the dependency change" \
+                  "detection cannot express as a pattern; detection is" \
+                  "skipped and the Grype gate stays on"
+                skipped+="${label}"$'\n'
+                continue
+              fi
+              # The context holds the application's manifests and,
+              # without a 'dockerfile', its recipe: the detection must
+              # look there, so a context outside path_prefix widens
+              # the scope and one outside the repository skips it
+              context=$(jq -r '.context' <<< "${image}")
+              ctx_relative=$(normalise "${context}")
+              if [[ "${context}" == /* ]] ||
+                outside "$(normalise "${prefix}/${context}")"; then
+                echo "::notice::images names the context ${context}," \
+                  "which lies outside the repository, where the" \
+                  "dependency change detection cannot look; detection" \
+                  "is skipped and the Grype gate stays on"
+                skipped+="${context}"$'\n'
+                continue
+              fi
+              if outside "${ctx_relative}"; then
+                widen=true
+              fi
+              # A named build context is a directory the recipe copies
+              # from ('COPY --from=deps'), so a local one is scoped as
+              # the context is: it resolves against path_prefix too,
+              # since the build runs there. An 'oci-layout://' source
+              # is local as well: buildx reads
+              # 'oci-layout://PATH[:TAG][@DIGEST]' as a directory
+              # holding an image layout, the path ending at the first
+              # '@' and then at the first ':', so a change inside it
+              # changes the image. A remote source (an image, a URL, a
+              # git reference, another stage) holds nothing the
+              # checkout carries. A value buildx refuses (no
+              # 'name=source' pair, or a layout without a path) has no
+              # scope to prove, so it skips the detection; buildx
+              # fails the build on it anyway.
+              unscoped=''
+              while IFS= read -r source; do
+                name="${source%%=*}"
+                path="${source#*=}"
+                if [[ "${source}" != *=* ]] || [ -z "${name}" ] ||
+                  [ -z "${path}" ]; then
+                  unscoped="--build-context ${source}"
+                  echo "::notice::images passes '${unscoped}', which" \
+                    "names no name=source pair, so the dependency" \
+                    "change detection cannot tell where the build" \
+                    "context lies; detection is skipped and the Grype" \
+                    "gate stays on"
+                  break
+                fi
+                given="${path}"
+                case "${path}" in
+                  oci-layout://*)
+                    path="${path#oci-layout://}"
+                    path="${path%%@*}"
+                    path="${path%%:*}"
+                    if [ -z "${path}" ]; then
+                      unscoped="--build-context ${source}"
+                      echo "::notice::images passes '${unscoped}'," \
+                        "which names no layout directory, so the" \
+                        "dependency change detection cannot tell where" \
+                        "the build context lies; detection is skipped" \
+                        "and the Grype gate stays on"
+                      break
+                    fi
+                    ;;
+                  *://*|target:*|git@*|github.com/*) continue ;;
+                esac
+                if [[ "${path}" == /* ]] ||
+                  outside "$(normalise "${prefix}/${path}")"; then
+                  unscoped="${given}"
+                  echo "::notice::images names the build context" \
+                    "${name}=${given}, which lies outside the" \
+                    "repository, where the dependency change detection" \
+                    "cannot look; detection is skipped and the Grype" \
+                    "gate stays on"
+                  break
+                fi
+                if outside "$(normalise "${path}")"; then
+                  widen=true
+                fi
+              done < <(jq -r '.[]' <<< "${sources}")
+              if [ -n "${unscoped}" ]; then
+                skipped+="${unscoped}"$'\n'
+                continue
+              fi
+              dockerfile=$(jq -r 'if .dockerfile == null then ""
+                else .dockerfile | tostring end' <<< "${image}")
+              if [ -z "${dockerfile}" ]; then
+                continue
+              fi
+              relative=$(normalise "${dockerfile}")
+              rel_root=$(normalise "${prefix}/${dockerfile}")
+              # Both forms must hold: the scope is decided only once
+              # every image has been read
+              if [[ "${dockerfile}" == /* ]] || [ -z "${relative}" ] ||
+                ! dialect_ok "${rel_root}" || ! intact "${relative}" ||
+                ! intact "${rel_root}"; then
+                echo "::notice::images names the dockerfile ${dockerfile}," \
+                  "which the dependency change detection cannot express" \
+                  "as a pattern; detection is skipped and the Grype" \
+                  "gate stays on"
+                skipped+="${dockerfile}"$'\n'
+                continue
+              fi
+              if outside "${relative}"; then
+                widen=true
+              fi
+              scoped+="${relative}"$'\n'
+              rooted+="${rel_root}"$'\n'
+            done < <(jq -c '.[]' <<< "${IMAGES}")
+          fi
+          skip=false
+          scope="${PATH_PREFIX}"
+          patterns="${scoped}"
+          if [ "${custom_build}" = true ]; then
+            skip=true
+            patterns=''
+            {
+              echo "### Dependency change detection skipped"
+              echo ""
+              echo "The \`build_command\` input replaces the discovered" \
+                "image builds, so the dependency change detection" \
+                "cannot tell which recipes and contexts the build" \
+                "reads; detection did not run and the Grype gate stays" \
+                "on. Build the images with the \`images\` input, or the" \
+                "discovered Dockerfiles, to gate on dependency changes."
+            } >> "${GITHUB_STEP_SUMMARY}"
+          elif [ -n "${skipped}" ]; then
+            skip=true
+            patterns=''
+            {
+              echo "### Dependency change detection skipped"
+              echo ""
+              echo "The \`images\` input names a path the dependency" \
+                "change detection cannot reach or express as a" \
+                "pattern, so detection did not run and the Grype gate" \
+                "stays on:"
+              echo ""
+              printf '%s' "${skipped}" | while IFS= read -r file; do
+                echo "- \`${file}\`"
+              done
+            } >> "${GITHUB_STEP_SUMMARY}"
+          elif [ "${widen}" = true ]; then
+            scope='.'
+            patterns="${rooted}"
+          fi
+          # The heredoc ends at the first line equal to its delimiter,
+          # and a recipe named DOCKERFILE_PATTERNS is a valid pattern,
+          # so the delimiter grows until no pattern equals it
+          delimiter='DOCKERFILE_PATTERNS'
+          while grep -qxF -- "${delimiter}" <<< "${patterns}"; do
+            delimiter+='_'
+          done
+          {
+            echo "ecosystems=${ecosystems}"
+            echo "path_prefix=${scope}"
+            echo "skip=${skip}"
+            echo "patterns<<${delimiter}"
+            printf '%s' "${patterns}"
+            echo "${delimiter}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Dependency change presets: ${ecosystems}"
+          if [ "${custom_build}" = true ]; then
+            echo "Detection skipped: build_command replaces the builds"
+          elif [ "${skip}" = true ]; then
+            echo "Detection skipped: a named path has no pattern"
+          elif [ -n "${patterns}" ]; then
+            echo "Dockerfile patterns, relative to ${scope}:"
+            printf '%s' "${patterns}" | sed 's/^/  /'
+          else
+            echo "No named Dockerfiles; the docker preset covers discovery"
+          fi
+
+      # Writes dependency-change.json for the Grype job's
+      # dependencies-changed gate, only when it resolved what the
+      # change touched. The sbom job has no checkout, so detection
+      # runs here, where the source is. Every path the action cannot
+      # vouch for writes no file, which the Grype job reads as
+      # unresolved, keeping the gate on; so does a recipe the step
+      # above found no pattern for, which skips this step. The
+      # dependency set is the image recipe plus the application inside
+      # it, so the presets are docker plus the union the caller names.
+      - name: 'Detect dependency changes'
+        id: dependency-change
+        # yamllint disable-line rule:line-length
+        if: inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed' && steps.dependency-scope.outputs.skip != 'true'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/dependency-change-action@257928b15e4e6a5cc5a888435be59b058055c4e1  # v0.0.1
+        with:
+          ecosystems: ${{ steps.dependency-scope.outputs.ecosystems }}
+          patterns: ${{ steps.dependency-scope.outputs.patterns }}
+          path-prefix: ${{ steps.dependency-scope.outputs.path_prefix }}
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          output: 'dependency-change.json'
+
+      # The sidecar travels as a file in an artefact of its own, under
+      # the build_id the SBOM and archive artefacts use, never as a
+      # job output: matrix jobs collapse outputs to one value, and a
+      # file transfers unchanged. Only a manifest the action vouches
+      # for travels: the action removes a sidecar the checkout brought
+      # along before it looks, and names its own in 'manifest' once
+      # the result is resolved, so the upload runs on that output
+      # alone. A skipped or unresolved detection then uploads nothing,
+      # a planted {"changed": false} included, and the Grype job finds
+      # no manifest and keeps the gate on.
+      - name: 'Upload dependency change sidecar'
+        # yamllint disable-line rule:line-length
+        if: inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed' && steps.dependency-change.outputs.manifest != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: dependency-change-${{ steps.discover.outputs.build_id }}
+          path: dependency-change.json
+          retention-days: 45
+          if-no-files-found: ignore
 
   build:
     name: 'Docker Build'
@@ -1289,6 +1874,9 @@ jobs:
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.sbom.result == 'success' && inputs.grype_enabled }}
     timeout-minutes: 10
+    outputs:
+      gate_active: ${{ steps.grype-audit.outputs.gate-active }}
+      gate_reason: ${{ steps.grype-audit.outputs.gate-reason }}
     permissions:
       contents: read
     steps:
@@ -1322,10 +1910,26 @@ jobs:
         with:
           name: sbom-files-${{ needs.docker-metadata.outputs.build_id }}
 
+      # The sidecar docker-metadata uploaded when it resolved the
+      # change, placed beside the SBOMs. An unresolved result uploaded
+      # none; a pattern matches nothing then and the download succeeds
+      # empty, where a name would fail it. The build_id names one
+      # artefact at most, so the lone match lands in the working
+      # directory.
+      - name: 'Download dependency change sidecar'
+        if: inputs.grype_gate_when == 'dependencies-changed'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          # yamllint disable-line rule:line-length
+          pattern: dependency-change-${{ needs.docker-metadata.outputs.build_id }}
+          merge-multiple: true
+
       # The grype_permit_fail input (or, when unset, the NO_BLOCK_AUDIT_FAIL
       # repository variable) disables failure propagation so pull requests
       # can proceed when blocked by newly discovered CVEs in base images
-      # or transitive dependencies.
+      # or transitive dependencies. grype_gate_when narrows when findings
+      # block in the first place; permit-fail still passes an armed gate.
       - name: 'Grype audit SBOMs'
         id: grype-audit
         # yamllint disable-line rule:line-length
@@ -1333,6 +1937,17 @@ jobs:
         with:
           sbom: 'sbom-cyclonedx-*.json'
           fail-on: ${{ inputs.grype_fail_on }}
+          only-fixed: ${{ inputs.grype_only_fixed }}
+          dependency-policy: ${{ inputs.grype_dependency_policy }}
+          transitive-fail-on: ${{ inputs.grype_transitive_fail_on }}
+          gate-when: ${{ inputs.grype_gate_when }}
+          # Downloaded beside the SBOMs when docker-metadata resolved
+          # the change; an absent manifest keeps the gate on
+          dependency-change-manifest: 'dependency-change.json'
+          # yamllint disable-line rule:line-length
+          remediation-window-days: ${{ inputs.grype_remediation_window_days }}
+          # yamllint disable-line rule:line-length
+          remediation-window-start: ${{ inputs.grype_remediation_window_start }}
           # yamllint disable-line rule:line-length
           permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
           # yamllint disable-line rule:line-length
@@ -1340,6 +1955,28 @@ jobs:
           retention-days: '45'
           cache-db: ${{ inputs.grype_cache_db }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The action's summary gives the gate's reason only when it
+      # downgraded findings to warnings; record the decision on every
+      # dependency-aware run, including those that gate or find nothing
+      - name: 'Grype gate summary'
+        # yamllint disable-line rule:line-length
+        if: ${{ !cancelled() && inputs.grype_gate_when == 'dependencies-changed' && steps.grype-audit.outcome != 'skipped' }}
+        shell: bash
+        env:
+          GATE_ACTIVE: ${{ steps.grype-audit.outputs.gate-active }}
+          GATE_REASON: ${{ steps.grype-audit.outputs.gate-reason }}
+          ADVISORY: ${{ steps.grype-audit.outputs.advisory-matches }}
+        run: |
+          # Grype gate summary
+          {
+            echo "### Grype gate"
+            echo ""
+            echo "| Gate active | Reason | Advisory matches |"
+            echo "| ----------- | ------ | ---------------- |"
+            echo "| ${GATE_ACTIVE:-unknown} | ${GATE_REASON:-unknown}" \
+              "| ${ADVISORY:-unknown} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   # Offline release-file check: the change adds or edits a container
   # release file under releases/, and it must parse and validate as
