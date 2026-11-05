@@ -945,9 +945,56 @@ jobs:
       - name: 'Test latest_policy validation and decisions'
         run: bash tests/test_latest_policy.sh
 
+  # A bad Grype input fails each lane's gerrit-validate job, through
+  # grype-scan-action in validate-only mode, before any build job
+  # starts. A call to a lane with one would fail this run, so this job
+  # runs the validator as the lanes do: the action at the lanes' pin
+  # with build-test's defaults and a gate-when it does not know. The
+  # step must fail and the next step requires that it did. Validate-only
+  # makes no network request, so the job needs no harden-runner, and
+  # it reads nothing, so it needs no checkout and no permission.
+  # tests/test_dependency_change.sh checks the step's inputs stay
+  # build-test's defaults and that the verdict is read.
+  grype-validate-rejects:
+    name: 'Grype validation rejects a bad input'
+    permissions: {}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 2
+    steps:
+      - name: 'Validate Grype inputs'
+        id: reject
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/grype-scan-action@f65dca2762823cfc8f376e32fee9baa6f3292696  # v0.6.2
+        with:
+          validate-only: 'true'
+          fail-on: 'medium'
+          only-fixed: 'true'
+          dependency-policy: 'declared'
+          transitive-fail-on: 'critical'
+          gate-when: 'sometimes'
+          remediation-window-days: ''
+          remediation-window-start: ''
+          cache-db: 'true'
+          bypass-repository: ''
+      - name: 'Require the rejection'
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.reject.outcome }}
+        run: |
+          # The action rejects the gate-when; anything else is a bug
+          # in the action at this pin or in this job's inputs
+          if [ "${OUTCOME}" != 'failure' ]; then
+            echo "::error::Validate-only accepted gate-when 'sometimes'" \
+              "(outcome '${OUTCOME}')"
+            exit 1
+          fi
+          echo "Grype validation rejected the bad input ✅"
+
   # The Grype dependency-change gate: the policy inputs and their route
-  # to grype-scan-action in every lane, the gerrit-validate steps that
-  # check them run against valid and invalid values, the verify lane's
+  # to grype-scan-action in every lane, the validator each lane runs in
+  # validate-only mode checked against its scan, the ecosystems check
+  # run against valid and invalid values, the verify lane's
   # detection in repository-metadata and its job output, the two
   # calls above that prove the verdict's round trip, the step that turns
   # custom Dockerfile names into the action's patterns, and the

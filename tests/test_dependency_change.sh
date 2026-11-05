@@ -9,10 +9,20 @@
 #   defaults and pass each to grype-scan-action; the verify lane alone
 #   takes grype_gate_when and grype_dependency_ecosystems, and alone
 #   forwards a dependency change verdict, since a release always gates;
-# - the gerrit-validate steps that check those inputs, extracted and
-#   run as GitHub runs a 'shell: bash' step, accept every valid value
-#   and fail each invalid one with an ::error:: naming the input, and
-#   the policy step is byte-identical in the two lanes;
+# - the gerrit-validate step that validates those inputs through
+#   grype-scan-action in validate-only mode: at the scan's pin, with
+#   validate-only the string 'true' and, for every input the scan
+#   passes as one grype_* input of the lane, the same expression and
+#   nothing else, no shell step reading a grype_* input beside it, and
+#   each breach of that contract, made on a copy of the workflow,
+#   failing the check; the grype_dependency_ecosystems shell check
+#   the verify lane keeps, as an input of repository-metadata-action,
+#   extracted and run as GitHub runs a 'shell: bash' step against
+#   valid and invalid values; the build of each lane needing
+#   gerrit-validate with no condition, so a rejected input leaves it
+#   unstarted; and the testing.yaml job that runs the validator with
+#   build-test's defaults and a bad gate-when and requires the
+#   rejection;
 # - the verify lane's wiring: repository-metadata-action at its v0.4.0
 #   commit in every workflow that calls it; in build-test.yaml its
 #   metadata step running the detection behind the
@@ -189,40 +199,260 @@ check "build-test: grype_dependency_patterns defaults to ''" \
 check 'build-test-release: no grype_dependency_patterns input' \
   "$(input_field "${release}" grype_dependency_patterns type)" null
 
-# --- gerrit-validate: the shared policy step ------------------------------
+# --- gerrit-validate: the Grype inputs, validated through the action -------
 
-# The step as data: its fields one per line as JSON strings, so the
-# comment above it (which names the other lane) stays out of the
-# comparison and either yq implementation gives the same text
-for lane in build-test build-test-release; do
-  yq -r '.jobs."gerrit-validate".steps[]
-    | select(.id == "validate-grype-policy")
-    | to_entries[] | .key + "=" + (.value | tojson)' \
-    "${workflows}/${lane}.yaml" > "${work}/policy-${lane}.json"
-  if [ ! -s "${work}/policy-${lane}.json" ]; then
-    echo "FAIL: no 'validate-grype-policy' step in gerrit-validate of ${lane}"
-    exit 1
-  fi
+grype_action='lfreleng-actions/grype-scan-action'
+grype_pin='f65dca2762823cfc8f376e32fee9baa6f3292696'
+grype_uses="${grype_action}@${grype_pin}"
+validator_name='Validate Grype inputs'
+
+# Each lane as JSON, so jq can read the two steps and alter a copy
+for lane in build-test build-test-release merge; do
+  yq -r 'tojson' "${workflows}/${lane}.yaml" > "${work}/${lane}.json"
 done
-if cmp -s "${work}/policy-build-test.json" \
-  "${work}/policy-build-test-release.json"; then
-  echo "ok: the validate-grype-policy step is identical in both lanes"
-else
-  echo "FAIL: the validate-grype-policy step differs between the lanes"
-  diff "${work}/policy-build-test.json" \
-    "${work}/policy-build-test-release.json" | sed 's/^/  | /' || true
-  failures=$((failures + 1))
+
+# The contract between the validator and the scan, as a jq program
+# over a workflow: it prints one line per breach and nothing when the
+# workflow keeps it. Lookups by name fail when they match more than
+# one step, and the validator's with: block is derived from the
+# scan's, so an input added to the scan and not to the validator is a
+# breach. $uses is the pin both must run; $required the inputs the
+# scan must pass as one grype_* input of the lane, so the comparison
+# cannot pass vacuously; $ecosystems is the one grype_* input a run:
+# step may still read, or empty.
+cat > "${work}/contract.jq" <<'JQ'
+def policy_expression:
+  type == "string" and test("^\\$\\{\\{ inputs\\.grype_[a-z_]+ \\}\\}$");
+def reads_grype_inputs:
+  [((.env // {}) | tostring), (.run // "")] | join(" ")
+  | [match("inputs\\.grype_[a-z_]+"; "g").string] | unique;
+(.jobs."gerrit-validate".steps // []) as $steps
+| [$steps[] | select(.name == $name)] as $validators
+| [(.jobs.grype.steps // [])[] | select(.id == "grype-audit")] as $scans
+| if ($validators | length) != 1 then
+    "expected one '\($name)' step in gerrit-validate, found \($validators | length)"
+  elif ($scans | length) != 1 then
+    "expected one grype-audit step in grype, found \($scans | length)"
+  else
+    $validators[0] as $validator
+    | $scans[0] as $scan
+    | (($scan.with // {}) | with_entries(select(.value | policy_expression)))
+      as $policy
+    | ({"validate-only": "true"} + $policy) as $expected
+    | ($validator.with // {}) as $passed
+    | (
+      ($required - ($policy | keys)) as $missing
+      | if ($missing | length) > 0 then
+          "the scan does not pass \($missing | join(", ")) as the lane's own input"
+        else empty end
+    ),
+    (if $validator.uses != $uses then
+        "the validator runs \($validator.uses | tojson), not \($uses)"
+      else empty end),
+    (if $scan.uses != $uses then
+        "the scan runs \($scan.uses | tojson), not \($uses)"
+      else empty end),
+    (if $passed."validate-only" != "true" then
+        "validate-only is \($passed."validate-only" | tojson), not the string \"true\""
+      else empty end),
+    (if $validator.run != null then "the validator has a run: script"
+      else empty end),
+    (if $validator.if != null then "the validator has a condition"
+      else empty end),
+    (($expected | keys[]) as $input
+      | if $passed[$input] != $expected[$input] then
+          "the validator passes \($input) as \($passed[$input] | tojson), the scan as \($expected[$input] | tojson)"
+        else empty end),
+    (($passed | keys[]) as $input
+      | if ($expected | has($input)) then empty
+        else "the validator passes \($input), which the scan does not pass as the lane's own input"
+        end),
+    ([$steps[] | select(.run != null) | reads_grype_inputs[]
+      | select(. != "inputs.grype_\($ecosystems)")] as $shell
+      | if ($shell | length) > 0 then
+          "a run: step still reads \($shell | join(", "))"
+        else empty end)
+  end
+JQ
+
+# contract LANE_JSON REQUIRED ECOSYSTEMS: the breaches, one per line,
+# of a workflow given as JSON; REQUIRED is a JSON array of the inputs
+# the scan must pass as the lane's own, ECOSYSTEMS the grype_* input a
+# shell step may still read, or empty
+contract() {
+  jq -r --arg name "${validator_name}" --arg uses "${grype_uses}" \
+    --argjson required "$2" --arg ecosystems "$3" \
+    -f "${work}/contract.jq" "$1"
+}
+
+# expect_contract DESCRIPTION LANE_JSON REQUIRED ECOSYSTEMS OUTCOME:
+# OUTCOME is 'kept' or 'breached'
+expect_contract() {
+  local breaches
+  breaches=$(contract "$2" "$3" "$4")
+  if { [ "$5" = 'kept' ] && [ -z "${breaches}" ]; } ||
+    { [ "$5" = 'breached' ] && [ -n "${breaches}" ]; }; then
+    echo "ok: contract: $1"
+  else
+    echo "FAIL: contract: $1 (expected ${5}, got '${breaches:-no breach}')"
+    failures=$((failures + 1))
+  fi
+}
+
+# The inputs each lane's scan passes as its own, which the validator
+# must mirror; the window and the gate are the verify lanes' own
+scan_inputs='["fail-on", "only-fixed", "dependency-policy",
+  "transitive-fail-on", "cache-db", "bypass-repository"]'
+verify_inputs=$(jq -c '. + ["remediation-window-days",
+  "remediation-window-start"]' <<< "${scan_inputs}")
+gate_inputs=$(jq -c '. + ["gate-when"]' <<< "${verify_inputs}")
+merge_inputs=$(jq -c '.' <<< "${scan_inputs}")
+
+expect_contract 'build-test validates through the action' \
+  "${work}/build-test.json" "${gate_inputs}" dependency_ecosystems kept
+expect_contract 'build-test-release validates through the action' \
+  "${work}/build-test-release.json" "${verify_inputs}" '' kept
+expect_contract 'merge validates through the action' \
+  "${work}/merge.json" "${merge_inputs}" '' kept
+
+# The validator passes no scan target: validate-only needs neither
+# and rejects both. The equality above implies it; this names it.
+for lane in build-test build-test-release merge; do
+  for input in sbom target; do
+    check "${lane}: the validator passes no ${input}" \
+      "$(jq -r --arg name "${validator_name}" --arg input "${input}" \
+        '.jobs."gerrit-validate".steps[] | select(.name == $name)
+          | .with[$input] // "absent"' "${work}/${lane}.json")" absent
+  done
+done
+
+# Every grype-scan-action reference in a lane is the one pinned line,
+# twice, with its version comment, which the YAML parser drops
+for lane in build-test build-test-release merge; do
+  workflow="${workflows}/${lane}.yaml"
+  check "${lane}: grype-scan-action appears at the pin twice" \
+    "$(grep -cE "uses: ${grype_uses}[[:space:]]+# v0\.6\.2$" "${workflow}")" 2
+  check "${lane}: grype-scan-action appears at no other reference" \
+    "$(grep -c "${grype_action}@" "${workflow}")" 2
+done
+
+# mutate LANE_JSON FILTER: a copy of a lane's JSON with a jq filter
+# applied, in ${work}/mutated.json; the filter may name the validator
+# and the scan as 'validator' and 'scan'
+mutate() {
+  jq --arg name "${validator_name}" \
+    'def validator: .jobs."gerrit-validate".steps[] | select(.name == $name);
+    def scan: .jobs.grype.steps[] | select(.id == "grype-audit");
+    '"$2" "$1" > "${work}/mutated.json"
+}
+
+# breach DESCRIPTION LANE FILTER: the lane mutated by FILTER breaches
+# the contract
+breach() {
+  local required ecosystems
+  case "$2" in
+    build-test) required="${gate_inputs}" ecosystems=dependency_ecosystems ;;
+    build-test-release) required="${verify_inputs}" ecosystems='' ;;
+    merge) required="${merge_inputs}" ecosystems='' ;;
+  esac
+  mutate "${work}/$2.json" "$3"
+  expect_contract "$2: $1" "${work}/mutated.json" "${required}" \
+    "${ecosystems}" breached
+}
+
+# The workflows as they stand, run through the same path, keep it
+for lane in build-test build-test-release merge; do
+  mutate "${work}/${lane}.json" '.'
+  case "${lane}" in
+    build-test) required="${gate_inputs}" ecosystems=dependency_ecosystems ;;
+    *) required="${verify_inputs}" ecosystems='' ;;
+  esac
+  [ "${lane}" = merge ] && required="${merge_inputs}"
+  expect_contract "${lane}: an unaltered copy keeps the contract" \
+    "${work}/mutated.json" "${required}" "${ecosystems}" kept
+done
+
+# Each breach of the contract fails the check
+# shellcheck disable=SC2016  # literal workflow expressions in jq filters
+{
+  breach 'an expression that differs from the scan' build-test \
+    '(validator | .with."fail-on") = "${{ inputs.grype_fail_on || inputs.grype_fail_on }}"'
+  breach 'a trailing space in an expression' build-test \
+    '(validator | .with."gate-when") = "${{ inputs.grype_gate_when }} "'
+  breach 'a scan input the validator omits' build-test \
+    '(validator | .with) |= del(."cache-db")'
+  breach 'an input added to the scan alone' build-test \
+    '(scan | .with."declared-source") = "${{ inputs.grype_declared_source }}"'
+  breach 'a validator without validate-only' build-test \
+    '(validator | .with) |= del(."validate-only")'
+  breach 'validate-only as a YAML boolean' build-test \
+    '(validator | .with."validate-only") = true'
+  breach 'validate-only false' build-test \
+    '(validator | .with."validate-only") = "false"'
+  breach 'a validator passing an SBOM' build-test \
+    '(validator | .with.sbom) = "sbom-cyclonedx-*.json"'
+  breach 'a validator passing a target' build-test \
+    '(validator | .with.target) = "dir:."'
+  breach 'a validator passing the scan token' build-test \
+    '(validator | .with."github-token") = "${{ secrets.GITHUB_TOKEN }}"'
+  breach 'a validator at another pin' build-test \
+    '(validator | .uses) = "lfreleng-actions/grype-scan-action@5c81b23afb2ea771b2d247807a12d90783328675"'
+  breach 'a scan at another pin' build-test \
+    '(scan | .uses) = "lfreleng-actions/grype-scan-action@5c81b23afb2ea771b2d247807a12d90783328675"'
+  breach 'a floating reference' build-test \
+    '(validator | .uses) = "lfreleng-actions/grype-scan-action@v0.6.2"'
+  breach 'a conditional validator' build-test \
+    '(validator | .if) = "inputs.grype_enabled"'
+  breach 'a scan that drops a required input' build-test \
+    '(scan | .with) |= del(."gate-when")'
+  breach 'a scan passing a required input as a literal' build-test \
+    '(scan | .with."gate-when") = "always"'
+  breach 'two validators' build-test \
+    '.jobs."gerrit-validate".steps += [validator]'
+  breach 'no validator' build-test \
+    '.jobs."gerrit-validate".steps |= map(select(.name != $name))'
+  breach 'a shell step reading a Grype input' build-test \
+    '.jobs."gerrit-validate".steps += [{name: "Validate Grype gate inputs",
+      shell: "bash", env: {GRYPE_GATE_WHEN: "${{ inputs.grype_gate_when }}"},
+      run: "test -n \"${GRYPE_GATE_WHEN}\""}]'
+  breach 'a shell step inlining a Grype input' build-test \
+    '.jobs."gerrit-validate".steps += [{name: "Validate Grype fail-on",
+      shell: "bash", run: "test -n \"${{ inputs.grype_fail_on }}\""}]'
+  breach 'a window input the validator omits' build-test-release \
+    '(validator | .with) |= del(."remediation-window-start")'
+  breach 'an ecosystems step in a lane without the input' merge \
+    '.jobs."gerrit-validate".steps += [{name: "Validate Grype ecosystems",
+      shell: "bash", env: {E: "${{ inputs.grype_dependency_ecosystems }}"},
+      run: "test -n \"${E}\""}]'
+}
+
+# --- gerrit-validate: the verify lane's ecosystems step --------------------
+
+# grype_dependency_ecosystems belongs to repository-metadata-action,
+# not grype-scan-action, so it keeps a shell check that reads that
+# input alone; the release lane has no such input and no such step
+# shellcheck disable=SC2016  # literal workflow expressions
+check 'build-test: the ecosystems step reads grype_dependency_ecosystems alone' \
+  "$(jq -r '.jobs."gerrit-validate".steps[]
+    | select(.id == "validate-grype-ecosystems") | .env | to_entries
+    | map("\(.key)=\(.value)") | join(" ")' "${work}/build-test.json")" \
+  'GRYPE_DEPENDENCY_ECOSYSTEMS=${{ inputs.grype_dependency_ecosystems }}'
+check 'build-test: the ecosystems step runs on every call' \
+  "$(step_field "${verify}" gerrit-validate validate-grype-ecosystems if)" null
+check 'build-test-release: no ecosystems step' \
+  "$(step_field "${release}" gerrit-validate validate-grype-ecosystems name)" ''
+check 'merge: no ecosystems step' \
+  "$(step_field "${workflows}/merge.yaml" gerrit-validate \
+    validate-grype-ecosystems name)" ''
+
+yq -r '.jobs."gerrit-validate".steps[]
+  | select(.id == "validate-grype-ecosystems") | .run' "${verify}" \
+  > "${work}/ecosystems.sh"
+if [ ! -s "${work}/ecosystems.sh" ]; then
+  echo "FAIL: no 'validate-grype-ecosystems' step in gerrit-validate" \
+    "of build-test"
+  exit 1
 fi
-sed -n 's/^run=//p' "${work}/policy-build-test.json" | jq -r '.' \
-  > "${work}/policy.sh"
-for var in GRYPE_DEPENDENCY_POLICY GRYPE_TRANSITIVE_FAIL_ON \
-  GRYPE_ONLY_FIXED GRYPE_REMEDIATION_WINDOW_DAYS \
-  GRYPE_REMEDIATION_WINDOW_START; do
-  if ! grep -q "${var}" "${work}/policy.sh"; then
-    echo "FAIL: the validate-grype-policy step does not read ${var}"
-    exit 1
-  fi
-done
 
 # run_step SCRIPT VAR=VALUE...: runs an extracted step as GitHub runs a
 # 'shell: bash' step, with only the variables named; the exit status
@@ -252,228 +482,100 @@ expect_step() {
   fi
 }
 
-# policy_case DESCRIPTION EXPECTED NAME POLICY TRANSITIVE ONLY_FIXED
-# DAYS START
-policy_case() {
-  run_step "${work}/policy.sh" \
-    GRYPE_DEPENDENCY_POLICY="$4" GRYPE_TRANSITIVE_FAIL_ON="$5" \
-    GRYPE_ONLY_FIXED="$6" GRYPE_REMEDIATION_WINDOW_DAYS="$7" \
-    GRYPE_REMEDIATION_WINDOW_START="$8"
-  expect_step "$1" "$2" "$3"
+# ecosystems_case DESCRIPTION EXPECTED ECOSYSTEMS
+ecosystems_case() {
+  run_step "${work}/ecosystems.sh" GRYPE_DEPENDENCY_ECOSYSTEMS="$3"
+  expect_step "$1" "$2" grype_dependency_ecosystems
 }
-policy_case 'the defaults are accepted' ok '' declared critical true '' ''
-for policy in all declared; do
-  policy_case "policy ${policy} is accepted" ok '' "${policy}" critical \
-    true '' ''
-done
-for severity in none negligible low medium high critical; do
-  policy_case "transitive ${severity} is accepted" ok '' declared \
-    "${severity}" true '' ''
-done
-policy_case 'only-fixed false is accepted' ok '' declared critical false '' ''
-policy_case 'a 30-day window is accepted' ok '' declared critical true 30 ''
-policy_case 'a zero-day window is accepted' ok '' declared critical true 0 ''
-policy_case 'a window start is accepted' ok '' declared critical true 30 \
-  2026-01-31
-policy_case 'a misspelt policy fails' error grype_dependency_policy \
-  declare critical true '' ''
-policy_case 'two policies fail' error grype_dependency_policy \
-  'all declared' critical true '' ''
-policy_case 'an empty policy fails' error grype_dependency_policy \
-  '' critical true '' ''
-policy_case 'a capitalised policy fails' error grype_dependency_policy \
-  Declared critical true '' ''
-policy_case 'a capitalised severity fails' error grype_transitive_fail_on \
-  declared Critical true '' ''
-policy_case 'an empty severity fails' error grype_transitive_fail_on \
-  declared '' true '' ''
-policy_case 'two severities fail' error grype_transitive_fail_on \
-  declared 'low medium' true '' ''
-policy_case 'only-fixed yes fails' error grype_only_fixed \
-  declared critical yes '' ''
-policy_case 'an empty only-fixed fails' error grype_only_fixed \
-  declared critical '' '' ''
-policy_case 'a negative window fails' error grype_remediation_window_days \
-  declared critical true -1 ''
-policy_case 'a fractional window fails' error \
-  grype_remediation_window_days declared critical true 1.5 ''
-policy_case 'a worded window fails' error grype_remediation_window_days \
-  declared critical true '30 days' ''
-policy_case 'a slash date fails' error grype_remediation_window_start \
-  declared critical true 30 2026/01/31
-policy_case 'a day-first date fails' error grype_remediation_window_start \
-  declared critical true 30 31-01-2026
-policy_case 'a date the calendar lacks fails' error \
-  grype_remediation_window_start declared critical true 30 2026-02-30
-policy_case 'a date with a time fails' error grype_remediation_window_start \
-  declared critical true 30 '2026-01-31T00:00:00Z'
-policy_case 'a newline cannot forge a command' error \
-  grype_dependency_policy "$(printf 'x\n::warning::forged')" critical \
-  true '' ''
-
-# --- gerrit-validate: the shared scan step --------------------------------
-
-for lane in build-test build-test-release merge; do
-  yq -r '.jobs."gerrit-validate".steps[]
-    | select(.id == "validate-grype-scan")
-    | to_entries[] | .key + "=" + (.value | tojson)' \
-    "${workflows}/${lane}.yaml" > "${work}/scan-${lane}.json"
-  if [ ! -s "${work}/scan-${lane}.json" ]; then
-    echo "FAIL: no 'validate-grype-scan' step in gerrit-validate of ${lane}"
-    exit 1
-  fi
-done
-for lane in build-test-release merge; do
-  if cmp -s "${work}/scan-build-test.json" "${work}/scan-${lane}.json"
-  then
-    echo "ok: the validate-grype-scan step is identical in ${lane}"
-  else
-    echo "FAIL: the validate-grype-scan step differs in ${lane}"
-    diff "${work}/scan-build-test.json" "${work}/scan-${lane}.json" \
-      | sed 's/^/  | /' || true
-    failures=$((failures + 1))
-  fi
-done
-sed -n 's/^run=//p' "${work}/scan-build-test.json" | jq -r '.' \
-  > "${work}/scan.sh"
-for var in GRYPE_FAIL_ON GRYPE_CACHE_DB GRYPE_BYPASS_REPOSITORY; do
-  if ! grep -q "${var}" "${work}/scan.sh"; then
-    echo "FAIL: the validate-grype-scan step does not read ${var}"
-    exit 1
-  fi
-done
-
-# scan_case DESCRIPTION EXPECTED NAME FAIL_ON CACHE_DB BYPASS_REPOSITORY
-scan_case() {
-  run_step "${work}/scan.sh" GRYPE_FAIL_ON="$4" GRYPE_CACHE_DB="$5" \
-    GRYPE_BYPASS_REPOSITORY="$6"
-  expect_step "$1" "$2" "$3"
-}
-scan_case 'the scan defaults are accepted' ok '' medium true ''
-for severity in negligible low medium high critical none; do
-  scan_case "fail-on ${severity} is accepted" ok '' "${severity}" true ''
-done
-for mode in true false restore-only ' TRUE ' Restore-Only; do
-  scan_case "cache-db '${mode}' is accepted" ok '' medium "${mode}" ''
-done
-for repository in octo/bypass Octo-Org/bypass.list my_org/by-pass_1; do
-  scan_case "bypass repository ${repository} is accepted" ok '' medium \
-    true "${repository}"
-done
-scan_case 'a misspelt fail-on fails' error grype_fail_on mediun true ''
-scan_case 'a capitalised fail-on fails' error grype_fail_on High true ''
-scan_case 'an empty fail-on fails' error grype_fail_on '' true ''
-scan_case 'two fail-on severities fail' error grype_fail_on 'low high' \
-  true ''
-scan_case 'a misspelt cache-db fails' error grype_cache_db medium \
-  restore_only ''
-scan_case 'an empty cache-db fails' error grype_cache_db medium '' ''
-scan_case 'cache-db yes fails' error grype_cache_db medium yes ''
-scan_case 'a bare repository name fails' error grype_bypass_repository \
-  medium true bypass
-scan_case 'a three-part repository fails' error grype_bypass_repository \
-  medium true octo/bypass/extra
-scan_case 'a repository URL fails' error grype_bypass_repository \
-  medium true https://github.com/octo/bypass
-scan_case 'a repository with a space fails' error grype_bypass_repository \
-  medium true 'octo/by pass'
-scan_case 'a repository with a trailing newline fails' error \
-  grype_bypass_repository medium true "$(printf 'octo/bypass\nx')"
-scan_case 'a newline in fail-on cannot forge a command' error \
-  grype_fail_on "$(printf 'x\n::warning::forged')" true ''
-scan_case 'a newline in cache-db cannot forge a command' error \
-  grype_cache_db medium "$(printf 'x\n::warning::forged')" ''
-scan_case 'a newline in the repository cannot forge a command' error \
-  grype_bypass_repository medium true \
-  "$(printf 'octo/x\n::warning::forged')"
-
-# --- gerrit-validate: the merge lane's policy step ------------------------
-
-yq -r '.jobs."gerrit-validate".steps[]
-  | select(.id == "validate-grype-merge-policy") | .run' \
-  "${workflows}/merge.yaml" > "${work}/merge-policy.sh"
-if [ ! -s "${work}/merge-policy.sh" ]; then
-  echo "FAIL: no 'validate-grype-merge-policy' step in gerrit-validate" \
-    "of merge"
-  exit 1
-fi
-for var in GRYPE_DEPENDENCY_POLICY GRYPE_TRANSITIVE_FAIL_ON; do
-  if ! grep -q "${var}" "${work}/merge-policy.sh"; then
-    echo "FAIL: the validate-grype-merge-policy step does not read ${var}"
-    exit 1
-  fi
-done
-
-# merge_policy_case DESCRIPTION EXPECTED NAME POLICY TRANSITIVE
-merge_policy_case() {
-  run_step "${work}/merge-policy.sh" GRYPE_DEPENDENCY_POLICY="$4" \
-    GRYPE_TRANSITIVE_FAIL_ON="$5"
-  expect_step "merge: $1" "$2" "$3"
-}
-merge_policy_case 'the defaults are accepted' ok '' all none
-merge_policy_case 'policy declared is accepted' ok '' declared none
-for severity in none negligible low medium high critical; do
-  merge_policy_case "transitive ${severity} is accepted" ok '' all \
-    "${severity}"
-done
-merge_policy_case 'a misspelt policy fails' error grype_dependency_policy \
-  declare none
-merge_policy_case 'an empty policy fails' error grype_dependency_policy \
-  '' none
-merge_policy_case 'a capitalised severity fails' error \
-  grype_transitive_fail_on all Critical
-merge_policy_case 'an empty severity fails' error \
-  grype_transitive_fail_on all ''
-merge_policy_case 'a newline cannot forge a command' error \
-  grype_transitive_fail_on all "$(printf 'x\n::warning::forged')"
-
-# --- gerrit-validate: the verify lane's gate step --------------------------
-
-yq -r '.jobs."gerrit-validate".steps[]
-  | select(.id == "validate-grype-gate") | .run' "${verify}" \
-  > "${work}/gate.sh"
-if [ ! -s "${work}/gate.sh" ]; then
-  echo "FAIL: no 'validate-grype-gate' step in gerrit-validate of build-test"
-  exit 1
-fi
-for var in GRYPE_GATE_WHEN GRYPE_DEPENDENCY_ECOSYSTEMS; do
-  if ! grep -q "${var}" "${work}/gate.sh"; then
-    echo "FAIL: the validate-grype-gate step does not read ${var}"
-    exit 1
-  fi
-done
-check 'build-test-release: no validate-grype-gate step' \
-  "$(step_field "${release}" gerrit-validate validate-grype-gate name)" ''
-
-# gate_case DESCRIPTION EXPECTED NAME GATE_WHEN ECOSYSTEMS
-gate_case() {
-  run_step "${work}/gate.sh" GRYPE_GATE_WHEN="$4" \
-    GRYPE_DEPENDENCY_ECOSYSTEMS="$5"
-  expect_step "$1" "$2" "$3"
-}
-gate_case 'the defaults are accepted' ok '' always docker
-gate_case 'dependencies-changed is accepted' ok '' dependencies-changed docker
+ecosystems_case 'the default ecosystems are accepted' ok docker
 for ecosystem in node python go maven gradle rust docker; do
-  gate_case "ecosystem ${ecosystem} is accepted" ok '' always "${ecosystem}"
+  ecosystems_case "ecosystem ${ecosystem} is accepted" ok "${ecosystem}"
 done
-gate_case 'a preset union is accepted' ok '' dependencies-changed \
-  docker,python
-gate_case 'a misspelt gate fails' error grype_gate_when \
-  dependency-changed docker
-gate_case 'a capitalised gate fails' error grype_gate_when Always docker
-gate_case 'an empty gate fails' error grype_gate_when '' docker
-gate_case 'an empty ecosystem list fails' error \
-  grype_dependency_ecosystems always ''
-gate_case 'an unknown preset fails' error grype_dependency_ecosystems \
-  always docker,ruby
-gate_case 'a capitalised preset fails' error grype_dependency_ecosystems \
-  always Docker
-gate_case 'a space-separated list fails' error \
-  grype_dependency_ecosystems always 'docker python'
-gate_case 'a trailing comma fails' error grype_dependency_ecosystems \
-  always docker,
-gate_case 'a newline cannot forge a command' error \
-  grype_dependency_ecosystems always "$(printf 'x\n::warning::forged')"
+ecosystems_case 'a preset union is accepted' ok docker,python
+ecosystems_case 'an empty ecosystem list fails' error ''
+ecosystems_case 'an unknown preset fails' error docker,ruby
+ecosystems_case 'a capitalised preset fails' error Docker
+ecosystems_case 'a space-separated list fails' error 'docker python'
+ecosystems_case 'a trailing comma fails' error docker,
+ecosystems_case 'a newline cannot forge a command' error \
+  "$(printf 'x\n::warning::forged')"
+
+# --- A failed validation leaves the build unstarted -----------------------
+
+# Every job in each lane descends from gerrit-validate, and the build
+# needs it directly with no condition, so a rejected input skips the
+# build rather than running it. The testing.yaml job below proves the
+# action rejects such an input at this pin.
+for lane in build-test build-test-release merge; do
+  check "${lane}: build needs gerrit-validate" \
+    "$(jq -r '.jobs.build.needs | index("gerrit-validate") != null' \
+      "${work}/${lane}.json")" true
+  check "${lane}: build runs on success alone" \
+    "$(jq -r '.jobs.build.if // "none"' "${work}/${lane}.json")" none
+  check "${lane}: every other job descends from gerrit-validate" \
+    "$(jq -r '.jobs as $jobs
+      | def needs: ($jobs[.].needs // []) | if type == "string" then [.] else . end;
+      def descends: . as $job
+        | ($job | needs) as $direct
+        | ($direct | index("gerrit-validate") != null)
+          or any($direct[]; descends);
+      [$jobs | keys[] | select(. != "gerrit-validate") | select(descends | not)]
+      | length' "${work}/${lane}.json")" 0
+done
+
+# --- The rejection, proven against the action in testing.yaml -------------
+
+# A reusable workflow call cannot fail without failing the testing run,
+# so testing.yaml runs the validator itself, as the lanes do, with
+# build-test's defaults and a gate-when the action does not know, and
+# a following step requires that step to have failed
+testing="${workflows}/testing.yaml"
+yq -r 'tojson' "${testing}" > "${work}/testing.json"
+reject_job='grype-validate-rejects'
+
+# rejection FILTER: one jq result over testing.yaml; the filter may
+# name the job as 'job' and its validator step as 'reject'
+rejection() {
+  jq -r --arg job "${reject_job}" \
+    'def job: .jobs[$job]; def reject: job.steps[] | select(.id == "reject");
+    '"$1" "${work}/testing.json"
+}
+check 'testing: the rejection job runs no other action' \
+  "$(rejection '[job.steps[] | select(.uses != null) | .uses] | join(" ")')" \
+  "${grype_uses}"
+check 'testing: the rejection job grants no permission' \
+  "$(rejection 'job.permissions | tojson')" '{}'
+check 'testing: the rejected step continues on error' \
+  "$(rejection 'reject | ."continue-on-error"')" true
+check 'testing: the rejected step validates only' \
+  "$(rejection 'reject | .with."validate-only" | tojson')" '"true"'
+# shellcheck disable=SC2016  # literal workflow expressions
+check 'testing: the rejected step passes a gate-when the action does not know' \
+  "$(rejection 'reject | .with."gate-when"
+    | IN("always", "dependencies-changed") or contains("${{")')" false
+# The other inputs are build-test's defaults, as literals, so the
+# rejection is the gate-when's alone and the defaults stay valid
+for input in fail-on:grype_fail_on only-fixed:grype_only_fixed \
+  dependency-policy:grype_dependency_policy \
+  transitive-fail-on:grype_transitive_fail_on \
+  remediation-window-days:grype_remediation_window_days \
+  remediation-window-start:grype_remediation_window_start \
+  cache-db:grype_cache_db bypass-repository:grype_bypass_repository; do
+  check "testing: the rejected step passes build-test's ${input#*:} default" \
+    "$(rejection "reject | .with.\"${input%%:*}\" | tostring")" \
+    "$(input_field "${verify}" "${input#*:}" default)"
+done
+check 'testing: the rejected step passes the inputs build-test validates' \
+  "$(rejection 'reject | .with | keys | join(" ")')" \
+  "$(jq -r --arg name "${validator_name}" \
+    '.jobs."gerrit-validate".steps[] | select(.name == $name)
+      | .with | keys | join(" ")' "${work}/build-test.json")"
+# shellcheck disable=SC2016  # literal workflow expressions
+check 'testing: one step after the rejection reads its outcome and can fail' \
+  "$(rejection 'job.steps | (map(.id == "reject") | index(true)) as $at
+    | [.[$at + 1:][] | select(.run != null and (."continue-on-error" | not))
+      | .env // {} | .[] | select(. == "${{ steps.reject.outcome }}")]
+    | length')" 1
 
 # --- Wiring in the verify lane --------------------------------------------
 

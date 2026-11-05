@@ -670,7 +670,7 @@ window below changes nothing there:
   predate it, and then gates as in an armed run. On an `always` run,
   on a release, and on a change that touched the dependency chain, a
   qualifying finding fails at once, window or not. An empty days
-  input disables the window. The lane rejects a start the calendar
+  input disables the window. The action rejects a start the calendar
   lacks.
 - `grype_dependency_policy` and `grype_transitive_fail_on` default
   to `declared` and `critical` in these workflows; the action's own
@@ -700,9 +700,17 @@ window below changes nothing there:
 (`false`, `all` and `none`), so its verdict stays the one it gave
 before it had them; it has no `grype_gate_when` and always gates.
 
-`gerrit-validate` checks each of these inputs, and `grype_fail_on`
-and `grype_cache_db` in every lane, before any job runs and fails
-with an annotation naming the input.
+`gerrit-validate` validates each of these inputs, and `grype_fail_on`,
+`grype_cache_db` and `grype_bypass_repository` in every lane, before
+any job runs: it calls grype-scan-action at the scan's pin, asking
+it to check its inputs and stop, with the same inputs the scan
+receives, less the SBOM, so the rules are the action's own and cannot
+drift from what the scan accepts. The action installs no Grype, fetches no
+database and makes no network request in that mode; a bad value
+fails the job with an annotation naming the input.
+`grype_dependency_ecosystems` is an input of
+repository-metadata-action, not of the scan, so `gerrit-validate`
+checks it in a shell step of its own.
 
 #### Release-file checks
 
@@ -1159,11 +1167,20 @@ A further `build-test.yaml` call sets `grype_gate_when:
 stay active with the reason that the dependency-change signal was
 unavailable, which a fixture checked out at a tag guarantees; that
 proves the verdict travelled from `repository-metadata` to the scan.
+A job runs the lanes' validator itself, grype-scan-action at their
+pin in its check-and-stop mode with `build-test.yaml`'s defaults and
+a `gate-when` the action does not know, and requires the step to fail:
+a call to a lane with a bad input would fail the run, so this proves
+the rejection without one.
 `tests/test_dependency_change.sh`, run as
 `bash tests/test_dependency_change.sh`, checks each lane declares
 its Grype inputs with their defaults and passes each to the scan,
-runs the `gerrit-validate` steps that check them against valid and
-invalid values, checks the detection wiring in `repository-metadata`
+checks the `gerrit-validate` step that validates them through
+grype-scan-action against the scan it mirrors (one pin, the same
+expression for every input the scan passes, the check-and-stop mode
+on, and each breach of that on a copy of the workflow failing), runs the
+ecosystems check against valid and invalid values, checks the
+detection wiring in `repository-metadata`
 and the verdict's path to the scan in `build-test.yaml`, runs the
 step that resolves the detection scope (the `docker` preset joined
 to the caller's, custom Dockerfile names turned into patterns, the
