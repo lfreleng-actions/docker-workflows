@@ -589,85 +589,25 @@ jobs:
           fi
           echo "Gerrit inputs validated ✅"
 
-      # Every lane's scan inputs reach grype-scan-action only after the
-      # build and SBOM jobs have run, so a bad value fails here first.
-      # build-test.yaml, build-test-release.yaml and merge.yaml carry
-      # this step verbatim, and tests/test_dependency_change.sh checks
-      # the three stay identical.
-      - name: 'Validate Grype scan inputs'
-        id: validate-grype-scan
-        shell: bash
-        env:
-          GRYPE_FAIL_ON: ${{ inputs.grype_fail_on }}
-          GRYPE_CACHE_DB: ${{ inputs.grype_cache_db }}
-          GRYPE_BYPASS_REPOSITORY: ${{ inputs.grype_bypass_repository }}
-        run: |
-          # The same checks grype-scan-action makes on fail-on,
-          # cache-db and bypass-repository
-          errors=0
-          # reject NAME VALUE: records an invalid input
-          reject() {
-            # A newline in the value could forge a workflow command
-            echo "::error::Invalid $1 input:" \
-              "$(printf '%s' "$2" | tr -d '\r\n')"
-            errors=1
-          }
-          case "${GRYPE_FAIL_ON}" in
-            negligible|low|medium|high|critical|none) ;;
-            *) reject grype_fail_on "${GRYPE_FAIL_ON}" ;;
-          esac
-          # The action trims and case-folds cache-db, so ' TRUE '
-          # keeps working; this check does the same
-          cache_db="${GRYPE_CACHE_DB#"${GRYPE_CACHE_DB%%[![:space:]]*}"}"
-          cache_db="${cache_db%"${cache_db##*[![:space:]]}"}"
-          cache_db=$(printf '%s' "${cache_db}" | tr '[:upper:]' '[:lower:]')
-          case "${cache_db}" in
-            true|false|restore-only) ;;
-            *) reject grype_cache_db "${GRYPE_CACHE_DB}" ;;
-          esac
-          # Empty reads the calling repository
-          repository='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
-          if [ -n "${GRYPE_BYPASS_REPOSITORY}" ] &&
-            [[ ! "${GRYPE_BYPASS_REPOSITORY}" =~ ${repository} ]]; then
-            reject grype_bypass_repository "${GRYPE_BYPASS_REPOSITORY}"
-          fi
-          if [ "${errors}" -ne 0 ]; then
-            exit 1
-          fi
-          echo "Grype scan inputs validated ✅"
-
-      # The merge lane's policy inputs reach grype-scan-action only
-      # after the build and SBOM jobs have run, so a bad value fails
-      # here first. The verify lanes check theirs, with the
-      # remediation window this lane lacks, in validate-grype-policy.
-      - name: 'Validate Grype policy inputs'
-        id: validate-grype-merge-policy
-        shell: bash
-        env:
-          GRYPE_DEPENDENCY_POLICY: ${{ inputs.grype_dependency_policy }}
-          GRYPE_TRANSITIVE_FAIL_ON: ${{ inputs.grype_transitive_fail_on }}
-        run: |
-          # Each input takes a closed set of words
-          errors=0
-          # reject NAME VALUE: records an invalid input
-          reject() {
-            # A newline in the value could forge a workflow command
-            echo "::error::Invalid $1 input:" \
-              "$(printf '%s' "$2" | tr -d '\r\n')"
-            errors=1
-          }
-          case "${GRYPE_DEPENDENCY_POLICY}" in
-            all|declared) ;;
-            *) reject grype_dependency_policy "${GRYPE_DEPENDENCY_POLICY}" ;;
-          esac
-          case "${GRYPE_TRANSITIVE_FAIL_ON}" in
-            none|negligible|low|medium|high|critical) ;;
-            *) reject grype_transitive_fail_on "${GRYPE_TRANSITIVE_FAIL_ON}" ;;
-          esac
-          if [ "${errors}" -ne 0 ]; then
-            exit 1
-          fi
-          echo "Grype policy inputs validated ✅"
+      # The Grype inputs reach grype-scan-action only after the build
+      # and SBOM jobs have run, so a bad value fails here first. The
+      # action checks them itself in validate-only mode, with the same
+      # with: block the scan gets, less the SBOM: it installs no Grype,
+      # fetches no database, scans nothing and makes no network
+      # request. Each input the scan passes as one grype_* input
+      # appears here with the same expression, at the same pin, and
+      # tests/test_dependency_change.sh checks the two stay in step.
+      - name: 'Validate Grype inputs'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/grype-scan-action@f65dca2762823cfc8f376e32fee9baa6f3292696  # v0.6.2
+        with:
+          validate-only: 'true'
+          fail-on: ${{ inputs.grype_fail_on }}
+          only-fixed: ${{ inputs.grype_only_fixed }}
+          dependency-policy: ${{ inputs.grype_dependency_policy }}
+          transitive-fail-on: ${{ inputs.grype_transitive_fail_on }}
+          cache-db: ${{ inputs.grype_cache_db }}
+          bypass-repository: ${{ inputs.grype_bypass_repository }}
 
       # Resolved once here, the root every job descends from; each
       # job that names an image reads this job's namespace output
@@ -1693,7 +1633,7 @@ jobs:
       - name: 'Grype audit SBOMs'
         id: grype-audit
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/grype-scan-action@5c81b23afb2ea771b2d247807a12d90783328675  # v0.5.0
+        uses: lfreleng-actions/grype-scan-action@f65dca2762823cfc8f376e32fee9baa6f3292696  # v0.6.2
         with:
           sbom: 'sbom-cyclonedx-*.json'
           fail-on: ${{ inputs.grype_fail_on }}
