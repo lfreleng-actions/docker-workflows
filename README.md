@@ -1194,8 +1194,14 @@ the call grants nothing new but proves the lane forwards each
 input. `tests/test-harden-runner-inputs.sh`, run as
 `bash tests/test-harden-runner-inputs.sh` and by a prek hook, checks
 that every reusable workflow exposes the five `harden_runner_*`
-inputs and passes each to every harden-runner-block-action step,
-then mutates a copy of one workflow and expects each mutant to fail.
+inputs and passes each to every harden-runner-block-action step.
+Every block-action step in the repository must pin the same commit
+SHA, with the same `# vX.Y.Z` comment, at or above v0.15.0. Each
+`harden_runner_*` description must be the reference wording,
+optionally followed by `. <note>` about the workflow. The script then
+mutates a copy of one workflow and expects each mutant to fail, and
+expects positive controls, such as a description with a note, to
+pass.
 
 Both publish lanes are also self-tested, under `dry_run`. Neither
 publishes: they build, audit and test the fixture images, then
