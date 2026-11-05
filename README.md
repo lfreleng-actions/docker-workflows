@@ -516,11 +516,13 @@ same path.
 | `grype_cache_db`                       | string  | `'true'`     | Grype database cache mode; parallel callers need a single writer                                   |
 | `grype_gate_when`                      | string  | `'always'`   | `always` or `dependencies-changed`; see [Dependency-change gating](#dependency-change-gating)      |
 | `grype_dependency_ecosystems`          | string  | `'docker'`   | Presets the gate watches besides `docker` (csv); see Dependency-change gating                      |
+| `grype_dependency_patterns`            | string  | `''`         | Extra patterns, one per line, added to the presets; see Dependency-change gating                   |
 | `grype_dependency_policy`              | string  | `'declared'` | `declared` or `all`: which findings count against `grype_fail_on`; see Dependency-change gating    |
 | `grype_transitive_fail_on`             | string  | `'critical'` | Inherited-package bar under `declared`; no effect on image SBOMs, see Dependency-change gating     |
 | `grype_only_fixed`                     | boolean | `true`       | Count findings that have a fix alone; see Dependency-change gating                                 |
 | `grype_remediation_window_days`        | string  | `''`         | Grace days for a withheld gate under `dependencies-changed` alone; empty disables the window       |
 | `grype_remediation_window_start`       | string  | `''`         | `YYYY-MM-DD` start of the remediation window for findings that predate it                          |
+| `grype_bypass_repository`              | string  | `''`         | `owner/name` holding approved `BYPASS:` issues; empty reads the calling repository                 |
 | `snapshot_registry`                    | string  | `''`         | merge.yaml's snapshot registry; enables release-file checks                                        |
 | `release_registry`                     | string  | `''`         | merge.yaml's release registry; enables release-file checks                                         |
 | `registry_user`                        | string  | `''`         | Registry username override; empty derives from the repository name                                 |
@@ -641,6 +643,18 @@ sees from that fixture: one under it, or one directly in
 `tests/fixtures`, `tests` or the repository root, where the action
 anchors its presets as well.
 
+`grype_dependency_patterns` adds files no preset covers, one pattern
+per line: a file that pins a base image tag, say. The lane appends
+them to the patterns the step derives from `images`, and they follow
+dependency-change-action's
+<!-- markdownlint-disable-next-line MD013 -->
+[pattern grammar](https://github.com/lfreleng-actions/dependency-change-action/blob/257928b15e4e6a5cc5a888435be59b058055c4e1/README.md#patterns),
+matched against the detection scope: `path_prefix`, or the
+repository root where the lane widens the scope. The detector checks
+them, not `gerrit-validate`, so a pattern it rejects fails the
+`repository-metadata` job, which runs beside the build, and the scan
+then gates.
+
 The remaining inputs pass through to grype-scan-action. Both verify
 lanes accept them, but a release always gates, so the remediation
 window below changes nothing there:
@@ -674,8 +688,21 @@ window below changes nothing there:
   outright; the relief for an image comes from `grype_gate_when`,
   not from the policy.
 
-`gerrit-validate` checks each of these inputs before any job runs
-and fails with an annotation naming the input.
+- `grype_bypass_repository`, in every lane, names the `owner/name`
+  repository whose labelled `BYPASS:` issues the scan accepts; empty,
+  the default, reads the calling repository. Repositories that name
+  the same one share its bypass list. The scan reads it with
+  the workflow's `GITHUB_TOKEN`, and a list it cannot read leaves no
+  bypass, so the gate stays closed.
+
+`merge.yaml` takes `grype_only_fixed`, `grype_dependency_policy` and
+`grype_transitive_fail_on` too, at grype-scan-action's own defaults
+(`false`, `all` and `none`), so its verdict stays the one it gave
+before it had them; it has no `grype_gate_when` and always gates.
+
+`gerrit-validate` checks each of these inputs, and `grype_fail_on`
+and `grype_cache_db` in every lane, before any job runs and fails
+with an annotation naming the input.
 
 #### Release-file checks
 
@@ -726,12 +753,13 @@ Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
 `lint_enabled`/`lint_permit_fail` (and its deprecated
 `audit_permit_fail` alias), `sbom_enabled`,
 `grype_enabled`/`grype_fail_on`/`grype_permit_fail`/`grype_cache_db`,
-and the five Grype policy inputs `grype_dependency_policy`,
-`grype_transitive_fail_on`, `grype_only_fixed`,
-`grype_remediation_window_days` and `grype_remediation_window_start`
-(see [Dependency-change gating](#dependency-change-gating)); a
-release always gates, so `grype_gate_when` and
-`grype_dependency_ecosystems` do not apply):
+`grype_bypass_repository`, and the five Grype policy inputs
+`grype_dependency_policy`, `grype_transitive_fail_on`,
+`grype_only_fixed`, `grype_remediation_window_days` and
+`grype_remediation_window_start` (see
+[Dependency-change gating](#dependency-change-gating)); a release
+always gates, so `grype_gate_when`, `grype_dependency_ecosystems` and
+`grype_dependency_patterns` do not apply):
 
 <!-- markdownlint-disable MD013 -->
 
@@ -808,19 +836,23 @@ the five `harden_runner_*` inputs (see
 the `gerrit_*` inputs, `test_command`/`test_permit_fail`,
 `lint_enabled`/`lint_permit_fail` (and its deprecated
 `audit_permit_fail` alias), `sbom_enabled`,
-`grype_enabled`/`grype_fail_on`/`grype_permit_fail`/`grype_cache_db`):
+`grype_enabled`/`grype_fail_on`/`grype_permit_fail`/`grype_cache_db`
+and `grype_bypass_repository`):
 
 <!-- markdownlint-disable MD013 -->
 
-| Input               | Type    | Default     | Description                                                                             |
-| ------------------- | ------- | ----------- | --------------------------------------------------------------------------------------- |
-| `snapshot_registry` | string  | (none)      | Required. Snapshot/staging registry, `host[:port][/path]`, e.g. `nexus3.onap.org:10003` |
-| `release_registry`  | string  | (none)      | Required. Release registry, `host[:port][/path]`, e.g. `nexus3.onap.org:10002`          |
-| `registry_user`     | string  | `''`        | Registry username override; empty derives from the repository name                      |
-| `nexus_user`        | string  | `''`        | Deprecated alias for `registry_user`                                                    |
-| `push_latest`       | boolean | `false`     | Move each promoted image's `latest` too, as `latest_policy` allows                      |
-| `latest_policy`     | string  | `'highest'` | `highest` or `always`; see [Moving `latest`](#moving-latest)                            |
-| `dry_run`           | boolean | `false`     | Exercise the publish/promotion lanes without credentials or pushes                      |
+| Input                      | Type    | Default     | Description                                                                             |
+| -------------------------- | ------- | ----------- | --------------------------------------------------------------------------------------- |
+| `snapshot_registry`        | string  | (none)      | Required. Snapshot/staging registry, `host[:port][/path]`, e.g. `nexus3.onap.org:10003` |
+| `release_registry`         | string  | (none)      | Required. Release registry, `host[:port][/path]`, e.g. `nexus3.onap.org:10002`          |
+| `registry_user`            | string  | `''`        | Registry username override; empty derives from the repository name                      |
+| `nexus_user`               | string  | `''`        | Deprecated alias for `registry_user`                                                    |
+| `push_latest`              | boolean | `false`     | Move each promoted image's `latest` too, as `latest_policy` allows                      |
+| `latest_policy`            | string  | `'highest'` | `highest` or `always`; see [Moving `latest`](#moving-latest)                            |
+| `dry_run`                  | boolean | `false`     | Exercise the publish/promotion lanes without credentials or pushes                      |
+| `grype_only_fixed`         | boolean | `false`     | Count findings that have a fix alone; see Dependency-change gating                      |
+| `grype_dependency_policy`  | string  | `'all'`     | `all` or `declared`: which findings count against `grype_fail_on`                       |
+| `grype_transitive_fail_on` | string  | `'none'`    | Inherited-package bar under `declared`; no effect on image SBOMs                        |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1128,8 +1160,8 @@ stay active with the reason that the dependency-change signal was
 unavailable, which a fixture checked out at a tag guarantees; that
 proves the verdict travelled from `repository-metadata` to the scan.
 `tests/test_dependency_change.sh`, run as
-`bash tests/test_dependency_change.sh`, checks both verify lanes
-declare the Grype policy inputs alike and pass each to the scan,
+`bash tests/test_dependency_change.sh`, checks each lane declares
+its Grype inputs with their defaults and passes each to the scan,
 runs the `gerrit-validate` steps that check them against valid and
 invalid values, checks the detection wiring in `repository-metadata`
 and the verdict's path to the scan in `build-test.yaml`, runs the
@@ -1141,7 +1173,8 @@ skipped for a name no pattern can express or a `build_command`), runs
 the action at its pinned commit against a scratch repository to show a
 Dockerfile with a custom name, in or beside `path_prefix`, goes
 unnoticed until those
-patterns reach it, and runs the resolved self-test's verdict check
+patterns reach it and that a caller's `grype_dependency_patterns`
+count after them, and runs the resolved self-test's verdict check
 against the action to show both read the same recipes.
 
 `build_artifacts` runs end to end too: one job uploads

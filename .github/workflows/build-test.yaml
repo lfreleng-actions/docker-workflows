@@ -279,6 +279,18 @@ on:
         required: false
         type: string
         default: 'docker'
+      grype_dependency_patterns:
+        description: >-
+          Extra dependency-change patterns, one per line, added to the
+          presets under grype_gate_when 'dependencies-changed', for a
+          file no preset covers. A pattern follows
+          dependency-change-action's grammar and matches inside the
+          detection scope: path_prefix, or the repository root where
+          the lane widens it. A pattern the detector rejects fails the
+          repository-metadata job.
+        required: false
+        type: string
+        default: ''
       grype_dependency_policy:
         description: >-
           Which Grype findings gate: 'all', or 'declared' to gate only
@@ -318,6 +330,16 @@ on:
           Optional YYYY-MM-DD floor for the remediation window clock,
           which starts at the later of the fix date and this date.
           Empty (the default) starts it at the fix date.
+        required: false
+        type: string
+        default: ''
+      grype_bypass_repository:
+        description: >-
+          Repository, as owner/name, whose labelled BYPASS: issues the
+          Grype scan accepts. Empty (the default) reads the calling
+          repository; set it to share one bypass list. The scan reads
+          it with the workflow's GITHUB_TOKEN, and a list it cannot
+          read leaves no bypass, so the gate stays closed.
         required: false
         type: string
         default: ''
@@ -565,6 +587,53 @@ jobs:
           fi
           echo "Grype gate: ${GRYPE_GATE_WHEN}," \
             "ecosystems ${GRYPE_DEPENDENCY_ECOSYSTEMS} ✅"
+
+      # Every lane's scan inputs reach grype-scan-action only after the
+      # build and SBOM jobs have run, so a bad value fails here first.
+      # build-test.yaml, build-test-release.yaml and merge.yaml carry
+      # this step verbatim, and tests/test_dependency_change.sh checks
+      # the three stay identical.
+      - name: 'Validate Grype scan inputs'
+        id: validate-grype-scan
+        shell: bash
+        env:
+          GRYPE_FAIL_ON: ${{ inputs.grype_fail_on }}
+          GRYPE_CACHE_DB: ${{ inputs.grype_cache_db }}
+          GRYPE_BYPASS_REPOSITORY: ${{ inputs.grype_bypass_repository }}
+        run: |
+          # The same checks grype-scan-action makes on fail-on,
+          # cache-db and bypass-repository
+          errors=0
+          # reject NAME VALUE: records an invalid input
+          reject() {
+            # A newline in the value could forge a workflow command
+            echo "::error::Invalid $1 input:" \
+              "$(printf '%s' "$2" | tr -d '\r\n')"
+            errors=1
+          }
+          case "${GRYPE_FAIL_ON}" in
+            negligible|low|medium|high|critical|none) ;;
+            *) reject grype_fail_on "${GRYPE_FAIL_ON}" ;;
+          esac
+          # The action trims and case-folds cache-db, so ' TRUE '
+          # keeps working; this check does the same
+          cache_db="${GRYPE_CACHE_DB#"${GRYPE_CACHE_DB%%[![:space:]]*}"}"
+          cache_db="${cache_db%"${cache_db##*[![:space:]]}"}"
+          cache_db=$(printf '%s' "${cache_db}" | tr '[:upper:]' '[:lower:]')
+          case "${cache_db}" in
+            true|false|restore-only) ;;
+            *) reject grype_cache_db "${GRYPE_CACHE_DB}" ;;
+          esac
+          # Empty reads the calling repository
+          repository='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
+          if [ -n "${GRYPE_BYPASS_REPOSITORY}" ] &&
+            [[ ! "${GRYPE_BYPASS_REPOSITORY}" =~ ${repository} ]]; then
+            reject grype_bypass_repository "${GRYPE_BYPASS_REPOSITORY}"
+          fi
+          if [ "${errors}" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Grype scan inputs validated ✅"
 
       # The Grype policy inputs reach grype-scan-action only after the
       # build and SBOM jobs have run, so a bad value fails here first.
@@ -1098,7 +1167,11 @@ jobs:
           gerrit_refspec: ${{ inputs.gerrit_refspec }}
           # yamllint disable-line rule:line-length
           dependency_ecosystems: ${{ steps.dependency-scope.outputs.ecosystems }}
-          dependency_patterns: ${{ steps.dependency-scope.outputs.patterns }}
+          # The resolver's patterns, then the caller's; the detector
+          # skips the blank line either leaves
+          dependency_patterns: |-
+            ${{ steps.dependency-scope.outputs.patterns }}
+            ${{ inputs.grype_dependency_patterns }}
           # yamllint disable-line rule:line-length
           dependency_path_prefix: ${{ steps.dependency-scope.outputs.path_prefix }}
 
@@ -1920,6 +1993,7 @@ jobs:
           artifact-name: grype-scan-results-${{ needs.docker-metadata.outputs.build_id }}
           retention-days: '45'
           cache-db: ${{ inputs.grype_cache_db }}
+          bypass-repository: ${{ inputs.grype_bypass_repository }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # The action's summary gives the gate's reason only when it

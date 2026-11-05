@@ -369,6 +369,16 @@ on:
         required: false
         type: string
         default: ''
+      grype_bypass_repository:
+        description: >-
+          Repository, as owner/name, whose labelled BYPASS: issues the
+          Grype scan accepts. Empty (the default) reads the calling
+          repository; set it to share one bypass list. The scan reads
+          it with the workflow's GITHUB_TOKEN, and a list it cannot
+          read leaves no bypass, so the gate stays closed.
+        required: false
+        type: string
+        default: ''
 
       # --- Runner hardening ---
       harden_runner_egress:
@@ -753,6 +763,53 @@ jobs:
             exit 1
           fi
           echo "Gerrit inputs validated ✅"
+
+      # Every lane's scan inputs reach grype-scan-action only after the
+      # build and SBOM jobs have run, so a bad value fails here first.
+      # build-test.yaml, build-test-release.yaml and merge.yaml carry
+      # this step verbatim, and tests/test_dependency_change.sh checks
+      # the three stay identical.
+      - name: 'Validate Grype scan inputs'
+        id: validate-grype-scan
+        shell: bash
+        env:
+          GRYPE_FAIL_ON: ${{ inputs.grype_fail_on }}
+          GRYPE_CACHE_DB: ${{ inputs.grype_cache_db }}
+          GRYPE_BYPASS_REPOSITORY: ${{ inputs.grype_bypass_repository }}
+        run: |
+          # The same checks grype-scan-action makes on fail-on,
+          # cache-db and bypass-repository
+          errors=0
+          # reject NAME VALUE: records an invalid input
+          reject() {
+            # A newline in the value could forge a workflow command
+            echo "::error::Invalid $1 input:" \
+              "$(printf '%s' "$2" | tr -d '\r\n')"
+            errors=1
+          }
+          case "${GRYPE_FAIL_ON}" in
+            negligible|low|medium|high|critical|none) ;;
+            *) reject grype_fail_on "${GRYPE_FAIL_ON}" ;;
+          esac
+          # The action trims and case-folds cache-db, so ' TRUE '
+          # keeps working; this check does the same
+          cache_db="${GRYPE_CACHE_DB#"${GRYPE_CACHE_DB%%[![:space:]]*}"}"
+          cache_db="${cache_db%"${cache_db##*[![:space:]]}"}"
+          cache_db=$(printf '%s' "${cache_db}" | tr '[:upper:]' '[:lower:]')
+          case "${cache_db}" in
+            true|false|restore-only) ;;
+            *) reject grype_cache_db "${GRYPE_CACHE_DB}" ;;
+          esac
+          # Empty reads the calling repository
+          repository='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
+          if [ -n "${GRYPE_BYPASS_REPOSITORY}" ] &&
+            [[ ! "${GRYPE_BYPASS_REPOSITORY}" =~ ${repository} ]]; then
+            reject grype_bypass_repository "${GRYPE_BYPASS_REPOSITORY}"
+          fi
+          if [ "${errors}" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Grype scan inputs validated ✅"
 
       # The Grype policy inputs reach grype-scan-action only after the
       # build and SBOM jobs have run, so a bad value fails here first.
@@ -2256,6 +2313,7 @@ jobs:
           # yamllint disable-line rule:line-length
           artifact-name: grype-scan-results-${{ needs.docker-metadata.outputs.build_id }}
           cache-db: ${{ inputs.grype_cache_db }}
+          bypass-repository: ${{ inputs.grype_bypass_repository }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
   tests:

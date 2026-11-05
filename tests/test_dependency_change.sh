@@ -148,6 +148,47 @@ check 'build-test-release: grype-audit takes no verdict' \
   "$(step_field "${release}" grype grype-audit \
     'with."dependencies-changed"')" null
 
+# lane_passes LANE NAME TYPE DEFAULT PASSED_AS: one lane declares NAME
+# and hands it to grype-scan-action under its own name
+lane_passes() {
+  local workflow="${workflows}/$1.yaml"
+  check "$1: $2 is a $3" "$(input_field "${workflow}" "$2" type)" "$3"
+  check "$1: $2 defaults to '$4'" \
+    "$(input_field "${workflow}" "$2" default)" "$4"
+  check "$1: grype-audit passes $2 as $5" \
+    "$(step_field "${workflow}" grype grype-audit "with.\"$5\"")" \
+    "\${{ inputs.$2 }}"
+}
+# Every lane: the existing scan inputs keep their defaults, and the
+# bypass repository is new
+for lane in build-test build-test-release merge; do
+  lane_passes "${lane}" grype_fail_on string medium fail-on
+  lane_passes "${lane}" grype_cache_db string true cache-db
+  lane_passes "${lane}" grype_bypass_repository string '' bypass-repository
+done
+# The merge lane's policy inputs default to grype-scan-action's own,
+# so its verdict is the one it gave before they existed
+lane_passes merge grype_only_fixed boolean false only-fixed
+lane_passes merge grype_dependency_policy string all dependency-policy
+lane_passes merge grype_transitive_fail_on string none transitive-fail-on
+for name in grype_gate_when grype_dependency_ecosystems \
+  grype_dependency_patterns grype_remediation_window_days \
+  grype_remediation_window_start; do
+  check "merge: no ${name} input" \
+    "$(input_field "${workflows}/merge.yaml" "${name}" type)" null
+done
+check 'merge: grype-audit sets no gate-when' \
+  "$(step_field "${workflows}/merge.yaml" grype grype-audit \
+    'with."gate-when"')" null
+
+# The verify lane alone takes extra detection patterns
+check 'build-test: grype_dependency_patterns is a string' \
+  "$(input_field "${verify}" grype_dependency_patterns type)" string
+check "build-test: grype_dependency_patterns defaults to ''" \
+  "$(input_field "${verify}" grype_dependency_patterns default)" ''
+check 'build-test-release: no grype_dependency_patterns input' \
+  "$(input_field "${release}" grype_dependency_patterns type)" null
+
 # --- gerrit-validate: the shared policy step ------------------------------
 
 # The step as data: its fields one per line as JSON strings, so the
@@ -270,6 +311,122 @@ policy_case 'a newline cannot forge a command' error \
   grype_dependency_policy "$(printf 'x\n::warning::forged')" critical \
   true '' ''
 
+# --- gerrit-validate: the shared scan step --------------------------------
+
+for lane in build-test build-test-release merge; do
+  yq -r '.jobs."gerrit-validate".steps[]
+    | select(.id == "validate-grype-scan")
+    | to_entries[] | .key + "=" + (.value | tojson)' \
+    "${workflows}/${lane}.yaml" > "${work}/scan-${lane}.json"
+  if [ ! -s "${work}/scan-${lane}.json" ]; then
+    echo "FAIL: no 'validate-grype-scan' step in gerrit-validate of ${lane}"
+    exit 1
+  fi
+done
+for lane in build-test-release merge; do
+  if cmp -s "${work}/scan-build-test.json" "${work}/scan-${lane}.json"
+  then
+    echo "ok: the validate-grype-scan step is identical in ${lane}"
+  else
+    echo "FAIL: the validate-grype-scan step differs in ${lane}"
+    diff "${work}/scan-build-test.json" "${work}/scan-${lane}.json" \
+      | sed 's/^/  | /' || true
+    failures=$((failures + 1))
+  fi
+done
+sed -n 's/^run=//p' "${work}/scan-build-test.json" | jq -r '.' \
+  > "${work}/scan.sh"
+for var in GRYPE_FAIL_ON GRYPE_CACHE_DB GRYPE_BYPASS_REPOSITORY; do
+  if ! grep -q "${var}" "${work}/scan.sh"; then
+    echo "FAIL: the validate-grype-scan step does not read ${var}"
+    exit 1
+  fi
+done
+
+# scan_case DESCRIPTION EXPECTED NAME FAIL_ON CACHE_DB BYPASS_REPOSITORY
+scan_case() {
+  run_step "${work}/scan.sh" GRYPE_FAIL_ON="$4" GRYPE_CACHE_DB="$5" \
+    GRYPE_BYPASS_REPOSITORY="$6"
+  expect_step "$1" "$2" "$3"
+}
+scan_case 'the scan defaults are accepted' ok '' medium true ''
+for severity in negligible low medium high critical none; do
+  scan_case "fail-on ${severity} is accepted" ok '' "${severity}" true ''
+done
+for mode in true false restore-only ' TRUE ' Restore-Only; do
+  scan_case "cache-db '${mode}' is accepted" ok '' medium "${mode}" ''
+done
+for repository in octo/bypass Octo-Org/bypass.list my_org/by-pass_1; do
+  scan_case "bypass repository ${repository} is accepted" ok '' medium \
+    true "${repository}"
+done
+scan_case 'a misspelt fail-on fails' error grype_fail_on mediun true ''
+scan_case 'a capitalised fail-on fails' error grype_fail_on High true ''
+scan_case 'an empty fail-on fails' error grype_fail_on '' true ''
+scan_case 'two fail-on severities fail' error grype_fail_on 'low high' \
+  true ''
+scan_case 'a misspelt cache-db fails' error grype_cache_db medium \
+  restore_only ''
+scan_case 'an empty cache-db fails' error grype_cache_db medium '' ''
+scan_case 'cache-db yes fails' error grype_cache_db medium yes ''
+scan_case 'a bare repository name fails' error grype_bypass_repository \
+  medium true bypass
+scan_case 'a three-part repository fails' error grype_bypass_repository \
+  medium true octo/bypass/extra
+scan_case 'a repository URL fails' error grype_bypass_repository \
+  medium true https://github.com/octo/bypass
+scan_case 'a repository with a space fails' error grype_bypass_repository \
+  medium true 'octo/by pass'
+scan_case 'a repository with a trailing newline fails' error \
+  grype_bypass_repository medium true "$(printf 'octo/bypass\nx')"
+scan_case 'a newline in fail-on cannot forge a command' error \
+  grype_fail_on "$(printf 'x\n::warning::forged')" true ''
+scan_case 'a newline in cache-db cannot forge a command' error \
+  grype_cache_db medium "$(printf 'x\n::warning::forged')" ''
+scan_case 'a newline in the repository cannot forge a command' error \
+  grype_bypass_repository medium true \
+  "$(printf 'octo/x\n::warning::forged')"
+
+# --- gerrit-validate: the merge lane's policy step ------------------------
+
+yq -r '.jobs."gerrit-validate".steps[]
+  | select(.id == "validate-grype-merge-policy") | .run' \
+  "${workflows}/merge.yaml" > "${work}/merge-policy.sh"
+if [ ! -s "${work}/merge-policy.sh" ]; then
+  echo "FAIL: no 'validate-grype-merge-policy' step in gerrit-validate" \
+    "of merge"
+  exit 1
+fi
+for var in GRYPE_DEPENDENCY_POLICY GRYPE_TRANSITIVE_FAIL_ON; do
+  if ! grep -q "${var}" "${work}/merge-policy.sh"; then
+    echo "FAIL: the validate-grype-merge-policy step does not read ${var}"
+    exit 1
+  fi
+done
+
+# merge_policy_case DESCRIPTION EXPECTED NAME POLICY TRANSITIVE
+merge_policy_case() {
+  run_step "${work}/merge-policy.sh" GRYPE_DEPENDENCY_POLICY="$4" \
+    GRYPE_TRANSITIVE_FAIL_ON="$5"
+  expect_step "merge: $1" "$2" "$3"
+}
+merge_policy_case 'the defaults are accepted' ok '' all none
+merge_policy_case 'policy declared is accepted' ok '' declared none
+for severity in none negligible low medium high critical; do
+  merge_policy_case "transitive ${severity} is accepted" ok '' all \
+    "${severity}"
+done
+merge_policy_case 'a misspelt policy fails' error grype_dependency_policy \
+  declare none
+merge_policy_case 'an empty policy fails' error grype_dependency_policy \
+  '' none
+merge_policy_case 'a capitalised severity fails' error \
+  grype_transitive_fail_on all Critical
+merge_policy_case 'an empty severity fails' error \
+  grype_transitive_fail_on all ''
+merge_policy_case 'a newline cannot forge a command' error \
+  grype_transitive_fail_on all "$(printf 'x\n::warning::forged')"
+
 # --- gerrit-validate: the verify lane's gate step --------------------------
 
 yq -r '.jobs."gerrit-validate".steps[]
@@ -364,6 +521,12 @@ check 'build-test: the metadata step takes the scope patterns first' \
   "$(step_field "${verify}" repository-metadata repo-metadata \
     'with.dependency_patterns' | head -n 1)" \
   '${{ steps.dependency-scope.outputs.patterns }}'
+# shellcheck disable=SC2016
+check "build-test: the caller's patterns follow the scope patterns" \
+  "$(step_field "${verify}" repository-metadata repo-metadata \
+    'with.dependency_patterns')" \
+  "$(printf '%s\n%s' '${{ steps.dependency-scope.outputs.patterns }}' \
+    '${{ inputs.grype_dependency_patterns }}')"
 check 'build-test: the metadata step sets no dependency_base' \
   "$(step_field "${verify}" repository-metadata repo-metadata \
     'with.dependency_base')" null
@@ -1108,13 +1271,16 @@ printf 'RUN true\n' >> "${fixture}/sub/docker/Dockerfile-alpine"
 printf 'v2\n' > "${fixture}/app.txt"
 git -C "${fixture}" commit -q -a -m 'Change the images'
 
-# detect DESCRIPTION EXPECTED_CHANGED PATH_PREFIX IMAGES [ECOSYSTEMS]:
+# detect DESCRIPTION EXPECTED_CHANGED PATH_PREFIX IMAGES [ECOSYSTEMS
+# [CALLER_PATTERNS]]:
 # runs the action with the ecosystems, patterns and scope the step
 # resolves for IMAGES under PATH_PREFIX against the fixture's last
 # commit, as repository-metadata would with 'base' standing in for the
 # event-derived base, and compares the 'changed' output and the
 # sidecar's verdict; EXPECTED_CHANGED is 'true' or 'false', and
-# ECOSYSTEMS is the caller's grype_dependency_ecosystems (docker)
+# ECOSYSTEMS is the caller's grype_dependency_ecosystems (docker);
+# CALLER_PATTERNS, grype_dependency_patterns, joins the step's
+# patterns on a new line, as the metadata step's block scalar does
 detect() {
   local ecosystems patterns scope changed sidecar_changed
   scope_for "$4" "$3" "${5:-docker}"
@@ -1122,6 +1288,9 @@ detect() {
     "$(scope_output skip)" false
   ecosystems=$(scope_output ecosystems)
   patterns=$(scope_output patterns)
+  if [ "$#" -ge 6 ]; then
+    patterns="${patterns}"$'\n'"$6"
+  fi
   scope=$(scope_output path_prefix)
   : > "${work}/output"
   rm -f "${fixture}/dependency-change.json"
@@ -1143,6 +1312,22 @@ detect() {
   check "action: $1: sidecar verdict" "${sidecar_changed}" "$2"
 }
 detect 'the docker preset alone misses the custom name' false . ''
+detect 'an empty caller pattern list adds nothing' false . '' docker ''
+detect 'a caller pattern counts after no step patterns' true . '' docker \
+  app.txt
+detect 'caller patterns count one per line' true . '' docker \
+  "$(printf 'README.md\napp.txt')"
+# The image names a recipe the commit leaves alone, so the step emits
+# a pattern that matches nothing and the caller's must still count
+detect 'a step pattern for an unchanged recipe sees no change' false . \
+  '[{"name": "app", "context": "docker",
+    "dockerfile": "docker/Unchanged.df"}]' docker ''
+detect 'a caller pattern counts after the step patterns' true . \
+  '[{"name": "app", "context": "docker",
+    "dockerfile": "docker/Unchanged.df"}]' docker app.txt
+check 'action: the caller pattern lists its file in the sidecar' \
+  "$(jq -r '.files | index("app.txt") != null' \
+    "${fixture}/dependency-change.json")" true
 detect 'the step pattern matches the custom name at the root' true . \
   '[{"name": "app", "context": "docker",
     "dockerfile": "docker/Dockerfile-alpine"}]'
