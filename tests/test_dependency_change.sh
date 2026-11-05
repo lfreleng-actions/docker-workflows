@@ -2,28 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Regression test for the Grype dependency-change gate (#200) in the
-# verify lane (build-test.yaml) and the policy inputs it shares with
-# the release lane (build-test-release.yaml). It checks:
+# Regression test for the Grype dependency-change gate (#200, #204) in
+# the verify lane (build-test.yaml) and the policy inputs it shares
+# with the release lane (build-test-release.yaml). It checks:
 # - both lanes declare the Grype policy inputs with the same types and
 #   defaults and pass each to grype-scan-action; the verify lane alone
 #   takes grype_gate_when and grype_dependency_ecosystems, and alone
-#   reads the dependency-change sidecar, since a release always gates;
+#   forwards a dependency change verdict, since a release always gates;
 # - the gerrit-validate steps that check those inputs, extracted and
 #   run as GitHub runs a 'shell: bash' step, accept every valid value
 #   and fail each invalid one with an ::error:: naming the input, and
 #   the policy step is byte-identical in the two lanes;
-# - the verify lane's wiring: dependency-change-action at its pinned
-#   commit in docker-metadata, behind the dependencies-changed gate,
-#   after a checkout of depth 2 or more; the sidecar uploaded as its
-#   own artefact only when the action names a manifest it wrote, so a
-#   planted one never travels; the grype job downloading it by a
-#   pattern an absent artefact does not fail, and reading it through
-#   dependency-change-manifest; and the gate outputs the lane reports;
-# - the two testing.yaml calls that prove the sidecar's round trip:
+# - the verify lane's wiring: repository-metadata-action at its v0.4.0
+#   commit in every workflow that calls it; in build-test.yaml its
+#   metadata step running the detection behind the
+#   dependencies-changed gate, after the scope step and a checkout of
+#   depth 2 or more, and exporting dependencies_changed as a job
+#   output; the grype job needing that job, keeping its !cancelled()
+#   guard and forwarding the output only from a job that succeeded;
+#   no dependency-change-action call, sidecar file or manifest input
+#   left in any workflow; and the gate outputs the lane reports;
+# - the two testing.yaml calls that prove the verdict's round trip:
 #   the unresolved one against a fixture at a tag and the resolved one
 #   against this repository's own fixture at the commit under test;
-# - the docker-metadata step that resolves the detection scope: the
+# - the repository-metadata step that resolves the detection scope: the
 #   docker preset joined to the caller's ecosystems, the dockerfile
 #   names in the images input turned into the action's extra
 #   patterns, the scope widened to the repository root for a context,
@@ -37,8 +39,9 @@
 #   control-character and whitespace-edged paths, the last list
 #   checked against Python, and the patterns heredoc closed by a
 #   delimiter no pattern equals;
-# - dependency-change-action itself, fetched at the pinned commit and
-#   run against a scratch repository: a change to a Dockerfile with a
+# - dependency-change-action itself, fetched at the commit
+#   repository-metadata-action pins and run against a scratch
+#   repository: a change to a Dockerfile with a
 #   custom name goes unnoticed by the docker preset alone and counts
 #   once the step's patterns reach the action, under the repository
 #   root, under a path_prefix, and as a sibling of the path_prefix; a
@@ -54,9 +57,10 @@
 # The action's own suite covers the rest of what it detects.
 #
 # Usage: bash tests/test_dependency_change.sh
-# DEPENDENCY_CHANGE_ACTION_DIR may name a local clone of
-# dependency-change-action checked out at the pinned commit, to run
-# without fetching it.
+# REPOSITORY_METADATA_ACTION_DIR and DEPENDENCY_CHANGE_ACTION_DIR may
+# name local clones of repository-metadata-action and
+# dependency-change-action checked out at their pinned commits, to run
+# without fetching them.
 # Needs bash, git, jq, python3 and yq (either the Go or the Python
 # implementation).
 
@@ -128,12 +132,9 @@ check 'build-test: grype_dependency_ecosystems defaults to docker' \
 check 'build-test: grype-audit passes grype_gate_when as gate-when' \
   "$(step_field "${verify}" grype grype-audit 'with."gate-when"')" \
   '${{ inputs.grype_gate_when }}'
-check 'build-test: grype-audit reads the sidecar' \
+check 'build-test: grype-audit reads no sidecar' \
   "$(step_field "${verify}" grype grype-audit \
-    'with."dependency-change-manifest"')" dependency-change.json
-check 'build-test: grype-audit leaves dependencies-changed to the sidecar' \
-  "$(step_field "${verify}" grype grype-audit \
-    'with."dependencies-changed"')" null
+    'with."dependency-change-manifest"')" null
 for name in grype_gate_when grype_dependency_ecosystems; do
   check "build-test-release: no ${name} input (a release always gates)" \
     "$(input_field "${release}" "${name}" type)" null
@@ -143,8 +144,50 @@ check 'build-test-release: grype-audit sets no gate-when' \
 check 'build-test-release: grype-audit reads no sidecar' \
   "$(step_field "${release}" grype grype-audit \
     'with."dependency-change-manifest"')" null
-check 'build-test-release: no dependency-change-action call' \
-  "$(grep -c 'dependency-change-action@' "${release}" || true)" 0
+check 'build-test-release: grype-audit takes no verdict' \
+  "$(step_field "${release}" grype grype-audit \
+    'with."dependencies-changed"')" null
+
+# lane_passes LANE NAME TYPE DEFAULT PASSED_AS: one lane declares NAME
+# and hands it to grype-scan-action under its own name
+lane_passes() {
+  local workflow="${workflows}/$1.yaml"
+  check "$1: $2 is a $3" "$(input_field "${workflow}" "$2" type)" "$3"
+  check "$1: $2 defaults to '$4'" \
+    "$(input_field "${workflow}" "$2" default)" "$4"
+  check "$1: grype-audit passes $2 as $5" \
+    "$(step_field "${workflow}" grype grype-audit "with.\"$5\"")" \
+    "\${{ inputs.$2 }}"
+}
+# Every lane: the existing scan inputs keep their defaults, and the
+# bypass repository is new
+for lane in build-test build-test-release merge; do
+  lane_passes "${lane}" grype_fail_on string medium fail-on
+  lane_passes "${lane}" grype_cache_db string true cache-db
+  lane_passes "${lane}" grype_bypass_repository string '' bypass-repository
+done
+# The merge lane's policy inputs default to grype-scan-action's own,
+# so its verdict is the one it gave before they existed
+lane_passes merge grype_only_fixed boolean false only-fixed
+lane_passes merge grype_dependency_policy string all dependency-policy
+lane_passes merge grype_transitive_fail_on string none transitive-fail-on
+for name in grype_gate_when grype_dependency_ecosystems \
+  grype_dependency_patterns grype_remediation_window_days \
+  grype_remediation_window_start; do
+  check "merge: no ${name} input" \
+    "$(input_field "${workflows}/merge.yaml" "${name}" type)" null
+done
+check 'merge: grype-audit sets no gate-when' \
+  "$(step_field "${workflows}/merge.yaml" grype grype-audit \
+    'with."gate-when"')" null
+
+# The verify lane alone takes extra detection patterns
+check 'build-test: grype_dependency_patterns is a string' \
+  "$(input_field "${verify}" grype_dependency_patterns type)" string
+check "build-test: grype_dependency_patterns defaults to ''" \
+  "$(input_field "${verify}" grype_dependency_patterns default)" ''
+check 'build-test-release: no grype_dependency_patterns input' \
+  "$(input_field "${release}" grype_dependency_patterns type)" null
 
 # --- gerrit-validate: the shared policy step ------------------------------
 
@@ -268,6 +311,122 @@ policy_case 'a newline cannot forge a command' error \
   grype_dependency_policy "$(printf 'x\n::warning::forged')" critical \
   true '' ''
 
+# --- gerrit-validate: the shared scan step --------------------------------
+
+for lane in build-test build-test-release merge; do
+  yq -r '.jobs."gerrit-validate".steps[]
+    | select(.id == "validate-grype-scan")
+    | to_entries[] | .key + "=" + (.value | tojson)' \
+    "${workflows}/${lane}.yaml" > "${work}/scan-${lane}.json"
+  if [ ! -s "${work}/scan-${lane}.json" ]; then
+    echo "FAIL: no 'validate-grype-scan' step in gerrit-validate of ${lane}"
+    exit 1
+  fi
+done
+for lane in build-test-release merge; do
+  if cmp -s "${work}/scan-build-test.json" "${work}/scan-${lane}.json"
+  then
+    echo "ok: the validate-grype-scan step is identical in ${lane}"
+  else
+    echo "FAIL: the validate-grype-scan step differs in ${lane}"
+    diff "${work}/scan-build-test.json" "${work}/scan-${lane}.json" \
+      | sed 's/^/  | /' || true
+    failures=$((failures + 1))
+  fi
+done
+sed -n 's/^run=//p' "${work}/scan-build-test.json" | jq -r '.' \
+  > "${work}/scan.sh"
+for var in GRYPE_FAIL_ON GRYPE_CACHE_DB GRYPE_BYPASS_REPOSITORY; do
+  if ! grep -q "${var}" "${work}/scan.sh"; then
+    echo "FAIL: the validate-grype-scan step does not read ${var}"
+    exit 1
+  fi
+done
+
+# scan_case DESCRIPTION EXPECTED NAME FAIL_ON CACHE_DB BYPASS_REPOSITORY
+scan_case() {
+  run_step "${work}/scan.sh" GRYPE_FAIL_ON="$4" GRYPE_CACHE_DB="$5" \
+    GRYPE_BYPASS_REPOSITORY="$6"
+  expect_step "$1" "$2" "$3"
+}
+scan_case 'the scan defaults are accepted' ok '' medium true ''
+for severity in negligible low medium high critical none; do
+  scan_case "fail-on ${severity} is accepted" ok '' "${severity}" true ''
+done
+for mode in true false restore-only ' TRUE ' Restore-Only; do
+  scan_case "cache-db '${mode}' is accepted" ok '' medium "${mode}" ''
+done
+for repository in octo/bypass Octo-Org/bypass.list my_org/by-pass_1; do
+  scan_case "bypass repository ${repository} is accepted" ok '' medium \
+    true "${repository}"
+done
+scan_case 'a misspelt fail-on fails' error grype_fail_on mediun true ''
+scan_case 'a capitalised fail-on fails' error grype_fail_on High true ''
+scan_case 'an empty fail-on fails' error grype_fail_on '' true ''
+scan_case 'two fail-on severities fail' error grype_fail_on 'low high' \
+  true ''
+scan_case 'a misspelt cache-db fails' error grype_cache_db medium \
+  restore_only ''
+scan_case 'an empty cache-db fails' error grype_cache_db medium '' ''
+scan_case 'cache-db yes fails' error grype_cache_db medium yes ''
+scan_case 'a bare repository name fails' error grype_bypass_repository \
+  medium true bypass
+scan_case 'a three-part repository fails' error grype_bypass_repository \
+  medium true octo/bypass/extra
+scan_case 'a repository URL fails' error grype_bypass_repository \
+  medium true https://github.com/octo/bypass
+scan_case 'a repository with a space fails' error grype_bypass_repository \
+  medium true 'octo/by pass'
+scan_case 'a repository with a trailing newline fails' error \
+  grype_bypass_repository medium true "$(printf 'octo/bypass\nx')"
+scan_case 'a newline in fail-on cannot forge a command' error \
+  grype_fail_on "$(printf 'x\n::warning::forged')" true ''
+scan_case 'a newline in cache-db cannot forge a command' error \
+  grype_cache_db medium "$(printf 'x\n::warning::forged')" ''
+scan_case 'a newline in the repository cannot forge a command' error \
+  grype_bypass_repository medium true \
+  "$(printf 'octo/x\n::warning::forged')"
+
+# --- gerrit-validate: the merge lane's policy step ------------------------
+
+yq -r '.jobs."gerrit-validate".steps[]
+  | select(.id == "validate-grype-merge-policy") | .run' \
+  "${workflows}/merge.yaml" > "${work}/merge-policy.sh"
+if [ ! -s "${work}/merge-policy.sh" ]; then
+  echo "FAIL: no 'validate-grype-merge-policy' step in gerrit-validate" \
+    "of merge"
+  exit 1
+fi
+for var in GRYPE_DEPENDENCY_POLICY GRYPE_TRANSITIVE_FAIL_ON; do
+  if ! grep -q "${var}" "${work}/merge-policy.sh"; then
+    echo "FAIL: the validate-grype-merge-policy step does not read ${var}"
+    exit 1
+  fi
+done
+
+# merge_policy_case DESCRIPTION EXPECTED NAME POLICY TRANSITIVE
+merge_policy_case() {
+  run_step "${work}/merge-policy.sh" GRYPE_DEPENDENCY_POLICY="$4" \
+    GRYPE_TRANSITIVE_FAIL_ON="$5"
+  expect_step "merge: $1" "$2" "$3"
+}
+merge_policy_case 'the defaults are accepted' ok '' all none
+merge_policy_case 'policy declared is accepted' ok '' declared none
+for severity in none negligible low medium high critical; do
+  merge_policy_case "transitive ${severity} is accepted" ok '' all \
+    "${severity}"
+done
+merge_policy_case 'a misspelt policy fails' error grype_dependency_policy \
+  declare none
+merge_policy_case 'an empty policy fails' error grype_dependency_policy \
+  '' none
+merge_policy_case 'a capitalised severity fails' error \
+  grype_transitive_fail_on all Critical
+merge_policy_case 'an empty severity fails' error \
+  grype_transitive_fail_on all ''
+merge_policy_case 'a newline cannot forge a command' error \
+  grype_transitive_fail_on all "$(printf 'x\n::warning::forged')"
+
 # --- gerrit-validate: the verify lane's gate step --------------------------
 
 yq -r '.jobs."gerrit-validate".steps[]
@@ -318,122 +477,147 @@ gate_case 'a newline cannot forge a command' error \
 
 # --- Wiring in the verify lane --------------------------------------------
 
-action='lfreleng-actions/dependency-change-action'
-pin='257928b15e4e6a5cc5a888435be59b058055c4e1'
+metadata_action='lfreleng-actions/repository-metadata-action'
+metadata_pin='18e5b7c5b16423b0e734891d103513826b324858'
 gate_if="inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed'"
 
-check 'build-test: docker-metadata calls the action at its pin' \
-  "$(step_field "${verify}" docker-metadata dependency-change uses)" \
-  "${action}@${pin}"
-# The version comment beside the pin, which the YAML parser drops
-if grep -qE "uses: ${action}@${pin}[[:space:]]+# v0\.0\.1$" "${verify}"; then
-  echo "ok: build-test: the pin carries its v0.0.1 comment"
-else
-  echo "FAIL: build-test: the pin lacks its '# v0.0.1' comment"
-  failures=$((failures + 1))
-fi
-check 'build-test: the action runs only for the gate, and not when skipped' \
-  "$(step_field "${verify}" docker-metadata dependency-change if)" \
-  "${gate_if} && steps.dependency-scope.outputs.skip != 'true'"
-# detect_input NAME VALUE: the detection step passes VALUE as NAME
-detect_input() {
-  check "build-test: the action takes $1" \
-    "$(step_field "${verify}" docker-metadata dependency-change \
+# Every workflow that calls repository-metadata-action pins the one
+# commit v0.4.0 names (not the tag object), with its version comment,
+# which the YAML parser drops
+for lane in build-test build-test-release merge; do
+  workflow="${workflows}/${lane}.yaml"
+  check "${lane}: repository-metadata calls the action at the v0.4.0 pin" \
+    "$(step_field "${workflow}" repository-metadata repo-metadata uses)" \
+    "${metadata_action}@${metadata_pin}"
+  if grep -qE "uses: ${metadata_action}@${metadata_pin}[[:space:]]+# v0\.4\.0$" \
+    "${workflow}"; then
+    echo "ok: ${lane}: the pin carries its v0.4.0 comment"
+  else
+    echo "FAIL: ${lane}: the pin lacks its '# v0.4.0' comment"
+    failures=$((failures + 1))
+  fi
+done
+
+# The detection runs in repository-metadata, on the metadata step,
+# behind the gate and the scope step's skip
+# metadata_input NAME VALUE: the metadata step passes VALUE as NAME
+metadata_input() {
+  check "build-test: the metadata step takes $1" \
+    "$(step_field "${verify}" repository-metadata repo-metadata \
       "with.\"$1\"")" "$2"
 }
+metadata_input dependency_change \
+  "\${{ ${gate_if} && steps.dependency-scope.outputs.skip != 'true' }}"
 # shellcheck disable=SC2016  # literal workflow expressions
-detect_input ecosystems '${{ steps.dependency-scope.outputs.ecosystems }}'
+metadata_input gerrit_refspec '${{ inputs.gerrit_refspec }}'
 # shellcheck disable=SC2016
-detect_input patterns '${{ steps.dependency-scope.outputs.patterns }}'
+metadata_input dependency_ecosystems \
+  '${{ steps.dependency-scope.outputs.ecosystems }}'
 # shellcheck disable=SC2016
-detect_input path-prefix '${{ steps.dependency-scope.outputs.path_prefix }}'
+metadata_input dependency_path_prefix \
+  '${{ steps.dependency-scope.outputs.path_prefix }}'
 # shellcheck disable=SC2016
-detect_input gerrit-refspec '${{ inputs.gerrit_refspec }}'
-detect_input output dependency-change.json
+check 'build-test: the metadata step takes the scope patterns first' \
+  "$(step_field "${verify}" repository-metadata repo-metadata \
+    'with.dependency_patterns' | head -n 1)" \
+  '${{ steps.dependency-scope.outputs.patterns }}'
+# shellcheck disable=SC2016
+check "build-test: the caller's patterns follow the scope patterns" \
+  "$(step_field "${verify}" repository-metadata repo-metadata \
+    'with.dependency_patterns')" \
+  "$(printf '%s\n%s' '${{ steps.dependency-scope.outputs.patterns }}' \
+    '${{ inputs.grype_dependency_patterns }}')"
+check 'build-test: the metadata step sets no dependency_base' \
+  "$(step_field "${verify}" repository-metadata repo-metadata \
+    'with.dependency_base')" null
+# shellcheck disable=SC2016
+check 'build-test: repository-metadata exports dependencies_changed' \
+  "$(yq -r '.jobs."repository-metadata".outputs.dependencies_changed' \
+    "${verify}")" '${{ steps.repo-metadata.outputs.dependencies_changed }}'
 check 'build-test: the scope step runs for the same gate' \
-  "$(step_field "${verify}" docker-metadata dependency-scope if)" \
+  "$(step_field "${verify}" repository-metadata dependency-scope if)" \
   "${gate_if}"
+# The scope step must run ahead of the metadata step it feeds
+check 'build-test: the scope step runs ahead of the metadata step' \
+  "$(yq -r '[.jobs."repository-metadata".steps[].id]
+    | (to_entries | map(select(.value == "dependency-scope")) | .[0].key)
+      < (to_entries | map(select(.value == "repo-metadata")) | .[0].key)' \
+    "${verify}")" true
+# It reads workflow inputs alone: no other job, step or checkout
+# shellcheck disable=SC2016
+check 'build-test: the scope step reads workflow inputs alone' \
+  "$(yq -r '.jobs."repository-metadata".steps[]
+    | select(.id == "dependency-scope") | .env | to_entries[]
+    | .key + "=" + .value' "${verify}" | sort | paste -sd ' ' -)" \
+  'BUILD_COMMAND=${{ inputs.build_command }} GRYPE_DEPENDENCY_ECOSYSTEMS=${{ inputs.grype_dependency_ecosystems }} IMAGES=${{ inputs.images }} PATH_PREFIX=${{ inputs.path_prefix }}'
+check 'build-test: docker-metadata has no dependency-scope step' \
+  "$(step_field "${verify}" docker-metadata dependency-scope name)" ''
 
-# The action compares HEAD with its parent, so both checkouts of the
+# The detection compares HEAD with its base, so both checkouts of the
 # job must hold it: actions/checkout defaults to depth 1 and needs 2
 # or more set (0 fetches everything); checkout-gerrit-change-action
 # defaults to 2, so an unset depth passes and a set one must reach 2
 # checkout_depth ACTION DEFAULT
 checkout_depth() {
   local count depth
-  count=$(yq -r ".jobs.\"docker-metadata\".steps[]
+  count=$(yq -r ".jobs.\"repository-metadata\".steps[]
     | select(.uses | test(\"^$1@\")) | .uses" "${verify}" | wc -l)
-  check "build-test: docker-metadata has one $1 step" "${count}" 1
-  depth=$(yq -r ".jobs.\"docker-metadata\".steps[]
+  check "build-test: repository-metadata has one $1 step" "${count}" 1
+  depth=$(yq -r ".jobs.\"repository-metadata\".steps[]
     | select(.uses | test(\"^$1@\")) | .with.\"fetch-depth\"" "${verify}")
   if [ "${depth}" = 'null' ]; then
     depth="$2"
   fi
   if [[ "${depth}" =~ ^[0-9]+$ ]] &&
     { [ "${depth}" -eq 0 ] || [ "${depth}" -ge 2 ]; }; then
-    echo "ok: build-test: $1 in docker-metadata fetches depth ${depth}"
+    echo "ok: build-test: $1 in repository-metadata fetches depth ${depth}"
   else
-    echo "FAIL: build-test: $1 in docker-metadata fetches depth '${depth}';"
-    echo "  the dependency change base needs 2 or more"
+    echo "FAIL: build-test: $1 in repository-metadata fetches depth" \
+      "'${depth}'; the dependency change base needs 2 or more"
     failures=$((failures + 1))
   fi
 }
 checkout_depth actions/checkout 1
 checkout_depth lfreleng-actions/checkout-gerrit-change-action 2
 
-# The sidecar travels as a file in its own artefact, under the run's
-# build_id, and only when the action names a manifest it wrote: a
-# dependency-change.json the checkout brought along, {"changed": false}
-# say, must not travel when the detection is skipped (the action never
-# ran to clear it) or unresolved, since the scan would trust it and
-# lift the gate. An unresolved result (no file) must not fail the upload
-upload=$(yq -r '.jobs."docker-metadata".steps[]
-  | select(.name == "Upload dependency change sidecar")' "${verify}")
-# upload_field FIELD
-upload_field() {
-  yq -r ".$1" <<< "${upload}"
-}
-check 'build-test: the sidecar uploads behind the gate, on a resolved manifest alone' \
-  "$(upload_field if)" \
-  "${gate_if} && steps.dependency-change.outputs.manifest != ''"
+# The grype job reads the verdict from repository-metadata: it needs
+# the job, keeps running when that job failed or skipped (its 'if:'
+# starts from !cancelled() and never asks for repository-metadata's
+# result), and forwards the output only from a job that succeeded,
+# since a failed job can still expose an earlier step's output
+grype_if=$(yq -r '.jobs.grype.if' "${verify}")
+grype_needs=$(yq -r '.jobs.grype.needs
+  | map(select(. == "repository-metadata")) | length' "${verify}")
 # shellcheck disable=SC2016
-check 'build-test: the sidecar artefact is named by build_id' \
-  "$(upload_field with.name)" \
-  'dependency-change-${{ steps.discover.outputs.build_id }}'
-check 'build-test: the sidecar artefact holds the sidecar alone' \
-  "$(upload_field with.path)" dependency-change.json
-check 'build-test: an unresolved result does not fail the upload' \
-  "$(upload_field 'with."if-no-files-found"')" ignore
+grype_guard=$(grep -c '^\${{ !cancelled() && ' <<< "${grype_if}" || true)
+grype_result=$(grep -c 'repository-metadata' <<< "${grype_if}" || true)
+check 'build-test: grype needs repository-metadata, guarded by !cancelled()' \
+  "needs ${grype_needs}, guard ${grype_guard}, result ${grype_result}" \
+  'needs 1, guard 1, result 0'
+check 'build-test: grype-audit forwards a verdict only from a success' \
+  "$(step_field "${verify}" grype grype-audit \
+    'with."dependencies-changed"')" \
+  "\${{ needs.repository-metadata.result == 'success' && needs.repository-metadata.outputs.dependencies_changed || '' }}"
+check 'build-test: grype runs without a checkout' \
+  "$(yq -r '[.jobs.grype.steps[] | select(.uses | test("checkout"))]
+    | length' "${verify}")" 0
 check 'build-test: the sbom artefact still requires its SBOMs' \
   "$(yq -r '.jobs.sbom.steps[] | select(.name == "Upload SBOM artifacts")
     | .with."if-no-files-found"' "${verify}")" error
 
-# The grype job downloads by a pattern, which an absent artefact
-# leaves empty where a name would fail the job, into the working
-# directory where the scan names the sidecar by bare file name
-download=$(yq -r '.jobs.grype.steps[]
-  | select(.name == "Download dependency change sidecar")' "${verify}")
-# download_field FIELD
-download_field() {
-  yq -r ".$1" <<< "${download}"
-}
-# shellcheck disable=SC2016
-check 'build-test: grype downloads the sidecar artefact by pattern' \
-  "$(download_field with.pattern)" \
-  'dependency-change-${{ needs.docker-metadata.outputs.build_id }}'
-check 'build-test: grype downloads the sidecar into the working directory' \
-  "$(download_field with.path)" null
-check 'build-test: grype downloads no sidecar by name' \
-  "$(download_field with.name)" null
-check 'build-test: grype downloads the sidecar for the gate alone' \
-  "$(download_field if)" "inputs.grype_gate_when == 'dependencies-changed'"
-check 'build-test: grype runs without a checkout' \
-  "$(yq -r '[.jobs.grype.steps[] | select(.uses | test("checkout"))]
-    | length' "${verify}")" 0
+# The old sidecar wiring is gone from every workflow: no direct
+# dependency-change-action call, no sidecar file and no manifest
+# input, so the job output is the verdict's one route
+for token in 'dependency-change-action@' 'dependency-change.json' \
+  'dependency-change-manifest'; do
+  check "workflows: no '${token}' remains" \
+    "$(cat "${verify}" "${release}" "${workflows}/merge.yaml" \
+      | grep -c -- "${token}" || true)" 0
+done
 
 # No inline detection may stand beside the action, where the two
 # would drift apart
-for job in docker-metadata sbom grype; do
+for job in repository-metadata docker-metadata sbom grype; do
   inline=$(yq -r ".jobs.\"${job}\".steps[] | select(.run != null)
     | select(.run | test(\"changed=|dependency-change.json\")) | .name" \
     "${verify}")
@@ -461,11 +645,11 @@ check 'build-test: the workflow outputs grype_gate_reason' \
 
 # --- The self-test calls in testing.yaml ----------------------------------
 
-# Two calls prove the sidecar's round trip from docker-metadata to the
-# scan. The fixture-at-a-tag call has no base, so the action writes no
-# sidecar and the gate must stay on; the resolved call builds a
-# fixture in this repository at the run's own commit, where the action
-# compares HEAD with HEAD^1 and writes a sidecar the scan must read to
+# Two calls prove the verdict's round trip from repository-metadata to
+# the scan. The fixture-at-a-tag call has no base, so the verdict is
+# empty and the gate must stay on; the resolved call builds a fixture
+# in this repository at the run's own commit, where the detection
+# compares HEAD with HEAD^1 and the scan must read its verdict to
 # withhold the gate. That needs the default repository and ref (the
 # checkout's HEAD must be GITHUB_SHA), a path_prefix holding the
 # fixture Dockerfile and the gate asked for.
@@ -509,11 +693,11 @@ check 'testing: the resolved check job fetches the base too' \
 
 # --- The dependency change scope step -------------------------------------
 
-yq -r '.jobs."docker-metadata".steps[]
+yq -r '.jobs."repository-metadata".steps[]
   | select(.id == "dependency-scope") | .run' "${verify}" \
   > "${work}/scope.sh"
 if [ ! -s "${work}/scope.sh" ]; then
-  echo "FAIL: no 'dependency-scope' step in docker-metadata of build-test"
+  echo "FAIL: no 'dependency-scope' step in repository-metadata of build-test"
   exit 1
 fi
 
@@ -736,7 +920,7 @@ scope_case 'build_flags that is not a list adds no context' \
   '[{"name": "app", "context": ".", "build_flags": "--network=host"}]' \
   app docker '' app false
 
-# A recipe no pattern can express skips the detection: no sidecar,
+# A recipe no pattern can express skips the detection: no verdict,
 # so the gate stays on, and the step summary names the file
 # skipped_case DESCRIPTION IMAGES PATH_PREFIX FILE
 skipped_case() {
@@ -861,7 +1045,7 @@ check 'scope: a custom build still reports the ecosystems' \
   "$(scope_output ecosystems)" docker,python
 # shellcheck disable=SC2016
 check 'build-test: the scope step reads build_command' \
-  "$(step_field "${verify}" docker-metadata dependency-scope \
+  "$(step_field "${verify}" repository-metadata dependency-scope \
     env.BUILD_COMMAND)" '${{ inputs.build_command }}'
 
 # A name with a newline, or any control character, is one JSON string
@@ -1022,6 +1206,32 @@ done < "${work}/altered"
 
 # --- dependency-change-action at its pin ----------------------------------
 
+# The detector repository-metadata-action runs at its pin: read its
+# pin from that action's own metadata, so the two cannot drift apart
+action='lfreleng-actions/dependency-change-action'
+if [ -n "${REPOSITORY_METADATA_ACTION_DIR:-}" ]; then
+  metadata_dir=$(cd "${REPOSITORY_METADATA_ACTION_DIR}" && pwd)
+else
+  metadata_dir="${work}/repository-metadata-action"
+  git -c init.defaultBranch=main init -q "${metadata_dir}"
+  git -C "${metadata_dir}" fetch -q --depth 1 \
+    "https://github.com/${metadata_action}" "${metadata_pin}"
+  git -C "${metadata_dir}" checkout -q FETCH_HEAD
+fi
+head=$(git -C "${metadata_dir}" rev-parse HEAD)
+if [ "${head}" != "${metadata_pin}" ]; then
+  echo "FAIL: ${metadata_dir} is at ${head}, but the workflows pin" \
+    "${metadata_pin}"
+  exit 1
+fi
+pin=$(sed -nE "s#^ *uses: ${action}@([0-9a-f]{40})([[:space:]].*)?\$#\1#p" \
+  "${metadata_dir}/action.yaml")
+if [[ ! "${pin}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "FAIL: no single ${action} pin in ${metadata_action}'s action.yaml"
+  exit 1
+fi
+echo "ok: ${metadata_action} runs ${action}@${pin}"
+
 if [ -n "${DEPENDENCY_CHANGE_ACTION_DIR:-}" ]; then
   action_dir=$(cd "${DEPENDENCY_CHANGE_ACTION_DIR}" && pwd)
 else
@@ -1033,7 +1243,8 @@ else
 fi
 head=$(git -C "${action_dir}" rev-parse HEAD)
 if [ "${head}" != "${pin}" ]; then
-  echo "FAIL: ${action_dir} is at ${head}, but build-test.yaml pins ${pin}"
+  echo "FAIL: ${action_dir} is at ${head}, but ${metadata_action} pins" \
+    "${pin}"
   exit 1
 fi
 entry="${action_dir}/scripts/dependency_change/__main__.py"
@@ -1060,13 +1271,16 @@ printf 'RUN true\n' >> "${fixture}/sub/docker/Dockerfile-alpine"
 printf 'v2\n' > "${fixture}/app.txt"
 git -C "${fixture}" commit -q -a -m 'Change the images'
 
-# detect DESCRIPTION EXPECTED_CHANGED PATH_PREFIX IMAGES [ECOSYSTEMS]:
+# detect DESCRIPTION EXPECTED_CHANGED PATH_PREFIX IMAGES [ECOSYSTEMS
+# [CALLER_PATTERNS]]:
 # runs the action with the ecosystems, patterns and scope the step
 # resolves for IMAGES under PATH_PREFIX against the fixture's last
-# commit, as docker-metadata would with 'base' standing in for the
+# commit, as repository-metadata would with 'base' standing in for the
 # event-derived base, and compares the 'changed' output and the
 # sidecar's verdict; EXPECTED_CHANGED is 'true' or 'false', and
-# ECOSYSTEMS is the caller's grype_dependency_ecosystems (docker)
+# ECOSYSTEMS is the caller's grype_dependency_ecosystems (docker);
+# CALLER_PATTERNS, grype_dependency_patterns, joins the step's
+# patterns on a new line, as the metadata step's block scalar does
 detect() {
   local ecosystems patterns scope changed sidecar_changed
   scope_for "$4" "$3" "${5:-docker}"
@@ -1074,6 +1288,9 @@ detect() {
     "$(scope_output skip)" false
   ecosystems=$(scope_output ecosystems)
   patterns=$(scope_output patterns)
+  if [ "$#" -ge 6 ]; then
+    patterns="${patterns}"$'\n'"$6"
+  fi
   scope=$(scope_output path_prefix)
   : > "${work}/output"
   rm -f "${fixture}/dependency-change.json"
@@ -1095,6 +1312,22 @@ detect() {
   check "action: $1: sidecar verdict" "${sidecar_changed}" "$2"
 }
 detect 'the docker preset alone misses the custom name' false . ''
+detect 'an empty caller pattern list adds nothing' false . '' docker ''
+detect 'a caller pattern counts after no step patterns' true . '' docker \
+  app.txt
+detect 'caller patterns count one per line' true . '' docker \
+  "$(printf 'README.md\napp.txt')"
+# The image names a recipe the commit leaves alone, so the step emits
+# a pattern that matches nothing and the caller's must still count
+detect 'a step pattern for an unchanged recipe sees no change' false . \
+  '[{"name": "app", "context": "docker",
+    "dockerfile": "docker/Unchanged.df"}]' docker ''
+detect 'a caller pattern counts after the step patterns' true . \
+  '[{"name": "app", "context": "docker",
+    "dockerfile": "docker/Unchanged.df"}]' docker app.txt
+check 'action: the caller pattern lists its file in the sidecar' \
+  "$(jq -r '.files | index("app.txt") != null' \
+    "${fixture}/dependency-change.json")" true
 detect 'the step pattern matches the custom name at the root' true . \
   '[{"name": "app", "context": "docker",
     "dockerfile": "docker/Dockerfile-alpine"}]'
@@ -1280,9 +1513,9 @@ check 'oracle: the fixture lies two directories deep, so each ancestor case is r
 
 # A planted sidecar: the action removes a dependency-change.json the
 # checkout brought along before it looks, and names no manifest on an
-# unresolved result, so the upload step, which runs on that output
-# alone, never ships a stale {"changed": false}. Without GITHUB_SHA the
-# action has no base and reports unresolved.
+# unresolved result, so a stale {"changed": false} never stands in for
+# a verdict. Without GITHUB_SHA the action has no base and reports
+# unresolved.
 printf '{"changed": false}\n' > "${fixture}/dependency-change.json"
 : > "${work}/output"
 if (cd "${fixture}" && env -i PATH="${PATH}" HOME="${work}" \

@@ -14,6 +14,7 @@
 #     | check-release }
 #   docker-metadata -> { dockerfile-lint | build }
 #   build -> { tests | sbom -> grype }
+#   repository-metadata -> grype (the dependency change verdict)
 #   check-release -> release-verify
 #
 # Release-file verification: with snapshot_registry and
@@ -44,14 +45,15 @@
 #
 # Grype gating: grype_gate_when 'dependencies-changed' blocks on
 # findings only when the change touched a Dockerfile or a dependency
-# file of the ecosystems grype_dependency_ecosystems names. The sbom
-# job has no checkout, so docker-metadata runs
-# dependency-change-action against its depth-2 checkout and uploads
-# the sidecar it writes as the dependency-change-<build_id> artefact;
-# the grype job downloads it beside the SBOMs. A change the action
-# cannot resolve writes no sidecar, and the gate stays on; so does a
+# file of the ecosystems grype_dependency_ecosystems names. The grype
+# job has no checkout, so repository-metadata, which checks out full
+# history (or the Gerrit change at depth 2), runs the detection
+# through repository-metadata-action and exports the verdict as its
+# dependencies_changed output. The grype job forwards it only when
+# that job succeeded. A change the detection cannot resolve, a
 # context or Dockerfile the images input names that no pattern can
-# express, since the upload takes the action's own manifest alone.
+# express, and a failed or skipped repository-metadata job all leave
+# the verdict empty, and the gate stays on.
 #
 # Call this from a thin caller workflow; see examples/build-test/ for
 # both a plain GitHub-native caller and a Gerrit-wrapped caller.
@@ -277,6 +279,18 @@ on:
         required: false
         type: string
         default: 'docker'
+      grype_dependency_patterns:
+        description: >-
+          Extra dependency-change patterns, one per line, added to the
+          presets under grype_gate_when 'dependencies-changed', for a
+          file no preset covers. A pattern follows
+          dependency-change-action's grammar and matches inside the
+          detection scope: path_prefix, or the repository root where
+          the lane widens it. A pattern the detector rejects fails the
+          repository-metadata job.
+        required: false
+        type: string
+        default: ''
       grype_dependency_policy:
         description: >-
           Which Grype findings gate: 'all', or 'declared' to gate only
@@ -316,6 +330,16 @@ on:
           Optional YYYY-MM-DD floor for the remediation window clock,
           which starts at the later of the fix date and this date.
           Empty (the default) starts it at the fix date.
+        required: false
+        type: string
+        default: ''
+      grype_bypass_repository:
+        description: >-
+          Repository, as owner/name, whose labelled BYPASS: issues the
+          Grype scan accepts. Empty (the default) reads the calling
+          repository; set it to share one bypass list. The scan reads
+          it with the workflow's GITHUB_TOKEN, and a list it cannot
+          read leaves no bypass, so the gate stays closed.
         required: false
         type: string
         default: ''
@@ -516,8 +540,8 @@ jobs:
           echo "Gerrit inputs validated ✅"
 
       # The Grype gate inputs reach grype-scan-action only after the
-      # build and SBOM jobs have run, and the ecosystems reach
-      # dependency-change-action in docker-metadata, so a typo fails
+      # build and SBOM jobs have run, and the ecosystems reach the
+      # detection in repository-metadata, so a typo fails
       # here in seconds instead. The release lane always gates, so it
       # has neither input and this step stays this lane's own.
       - name: 'Validate Grype gate inputs'
@@ -563,6 +587,53 @@ jobs:
           fi
           echo "Grype gate: ${GRYPE_GATE_WHEN}," \
             "ecosystems ${GRYPE_DEPENDENCY_ECOSYSTEMS} ✅"
+
+      # Every lane's scan inputs reach grype-scan-action only after the
+      # build and SBOM jobs have run, so a bad value fails here first.
+      # build-test.yaml, build-test-release.yaml and merge.yaml carry
+      # this step verbatim, and tests/test_dependency_change.sh checks
+      # the three stay identical.
+      - name: 'Validate Grype scan inputs'
+        id: validate-grype-scan
+        shell: bash
+        env:
+          GRYPE_FAIL_ON: ${{ inputs.grype_fail_on }}
+          GRYPE_CACHE_DB: ${{ inputs.grype_cache_db }}
+          GRYPE_BYPASS_REPOSITORY: ${{ inputs.grype_bypass_repository }}
+        run: |
+          # The same checks grype-scan-action makes on fail-on,
+          # cache-db and bypass-repository
+          errors=0
+          # reject NAME VALUE: records an invalid input
+          reject() {
+            # A newline in the value could forge a workflow command
+            echo "::error::Invalid $1 input:" \
+              "$(printf '%s' "$2" | tr -d '\r\n')"
+            errors=1
+          }
+          case "${GRYPE_FAIL_ON}" in
+            negligible|low|medium|high|critical|none) ;;
+            *) reject grype_fail_on "${GRYPE_FAIL_ON}" ;;
+          esac
+          # The action trims and case-folds cache-db, so ' TRUE '
+          # keeps working; this check does the same
+          cache_db="${GRYPE_CACHE_DB#"${GRYPE_CACHE_DB%%[![:space:]]*}"}"
+          cache_db="${cache_db%"${cache_db##*[![:space:]]}"}"
+          cache_db=$(printf '%s' "${cache_db}" | tr '[:upper:]' '[:lower:]')
+          case "${cache_db}" in
+            true|false|restore-only) ;;
+            *) reject grype_cache_db "${GRYPE_CACHE_DB}" ;;
+          esac
+          # Empty reads the calling repository
+          repository='^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'
+          if [ -n "${GRYPE_BYPASS_REPOSITORY}" ] &&
+            [[ ! "${GRYPE_BYPASS_REPOSITORY}" =~ ${repository} ]]; then
+            reject grype_bypass_repository "${GRYPE_BYPASS_REPOSITORY}"
+          fi
+          if [ "${errors}" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Grype scan inputs validated ✅"
 
       # The Grype policy inputs reach grype-scan-action only after the
       # build and SBOM jobs have run, so a bad value fails here first.
@@ -683,6 +754,10 @@ jobs:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
     timeout-minutes: 5
+    outputs:
+      # The Grype job forwards this only when this job succeeded
+      # yamllint disable-line rule:line-length
+      dependencies_changed: ${{ steps.repo-metadata.outputs.dependencies_changed }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -729,102 +804,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: 'Gather repository metadata'
-        id: repo-metadata
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@2206d754f65f1a90f57b49be546712c5f594def2  # v0.3.3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          github_summary: 'true'
-          gerrit_summary: ${{ inputs.gerrit_refspec != '' }}
-          artifact_upload: 'true'
-          artifact_formats: 'json'
-
-  docker-metadata:
-    name: 'Docker Metadata'
-    needs: gerrit-validate
-    runs-on: ubuntu-latest
-    outputs:
-      images_json: ${{ steps.discover.outputs.images_json }}
-      image_count: ${{ steps.discover.outputs.image_count }}
-      build_id: ${{ steps.discover.outputs.build_id }}
-    permissions:
-      contents: read
-    timeout-minutes: 5
-    steps:
-      - name: 'Load egress allow-list'
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-          # yamllint disable-line rule:line-length
-          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
-          # A caller naming a list depends on it, so its absence fails
-          # here rather than at the first blocked connection.
-          # yamllint disable-line rule:line-length
-          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
-          # yamllint disable-line rule:line-length
-          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
-          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
-          allow_list_summary: 'false'
-      - name: 'Harden runner'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
-        with:
-          # yamllint disable-line rule:line-length
-          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
-          allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
-
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@f0dd3d4dd4fceff1f56348152ecf0e040594f16a  # v1.2.1
-        with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
-          # dependency-change-action compares HEAD with its parent, so
-          # the depth stays at 2 or more; the Gerrit checkout fetches
-          # that depth by default. tests/test_dependency_change.sh
-          # asserts both.
-          fetch-depth: 2
-          persist-credentials: false
-
-      # An explicit 'images' input wins; otherwise the action walks
-      # the estate-observed Dockerfile locations, keeping discovery
-      # order as build order. It also draws the per-invocation
-      # build_id that names this run's artifacts.
-      - name: 'Discover images'
-        id: discover
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-build-matrix-action@2c4e2fc6082967f6520243db11721457949b93c9  # v0.1.0
-        with:
-          path_prefix: ${{ inputs.path_prefix }}
-          images: ${{ inputs.images }}
-          repository: ${{ inputs.repository || github.repository }}
-          # Bind ref to this job's effective checkout ref, so the
-          # build id discriminates on the tree actually discovered.
-          # This lane checks out inputs.ref directly.
-          ref: ${{ inputs.ref }}
-          gerrit_refspec: ${{ inputs.gerrit_refspec }}
-          image_namespace: ${{ needs.gerrit-validate.outputs.namespace }}
-          # With build_command set, an empty discovery is not an
-          # error: the build job enumerates what the command created
-          build_command: ${{ inputs.build_command }}
-          build_command_images: ${{ inputs.build_command_images }}
-
       # The docker preset matches the conventional Dockerfile names at
       # any depth inside the detection scope, which covers discovered
       # images, and it joins the presets the caller names whatever
@@ -847,12 +826,15 @@ jobs:
       # refuses, a name with a control character, which the action's
       # line-per-pattern input cannot carry, and a name the action's
       # reading of that input would alter (whitespace at either end,
-      # or a Unicode line separator) skip the detection: no sidecar,
+      # or a Unicode line separator) skip the detection: no verdict,
       # so the gate stays on. So does a build_command: the command
       # builds whatever it likes from wherever it likes, so the
       # discovered images do not describe the dependency set, and a
-      # caller with one stays on the full gate. Runs after discovery,
-      # which has validated the images input.
+      # caller with one stays on the full gate. The step reads
+      # workflow inputs alone, never the checkout or another job;
+      # docker-metadata's discovery validates the images input, and a
+      # malformed one fails that job, so no image builds and no scan
+      # runs.
       - name: 'Resolve dependency change scope'
         id: dependency-scope
         # yamllint disable-line rule:line-length
@@ -1163,48 +1145,115 @@ jobs:
             echo "No named Dockerfiles; the docker preset covers discovery"
           fi
 
-      # Writes dependency-change.json for the Grype job's
-      # dependencies-changed gate, only when it resolved what the
-      # change touched. The sbom job has no checkout, so detection
-      # runs here, where the source is. Every path the action cannot
-      # vouch for writes no file, which the Grype job reads as
-      # unresolved, keeping the gate on; so does a recipe the step
-      # above found no pattern for, which skips this step. The
-      # dependency set is the image recipe plus the application inside
-      # it, so the presets are docker plus the union the caller names.
-      - name: 'Detect dependency changes'
-        id: dependency-change
+      # Runs dependency-change-action against this job's checkout
+      # (full history, or the Gerrit change at depth 2) for the Grype
+      # job's dependencies-changed gate, scoped by the step above. The
+      # verdict leaves as the dependencies_changed job output: 'true'
+      # or 'false' once resolved, empty otherwise, and empty gates. A
+      # recipe the step above found no pattern for turns detection
+      # off, which leaves the verdict empty too.
+      - name: 'Gather repository metadata'
+        id: repo-metadata
         # yamllint disable-line rule:line-length
-        if: inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed' && steps.dependency-scope.outputs.skip != 'true'
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/dependency-change-action@257928b15e4e6a5cc5a888435be59b058055c4e1  # v0.0.1
+        uses: lfreleng-actions/repository-metadata-action@18e5b7c5b16423b0e734891d103513826b324858  # v0.4.0
         with:
-          ecosystems: ${{ steps.dependency-scope.outputs.ecosystems }}
-          patterns: ${{ steps.dependency-scope.outputs.patterns }}
-          path-prefix: ${{ steps.dependency-scope.outputs.path_prefix }}
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          output: 'dependency-change.json'
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_summary: 'true'
+          gerrit_summary: ${{ inputs.gerrit_refspec != '' }}
+          artifact_upload: 'true'
+          artifact_formats: 'json'
+          # yamllint disable-line rule:line-length
+          dependency_change: ${{ inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed' && steps.dependency-scope.outputs.skip != 'true' }}
+          gerrit_refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          dependency_ecosystems: ${{ steps.dependency-scope.outputs.ecosystems }}
+          # The resolver's patterns, then the caller's; the detector
+          # skips the blank line either leaves
+          dependency_patterns: |-
+            ${{ steps.dependency-scope.outputs.patterns }}
+            ${{ inputs.grype_dependency_patterns }}
+          # yamllint disable-line rule:line-length
+          dependency_path_prefix: ${{ steps.dependency-scope.outputs.path_prefix }}
 
-      # The sidecar travels as a file in an artefact of its own, under
-      # the build_id the SBOM and archive artefacts use, never as a
-      # job output: matrix jobs collapse outputs to one value, and a
-      # file transfers unchanged. Only a manifest the action vouches
-      # for travels: the action removes a sidecar the checkout brought
-      # along before it looks, and names its own in 'manifest' once
-      # the result is resolved, so the upload runs on that output
-      # alone. A skipped or unresolved detection then uploads nothing,
-      # a planted {"changed": false} included, and the Grype job finds
-      # no manifest and keeps the gate on.
-      - name: 'Upload dependency change sidecar'
+  docker-metadata:
+    name: 'Docker Metadata'
+    needs: gerrit-validate
+    runs-on: ubuntu-latest
+    outputs:
+      images_json: ${{ steps.discover.outputs.images_json }}
+      image_count: ${{ steps.discover.outputs.image_count }}
+      build_id: ${{ steps.discover.outputs.build_id }}
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        if: inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed' && steps.dependency-change.outputs.manifest != ''
-        # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
         with:
-          name: dependency-change-${{ steps.discover.outputs.build_id }}
-          path: dependency-change.json
-          retention-days: 45
-          if-no-files-found: ignore
+          config: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # A caller naming a list depends on it, so its absence fails
+          # here rather than at the first blocked connection.
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@f0dd3d4dd4fceff1f56348152ecf0e040594f16a  # v1.2.1
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # An explicit 'images' input wins; otherwise the action walks
+      # the estate-observed Dockerfile locations, keeping discovery
+      # order as build order. It also draws the per-invocation
+      # build_id that names this run's artifacts.
+      - name: 'Discover images'
+        id: discover
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/docker-build-matrix-action@2c4e2fc6082967f6520243db11721457949b93c9  # v0.1.0
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          images: ${{ inputs.images }}
+          repository: ${{ inputs.repository || github.repository }}
+          # Bind ref to this job's effective checkout ref, so the
+          # build id discriminates on the tree actually discovered.
+          # This lane checks out inputs.ref directly.
+          ref: ${{ inputs.ref }}
+          gerrit_refspec: ${{ inputs.gerrit_refspec }}
+          image_namespace: ${{ needs.gerrit-validate.outputs.namespace }}
+          # With build_command set, an empty discovery is not an
+          # error: the build job enumerates what the command created
+          build_command: ${{ inputs.build_command }}
+          build_command_images: ${{ inputs.build_command_images }}
 
   build:
     name: 'Docker Build'
@@ -1870,7 +1919,10 @@ jobs:
   grype:
     name: 'Grype Audit SBOM'
     runs-on: ubuntu-latest
-    needs: ['sbom', 'docker-metadata']
+    # repository-metadata carries the dependency change verdict. The
+    # !cancelled() guard keeps the scan running when that job failed
+    # or skipped; the verdict is then empty, and empty gates.
+    needs: ['sbom', 'docker-metadata', 'repository-metadata']
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.sbom.result == 'success' && inputs.grype_enabled }}
     timeout-minutes: 10
@@ -1910,21 +1962,6 @@ jobs:
         with:
           name: sbom-files-${{ needs.docker-metadata.outputs.build_id }}
 
-      # The sidecar docker-metadata uploaded when it resolved the
-      # change, placed beside the SBOMs. An unresolved result uploaded
-      # none; a pattern matches nothing then and the download succeeds
-      # empty, where a name would fail it. The build_id names one
-      # artefact at most, so the lone match lands in the working
-      # directory.
-      - name: 'Download dependency change sidecar'
-        if: inputs.grype_gate_when == 'dependencies-changed'
-        # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
-        with:
-          # yamllint disable-line rule:line-length
-          pattern: dependency-change-${{ needs.docker-metadata.outputs.build_id }}
-          merge-multiple: true
-
       # The grype_permit_fail input (or, when unset, the NO_BLOCK_AUDIT_FAIL
       # repository variable) disables failure propagation so pull requests
       # can proceed when blocked by newly discovered CVEs in base images
@@ -1941,9 +1978,11 @@ jobs:
           dependency-policy: ${{ inputs.grype_dependency_policy }}
           transitive-fail-on: ${{ inputs.grype_transitive_fail_on }}
           gate-when: ${{ inputs.grype_gate_when }}
-          # Downloaded beside the SBOMs when docker-metadata resolved
-          # the change; an absent manifest keeps the gate on
-          dependency-change-manifest: 'dependency-change.json'
+          # A failed job can still expose outputs its earlier steps
+          # wrote, so the verdict travels only from a job that
+          # succeeded; anything else is empty, which keeps the gate on
+          # yamllint disable-line rule:line-length
+          dependencies-changed: ${{ needs.repository-metadata.result == 'success' && needs.repository-metadata.outputs.dependencies_changed || '' }}
           # yamllint disable-line rule:line-length
           remediation-window-days: ${{ inputs.grype_remediation_window_days }}
           # yamllint disable-line rule:line-length
@@ -1954,6 +1993,7 @@ jobs:
           artifact-name: grype-scan-results-${{ needs.docker-metadata.outputs.build_id }}
           retention-days: '45'
           cache-db: ${{ inputs.grype_cache_db }}
+          bypass-repository: ${{ inputs.grype_bypass_repository }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # The action's summary gives the gate's reason only when it
