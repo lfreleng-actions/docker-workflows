@@ -565,23 +565,29 @@ The Grype scan gates every run by default. `grype_gate_when:
 lets it fail the run when the change touched the dependency chain
 and report without failing otherwise, so a documentation fix does
 not block on a vulnerability that landed in a base image overnight.
-Detection runs in the `docker-metadata` job through
+Detection runs once, in the `repository-metadata` job, through the
 <!-- markdownlint-disable-next-line MD013 -->
-[dependency-change-action](https://github.com/lfreleng-actions/dependency-change-action),
-which compares the commit under test with its base: the first parent
-on a Gerrit patch set or a pull request's merge commit, and the
-commit the branch held before a push. The `docker-metadata` checkout
-fetches two commits, enough for the first parent; a push of more
-than one commit leaves its base outside the checkout, and a
-`repository` or
-`ref` input, a scheduled run or a manual one has no base at all, so
-each of those gates. Its result travels to the scan as the
-`dependency-change-<build_id>` artefact, which the scan reads with
-`dependency-change-manifest`; the `grype_gate_active` and
-`grype_gate_reason` workflow outputs report the decision.
+[dependency change detection](https://github.com/lfreleng-actions/repository-metadata-action/blob/18e5b7c5b16423b0e734891d103513826b324858/README.md#dependency-change-detection)
+of repository-metadata-action, which runs
+<!-- markdownlint-disable-next-line MD013 -->
+[dependency-change-action](https://github.com/lfreleng-actions/dependency-change-action)
+against that job's checkout. It compares the commit under test with
+its base: the first parent on a Gerrit patch set or a pull request's
+merge commit, and the commit the branch held before a push. The
+checkout fetches full history (a Gerrit change, two commits), so the
+base is present; a `repository` or `ref` input, a scheduled run or a
+manual one has no base at all, so each of those gates. The job
+exports the verdict as its `dependencies_changed` output, `true`,
+`false` or empty, and the scan reads it with `dependencies-changed`.
+The lane fails closed: when `repository-metadata` fails or skips, the
+scan still runs and receives an empty verdict, which gates. The
+`grype_gate_active` and `grype_gate_reason` workflow outputs report
+the decision.
 
 `grype_dependency_ecosystems` names the file presets of the
-application the images build, `docker,python` say. The `docker`
+application the images build, `docker,python` say. The action
+watches every preset when a caller names none; this lane narrows it
+to the images' own dependency set, and the `docker`
 preset is always included, whatever the input says: it covers
 `Dockerfile`, `Dockerfile.*`, `*.Dockerfile`, `Containerfile`,
 `Containerfile.*` and the lower-case `*.dockerfile`, at any depth
@@ -610,10 +616,9 @@ the detection, with a notice in the step summary naming the file,
 and the gate stays on. So does `build_command`: the command builds
 whatever it likes from wherever it likes, so discovery does not
 describe its dependency set, and a caller with a custom build stays
-on the full gate, with a notice in the step summary. The sidecar travels
-when the action names a manifest it wrote, and never otherwise, so a
-`dependency-change.json` committed to the repository cannot stand in
-for one. The action's README lists every preset's files,
+on the full gate, with a notice in the step summary. The verdict
+travels as a job output alone, so no file committed to the
+repository can stand in for one. The action's README lists every preset's files,
 its base selection and the rule for symlinks. Detection watches the
 files that declare or lock dependencies and does not follow
 build-time indirection: a base image a caller's `build_args` selects
@@ -1121,15 +1126,16 @@ A further `build-test.yaml` call sets `grype_gate_when:
 'dependencies-changed'`, and a follow-on job requires the gate to
 stay active with the reason that the dependency-change signal was
 unavailable, which a fixture checked out at a tag guarantees; that
-proves the sidecar travelled from `docker-metadata` to the scan.
+proves the verdict travelled from `repository-metadata` to the scan.
 `tests/test_dependency_change.sh`, run as
 `bash tests/test_dependency_change.sh`, checks both verify lanes
 declare the Grype policy inputs alike and pass each to the scan,
 runs the `gerrit-validate` steps that check them against valid and
-invalid values, checks the wiring of `dependency-change-action` and
-its sidecar in `build-test.yaml`, runs the step that resolves the
-detection scope (the `docker` preset joined to the caller's, custom
-Dockerfile names turned into patterns, the scope widened for a recipe,
+invalid values, checks the detection wiring in `repository-metadata`
+and the verdict's path to the scan in `build-test.yaml`, runs the
+step that resolves the detection scope (the `docker` preset joined
+to the caller's, custom Dockerfile names turned into patterns, the
+scope widened for a recipe,
 context or named build context outside `path_prefix`, and detection
 skipped for a name no pattern can express or a `build_command`), runs
 the action at its pinned commit against a scratch repository to show a

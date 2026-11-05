@@ -479,15 +479,16 @@ jobs:
 
   # The Grype dependency-change gate (#200) end to end, on the
   # unresolved path. The lane asks to gate only when the change
-  # touched the dependency chain, so docker-metadata runs
-  # dependency-change-action and the grype job reads its sidecar.
-  # Against a fixture checked out at a tag, the action finds no base
-  # to compare with (the checkout's HEAD is not this run's commit), so
-  # it writes no sidecar and the scan fails closed: the gate stays
-  # active and names that reason. The job below asserts both. The
-  # SBOM stays on: the grype job runs only after the sbom job, and
-  # without it the outputs asserted below are empty. The resolved
-  # path, where a sidecar travels, is the next call.
+  # touched the dependency chain, so repository-metadata runs the
+  # detection and the grype job reads its dependencies_changed
+  # output. Against a fixture checked out at a tag, the detection
+  # finds no base to compare with (the checkout's HEAD is not this
+  # run's commit), so the verdict is empty and the scan fails closed:
+  # the gate stays active and names that reason. The job below
+  # asserts both. The SBOM stays on: the grype job runs only after
+  # the sbom job, and without it the outputs asserted below are
+  # empty. The resolved path, where a verdict travels, is the next
+  # call.
   build-test-dependency-gate:
     name: 'Build/Test (dependency gate)'
     permissions:
@@ -535,22 +536,23 @@ jobs:
           fi
           echo "Dependency gate failed closed as designed ✅"
 
-  # The same gate with a resolved result. An unresolved result writes
-  # no sidecar, so the call above passes whether or not a sidecar
-  # could travel: this call proves the transport. It builds a fixture
-  # in this repository at the run's own commit, so the checkout's
-  # HEAD is GITHUB_SHA and the action compares it with the base
-  # branch, the first parent of the pull request's merge commit. The
-  # docker preset matches the fixture Dockerfile, any recipe added
-  # under the fixture, and one directly in an ancestor directory
-  # (tests/fixtures, tests, the root), so the sidecar reads 'changed:
-  # false' unless the pull request edits one of those, and the scan
-  # withholds the gate only once it has read the sidecar; one that
-  # failed to travel leaves the gate active with the unresolved
-  # reason, which the job below rejects. That job diffs the same two
-  # commits under the same names to know which verdict to require, so
-  # a pull request that edits such a recipe passes by expecting an
-  # armed gate, and nothing else passes.
+  # The same gate with a resolved result. An unresolved result leaves
+  # the verdict empty, so the call above passes whether or not a
+  # verdict could travel: this call proves the transport. It builds a
+  # fixture in this repository at the run's own commit, so the
+  # checkout's HEAD is GITHUB_SHA and the detection compares it with
+  # the base branch, the first parent of the pull request's merge
+  # commit. The docker preset matches the fixture Dockerfile, any
+  # recipe added under the fixture, and one directly in an ancestor
+  # directory (tests/fixtures, tests, the root), so the verdict reads
+  # 'false' unless the pull request edits one of those, and the scan
+  # withholds the gate only once that verdict has reached it from
+  # repository-metadata's job output; one that failed to travel
+  # leaves the gate active with the unresolved reason, which the job
+  # below rejects. That job diffs the same two commits under the same
+  # names to know which verdict to require, so a pull request that
+  # edits such a recipe passes by expecting an armed gate, and
+  # nothing else passes.
   build-test-dependency-gate-resolved:
     name: 'Build/Test (dependency gate, resolved)'
     permissions:
@@ -567,7 +569,7 @@ jobs:
       grype_cache_db: 'restore-only'
 
   build-test-dependency-gate-resolved-checks:
-    name: 'Dependency gate reads the sidecar'
+    name: 'Dependency gate reads the verdict'
     needs: build-test-dependency-gate-resolved
     permissions:
       contents: read
@@ -589,7 +591,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          # The same two commits the lane's docker-metadata compared
+          # The same two commits the lane's repository-metadata compared
           fetch-depth: 2
           persist-credentials: false
       - name: 'Require the verdict the diff predicts'
@@ -643,7 +645,7 @@ jobs:
           if [ "${GATE_ACTIVE}" != "${expected_active}" ]; then
             echo "::error::The dependency gate reported grype_gate_active" \
               "'${GATE_ACTIVE}', expected '${expected_active}'; the" \
-              "sidecar did not reach the scan or said something else"
+              "verdict did not reach the scan or said something else"
             status=1
           fi
           if [ "${GATE_REASON}" != "${expected_reason}" ]; then
@@ -654,7 +656,7 @@ jobs:
           if [ "${status}" -ne 0 ]; then
             exit "${status}"
           fi
-          echo "Dependency gate read the sidecar ✅"
+          echo "Dependency gate read the verdict ✅"
 
   # The release lane, end to end, without publishing anything.
   #
@@ -944,10 +946,10 @@ jobs:
         run: bash tests/test_latest_policy.sh
 
   # The Grype dependency-change gate: the policy inputs and their route
-  # to grype-scan-action in both lanes, the gerrit-validate steps that
+  # to grype-scan-action in every lane, the gerrit-validate steps that
   # check them run against valid and invalid values, the verify lane's
-  # wiring of dependency-change-action and its sidecar, the two calls
-  # above that prove the sidecar's round trip, the step that turns
+  # detection in repository-metadata and its job output, the two
+  # calls above that prove the verdict's round trip, the step that turns
   # custom Dockerfile names into the action's patterns, and the
   # action itself at its pin, run against a scratch repository to show
   # a Dockerfile with a custom name counts only once those patterns
