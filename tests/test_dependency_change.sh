@@ -23,7 +23,7 @@
 #   unstarted; and the testing.yaml job that runs the validator with
 #   build-test's defaults and a bad gate-when and requires the
 #   rejection;
-# - the verify lane's wiring: repository-metadata-action at its v0.4.0
+# - the verify lane's wiring: repository-metadata-action at its v0.5.1
 #   commit in every workflow that calls it; in build-test.yaml its
 #   metadata step running the detection behind the
 #   dependencies-changed gate, after the scope step and a checkout of
@@ -580,22 +580,22 @@ check 'testing: one step after the rejection reads its outcome and can fail' \
 # --- Wiring in the verify lane --------------------------------------------
 
 metadata_action='lfreleng-actions/repository-metadata-action'
-metadata_pin='18e5b7c5b16423b0e734891d103513826b324858'
+metadata_pin='f0e5d2d8dc1154a5d702b75acc551eff6ba072dc'
 gate_if="inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed'"
 
 # Every workflow that calls repository-metadata-action pins the one
-# commit v0.4.0 names (not the tag object), with its version comment,
+# commit v0.5.1 names (not the tag object), with its version comment,
 # which the YAML parser drops
 for lane in build-test build-test-release merge; do
   workflow="${workflows}/${lane}.yaml"
-  check "${lane}: repository-metadata calls the action at the v0.4.0 pin" \
+  check "${lane}: repository-metadata calls the action at the v0.5.1 pin" \
     "$(step_field "${workflow}" repository-metadata repo-metadata uses)" \
     "${metadata_action}@${metadata_pin}"
-  if grep -qE "uses: ${metadata_action}@${metadata_pin}[[:space:]]+# v0\.4\.0$" \
+  if grep -qE "uses: ${metadata_action}@${metadata_pin}[[:space:]]+# v0\.5\.1$" \
     "${workflow}"; then
-    echo "ok: ${lane}: the pin carries its v0.4.0 comment"
+    echo "ok: ${lane}: the pin carries its v0.5.1 comment"
   else
-    echo "FAIL: ${lane}: the pin lacks its '# v0.4.0' comment"
+    echo "FAIL: ${lane}: the pin lacks its '# v0.5.1' comment"
     failures=$((failures + 1))
   fi
 done
