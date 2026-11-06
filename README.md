@@ -569,7 +569,7 @@ and report without failing otherwise, so a documentation fix does
 not block on a vulnerability that landed in a base image overnight.
 Detection runs once, in the `repository-metadata` job, through the
 <!-- markdownlint-disable-next-line MD013 -->
-[dependency change detection](https://github.com/lfreleng-actions/repository-metadata-action/blob/18e5b7c5b16423b0e734891d103513826b324858/README.md#dependency-change-detection)
+[dependency change detection](https://github.com/lfreleng-actions/repository-metadata-action/blob/f0e5d2d8dc1154a5d702b75acc551eff6ba072dc/README.md#dependency-change-detection)
 of repository-metadata-action, which runs
 <!-- markdownlint-disable-next-line MD013 -->
 [dependency-change-action](https://github.com/lfreleng-actions/dependency-change-action)
