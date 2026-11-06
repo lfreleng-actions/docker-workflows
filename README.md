@@ -1208,11 +1208,7 @@ three allow-list extension inputs: the organisation's own list as an
 unpinned supplemental list and `github.com:443` as an inline
 endpoint. Both duplicate entries the baseline already carries, so
 the call grants nothing new but proves the lane forwards each
-input. `tests/test-harden-runner-inputs.sh`, run as
-`bash tests/test-harden-runner-inputs.sh` and by a prek hook, checks
-that every reusable workflow exposes the five `harden_runner_*`
-inputs and passes each to every harden-runner-block-action step,
-then mutates a copy of one workflow and expects each mutant to fail.
+input.
 
 Both publish lanes are also self-tested, under `dry_run`. Neither
 publishes: they build, audit and test the fixture images, then
