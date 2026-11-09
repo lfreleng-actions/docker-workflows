@@ -880,7 +880,7 @@ jobs:
         with:
           persist-credentials: false
       - name: 'Test release digest resolution'
-        run: tests/test_release_digest.sh
+        run: bash tests/test_release_digest.sh
 
   # namespace_mode resolution in every lane: the gerrit-validate step
   # script that resolves the image namespace, extracted from each
@@ -912,7 +912,7 @@ jobs:
         with:
           persist-credentials: false
       - name: 'Test namespace_mode resolution'
-        run: tests/test_namespace_mode.sh
+        run: bash tests/test_namespace_mode.sh
 
   # latest_policy in both publishing lanes (#115): the input and its
   # gerrit-validate check, the wiring of docker-promote-action at its
@@ -1086,7 +1086,7 @@ jobs:
         with:
           persist-credentials: false
       - name: 'Test signature_format argument construction'
-        run: tests/test_signature_format.sh
+        run: bash tests/test_signature_format.sh
 
   # The merge lane's gate-then-stage condition: snapshot-publish's
   # 'if:' extracted from merge.yaml and evaluated over every
@@ -1117,7 +1117,7 @@ jobs:
         with:
           persist-credentials: false
       - name: 'Test the snapshot-publish gate condition'
-        run: tests/test_merge_gating.sh
+        run: bash tests/test_merge_gating.sh
 
   # The verify lane's release-file checks, case by case: the wiring
   # of check-release and release-verify, the registry input step
@@ -1149,7 +1149,7 @@ jobs:
         with:
           persist-credentials: false
       - name: 'Test release-file checks'
-        run: tests/test_verify_release.sh
+        run: bash tests/test_verify_release.sh
 
   # The impostor-commit ignores in .github/zizmor.yml against the
   # examples' all-zero placeholder 'uses:' lines. The zizmor hook runs
