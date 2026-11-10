@@ -497,43 +497,57 @@ jobs:
       # The effective image namespace; empty for namespace_mode none
       namespace: ${{ steps.namespace.outputs.namespace }}
     steps:
+      # The values compose image references and reach docker login,
+      # docker push and crane, so a bad one must stop here, before
+      # anything writes. This step holds the checks only the raw
+      # values need; the next step checks each against the registry
+      # rule docker-promote-action holds for every lane.
       - name: 'Validate registry inputs'
+        id: registries
         shell: bash
         env:
           SNAPSHOT_REGISTRY: ${{ inputs.snapshot_registry }}
           RELEASE_REGISTRY: ${{ inputs.release_registry }}
         run: |
-          # Require host[:port] with an optional repository path: the
-          # values compose image references and reach docker login,
-          # docker push and crane, so schemes, credentials, query
-          # strings or hostile content must stop here. The path
-          # serves Artifactory's repository-path method, where the
-          # repository key sits below the host rather than on a port
-          # of its own as in Nexus 3.
-          #
-          # Path components take Docker's reference grammar: runs of
-          # lowercase alphanumerics joined by a single '.' or '_',
-          # exactly '__', or one or more '-'. Docker and crane reject
-          # anything else when they parse the reference, so a looser
-          # rule would accept a value here only to fail every publish
-          # later, which is what this fail-fast check exists to
-          # prevent. Verified against docker itself: 'a..b', 'a___b'
-          # and 'a-_b' are refused, 'a__b' and 'a---b' are not. The
-          # rule also excludes '.', '..' and trailing separators
-          # without needing checks of their own.
-          pattern='^[A-Za-z0-9.-]+(:[0-9]+)?'
-          pattern+='(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*$'
-          for registry in "${SNAPSHOT_REGISTRY}" "${RELEASE_REGISTRY}"
+          # Both are required: snapshot publishing does not wait for
+          # the release jobs, and mode validate checks a base only
+          # when it is set, so an empty one would pass it.
+          if [ -z "${SNAPSHOT_REGISTRY}" ] || [ -z "${RELEASE_REGISTRY}" ]
+          then
+            echo "::error::snapshot_registry and release_registry are" \
+              "both required"
+            exit 1
+          fi
+          # Mode validate strips surrounding whitespace before its
+          # check, while this lane uses each value as given, so refuse
+          # whitespace and anything beyond printable ASCII here.
+          LC_ALL=C  # so [:graph:] means printable ASCII alone
+          for input in "snapshot_registry=${SNAPSHOT_REGISTRY}" \
+            "release_registry=${RELEASE_REGISTRY}"
           do
-            if [[ ! "${registry}" =~ ${pattern} ]]
-            then
-              echo "::error::Invalid registry input: ${registry}" \
-                "(expected host[:port] with an optional repository" \
-                "path of lowercase components)"
-              exit 1
-            fi
+            case "${input#*=}" in
+              *[![:graph:]]*)
+                echo "::error::${input%%=*} holds whitespace or a" \
+                  "character outside printable ASCII"
+                exit 1
+                ;;
+            esac
           done
-          echo "Registry inputs validated ✅"
+          echo "Both registry inputs set ✅"
+
+      # docker-promote-action holds the registry rule every lane
+      # shares (host[:port] of DNS labels and a TCP port, a host
+      # Docker reads as a host, and an optional repository path of
+      # Docker reference components); mode validate checks both bases
+      # and contacts no registry.
+      - name: 'Validate registry hosts'
+        id: registry-hosts
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/docker-promote-action@65fa4d7b93ad6cf841c9e98dcc276b5b0977a43b  # v0.4.1
+        with:
+          mode: 'validate'
+          pull_registry: ${{ inputs.snapshot_registry }}
+          push_registry: ${{ inputs.release_registry }}
 
       # Checked here rather than left to docker-promote-action, which
       # would refuse it only once a release is already being promoted

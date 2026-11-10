@@ -1984,8 +1984,9 @@ jobs:
           # merge.yaml requires both registries, and an override in a
           # release file is checked against the matching one, so a
           # check with only one of them could not predict the merge.
-          # The pattern is merge.yaml's: host[:port] with an optional
-          # repository path of Docker reference components.
+          # The next step checks each value against the registry rule
+          # docker-promote-action holds; this step holds what that
+          # rule does not: both set, and no whitespace.
           if [ -z "${SNAPSHOT_REGISTRY}" ] || [ -z "${RELEASE_REGISTRY}" ]
           then
             echo "::error::Release-file checks need both" \
@@ -1993,19 +1994,37 @@ jobs:
               "merge.yaml receives); set both, or neither"
             exit 1
           fi
-          pattern='^[A-Za-z0-9.-]+(:[0-9]+)?'
-          pattern+='(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*$'
-          for registry in "${SNAPSHOT_REGISTRY}" "${RELEASE_REGISTRY}"
+          # Mode validate strips surrounding whitespace before its
+          # check, while merge.yaml refuses it, so refuse whitespace
+          # and anything beyond printable ASCII here too.
+          LC_ALL=C  # so [:graph:] means printable ASCII alone
+          for input in "snapshot_registry=${SNAPSHOT_REGISTRY}" \
+            "release_registry=${RELEASE_REGISTRY}"
           do
-            if [[ ! "${registry}" =~ ${pattern} ]]
-            then
-              echo "::error::Invalid registry input: ${registry}" \
-                "(expected host[:port] with an optional repository" \
-                "path of lowercase components)"
-              exit 1
-            fi
+            case "${input#*=}" in
+              *[![:graph:]]*)
+                echo "::error::${input%%=*} holds whitespace or a" \
+                  "character outside printable ASCII"
+                exit 1
+                ;;
+            esac
           done
-          echo "Registry inputs validated ✅"
+          echo "Both registry inputs set ✅"
+
+      # Runs only once the step above has found both registries set.
+      # docker-promote-action holds the registry rule every lane
+      # shares (host[:port] of DNS labels and a TCP port, a host
+      # Docker reads as a host, and an optional repository path of
+      # Docker reference components), so this lane accepts the values
+      # merge.yaml does. Mode validate contacts no registry.
+      - name: 'Validate registry hosts'
+        id: registry-hosts
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/docker-promote-action@65fa4d7b93ad6cf841c9e98dcc276b5b0977a43b  # v0.4.1
+        with:
+          mode: 'validate'
+          pull_registry: ${{ inputs.snapshot_registry }}
+          push_registry: ${{ inputs.release_registry }}
 
       # The detect action compares HEAD with its first parent, so both
       # checkouts fetch depth 2 and the action fails on one too shallow

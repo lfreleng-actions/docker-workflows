@@ -808,8 +808,9 @@ Docker Hub leg skips with a warning when unset) and
 credential for `registry`, keyed on the published repository's
 name as in `merge.yaml`; that registry skips with a warning when
 unset). The lane validates `registry` as `merge.yaml` validates its
-registry inputs, but also requires a host Docker reads as one (with a
-`.` or a port, or `localhost`) rather than as a Docker Hub namespace.
+registry inputs, through `docker-promote-action`'s registry check,
+which also requires a host Docker reads as one (with a `.` or a
+port, or `localhost`) rather than as a Docker Hub namespace.
 It refuses GHCR and Docker Hub hosts there (they have inputs of
 their own), and logs in to its `host[:port]` in the build,
 sign and promote-release jobs whenever they push or tag there.
@@ -1230,6 +1231,16 @@ off, and a follow-up job asserts its `registry_plan` output.
 `tests/test_latest_policy.sh` checks that both lanes refuse a bad
 `latest_policy` and hand it to `docker-promote-action`, and runs the
 release lane's Latest GitHub release decision against a stub `gh`.
+All three lanes check their registry inputs through
+`docker-promote-action`'s registry check, so they accept and refuse
+the same hosts; the action's own suite tests that rule, and
+`tests/test_registry_wiring.sh` checks each lane calls it at the
+shared pin with its registry inputs, before anything writes. The
+action skips an empty registry and strips surrounding whitespace
+before its check, so each lane's own bash check runs ahead of it:
+`merge.yaml`'s requires both registries, and every lane refuses
+whitespace or a character outside printable ASCII, since the lanes
+use the value as given; the wiring test runs `merge.yaml`'s check.
 
 A dry run cannot reach the behaviour that appears after images
 push: cosign signing, SLSA provenance, per-registry digest capture,
@@ -1243,9 +1254,10 @@ registry steps, extracted from the workflow, and then the build
 action at the commit the lane pins, against a fake `docker`. It
 checks that the steps feed the action the right tags and
 repositories, the `registry` input's login and dry-run plan
-included, that the `registry` input check accepts and refuses the
-right values, and that each pushed repository resolves its own
-digest, Docker Hub's and a port-addressed registry's included.
+included, that the `registry` input's lane-specific check refuses
+GHCR, Docker Hub, whitespace and a `registry_user` without a
+`registry`, and that each pushed repository resolves its own digest, Docker Hub's
+and a port-addressed registry's included.
 
 One consequence worth knowing before calling `build-test-release.yaml`
 with `dry_run`, self-test or otherwise: GitHub checks a called

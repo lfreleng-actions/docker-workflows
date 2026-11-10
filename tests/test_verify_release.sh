@@ -11,8 +11,8 @@
 # - the wiring of both jobs, read from the workflow: the actions at
 #   commit SHAs, the inputs merge.yaml's promotion also uses, and no
 #   checkout in the job holding the registry credential
-# - check-release's registry input step, extracted from the workflow
-#   and run as GitHub runs a 'shell: bash' step
+# - check-release's both-or-neither registry input step, extracted
+#   from the workflow and run as GitHub runs a 'shell: bash' step
 # - docker-release-detect-action, fetched at the commit the workflow
 #   pins, against git histories shaped like a Gerrit patch set and a
 #   pull request merge commit, with valid and malformed release files
@@ -142,6 +142,9 @@ if [ ! -s "${work}/registries.sh" ]; then
   exit 1
 fi
 
+# The step holds the both-or-neither rule and refuses whitespace,
+# which docker-promote-action strips; the action checks each value in
+# the next step (tests/test_registry_wiring.sh).
 # registries_case DESCRIPTION EXPECTED SNAPSHOT RELEASE
 # EXPECTED is 'ok', or 'error' when the step must fail
 registries_case() {
@@ -168,10 +171,12 @@ registries_case 'a snapshot registry alone fails' error \
   nexus3.onap.org:10003 ''
 registries_case 'a release registry alone fails' error \
   '' nexus3.onap.org:10002
-registries_case 'a URL scheme fails' error \
-  https://nexus3.onap.org:10003 nexus3.onap.org:10002
-registries_case 'an uppercase path component fails' error \
-  nexus3.onap.org:10003 acme.jfrog.io/Docker
+registries_case 'a whitespace-only release registry fails' error \
+  nexus3.onap.org:10003 ' '
+registries_case 'a trailing space fails' error \
+  'acme.jfrog.io/docker-snapshot ' acme.jfrog.io/docker-release
+registries_case 'a leading tab fails' error \
+  acme.jfrog.io/docker-snapshot $'\tacme.jfrog.io/docker-release'
 
 # --- Fetch the pinned actions ---------------------------------------------
 
