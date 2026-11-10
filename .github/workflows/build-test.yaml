@@ -74,6 +74,16 @@ on:
         required: false
         type: string
         default: ''
+      checkout_submodules:
+        description: >-
+          Check out git submodules in every job that checks out the
+          repository, on the Gerrit and plain checkout paths alike, so
+          image builds, tests and lint all see content a submodule
+          carries. The Gerrit path also initialises submodules the
+          change adds.
+        required: false
+        type: boolean
+        default: false
 
       # --- Project layout ---
       path_prefix:
@@ -692,27 +702,21 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
+          fetch-depth: ${{ inputs.gerrit_refspec != '' && '2' || '0' }}
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
-          fetch-depth: 0
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       # The docker preset matches the conventional Dockerfile names at
       # any depth inside the detection scope, which covers discovered
@@ -1121,26 +1125,20 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       # An explicit 'images' input wins; otherwise the action walks
       # the estate-observed Dockerfile locations, keeping discovery
@@ -1211,26 +1209,20 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       # build_artifacts places this run's earlier build output (a
       # Java lane's jars, say) in the checkout, so Dockerfile COPY
@@ -1586,26 +1578,20 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       - name: 'Download image archives'
         if: inputs.test_command != ''
@@ -1690,26 +1676,20 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       - name: 'Lint Dockerfiles (hadolint)'
         shell: bash
@@ -2027,34 +2007,27 @@ jobs:
           push_registry: ${{ inputs.release_registry }}
 
       # The detect action compares HEAD with its first parent, so both
-      # checkouts fetch depth 2 and the action fails on one too shallow
+      # checkout modes fetch depth 2 and it fails on one too shallow
       # to hold it. A Gerrit patch set compares with the commit it
       # sits on. A pull request's default checkout is the merge commit
       # GitHub prepares, whose first parent is the target branch, so
       # every commit of the pull request counts; a caller pinning ref
       # to the head commit would see only that commit's own changes.
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
           fetch-depth: '2'
           repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
-          fetch-depth: 2
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       # Reads files and git history only; runs nothing from the
       # checkout and contacts no registry. Any value it outputs has

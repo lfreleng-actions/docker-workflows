@@ -114,16 +114,24 @@ expect() {
   expect release-verify "${promote}" with.on_conflict fail
 }
 
-# Both checkouts must reach HEAD's parent, or detection fails
-for step in 'Checkout Gerrit change' 'Checkout repository'; do
-  depth=$(yq -r ".jobs.\"check-release\".steps[]
-    | select(.name == \"${step}\") | .with.\"fetch-depth\"" "${workflow}")
-  if [ "${depth}" = 2 ]; then
-    echo "ok: check-release: '${step}' fetches depth 2"
-  else
-    fail "check-release: '${step}' fetch-depth is '${depth}', expected 2"
-  fi
-done
+# The one checkout must reach HEAD's parent in both modes, or
+# detection fails
+checkouts=$(yq -r '[.jobs."check-release".steps[].uses // ""
+  | select(test("checkout"))] | join(" ")' "${workflow}")
+if [ "${checkouts%%@*}" = lfreleng-actions/checkout-gerrit-change-action ] &&
+  [ "${checkouts}" = "${checkouts%% *}" ]; then
+  echo 'ok: check-release checks out once, with checkout-gerrit-change-action'
+else
+  fail "check-release checks out with '${checkouts}'"
+fi
+depth=$(yq -r '.jobs."check-release".steps[]
+  | select((.uses // "") | test("checkout")) | .with."fetch-depth"' \
+  "${workflow}")
+if [ "${depth}" = 2 ]; then
+  echo "ok: check-release: 'Checkout' fetches depth 2"
+else
+  fail "check-release: 'Checkout' fetch-depth is '${depth}', expected 2"
+fi
 
 # The credential job reads only check-release's validated outputs
 checkouts=$(yq -r '[.jobs."release-verify".steps[].uses // ""
