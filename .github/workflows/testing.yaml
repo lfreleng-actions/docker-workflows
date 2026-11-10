@@ -287,6 +287,105 @@ jobs:
       harden_runner_supplemental_unpinned: true
       harden_runner_extra_endpoints: 'github.com:443'
 
+  # The Java-to-Docker hand-off end to end, through both families'
+  # real contract. The Java lane runs a real Maven build of
+  # test-maven-project and uploads the reactor artefact, which keeps
+  # each packaged jar at its module-relative path
+  # (app/target/test-maven-app-<version>.jar). The verify lane places
+  # that artefact in the same fixture's checkout and builds
+  # app/Dockerfile, which copies the jar into a Java runtime image.
+  # The artefact carries no POM, so placing it also proves it does
+  # not collide with a checkout file, which the lane refuses.
+  #
+  # Not exercised here: the fixture's 'docker' Maven profile and its
+  # app-fabric8 module. Those need the Java job to run 'mvn -P
+  # docker' (#214). The build-artifacts legs above stay: they test
+  # the placement rules without a Java build.
+  maven-docker-build:
+    name: 'Maven Build/Test (Docker hand-off)'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/java-workflows/.github/workflows/maven-build-test.yaml@1e5aae1c31ef26070fce3e8917be6c2b2a26fbb8  # v0.8.0
+    with:
+      repository: 'lfreleng-actions/test-maven-project'
+      ref: 'cf3ca4f682ba398497538f5b22d7b9b86d6f7d64'  # v0.3.0
+      upload_build_artifacts: true
+      # The artefact namespace is shared across the whole run, so a
+      # suffix keeps a later second call of the Java lane from
+      # colliding; build_artifact_name already includes it
+      artifact_suffix: '-e2e'
+      # The fixture's tests read a pinned submodule
+      checkout_submodules: true
+      # The Docker job covers its own gates; these only slow the leg
+      sbom_enabled: false
+      grype_enabled: false
+      cbom_enabled: false
+
+  # Skips, rather than passes, if the Java lane stops publishing the
+  # reactor shape; maven-docker-checks turns that skip into a failure
+  maven-docker-image:
+    name: 'Build/Test (Maven artefacts)'
+    needs: 'maven-docker-build'
+    if: needs.maven-docker-build.outputs.build_artifact_shape == 'reactor'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-maven-project'
+      ref: 'cf3ca4f682ba398497538f5b22d7b9b86d6f7d64'  # v0.3.0
+      # Named explicitly: discovery would also find
+      # app-fabric8/src/main/docker/Dockerfile, which needs a
+      # directory only the Maven 'docker' profile generates
+      images: '[{"name": "maven-fixture-app", "context": "app"}]'
+      # yamllint disable-line rule:line-length
+      build_artifacts: '[{"name": "${{ needs.maven-docker-build.outputs.build_artifact_name }}"}]'
+      # The image's default command runs 'ls -l /app/app.jar'; a
+      # missing jar prints only to stderr, so grep finds nothing
+      test_command: >-
+        docker run --rm maven-fixture-app:verify | grep -F '/app/app.jar'
+      # A Java toolchain base image pull
+      build_timeout_minutes: 10
+      # lint_enabled stays at its default, so hadolint also runs on
+      # the fixture's Dockerfile
+      sbom_enabled: false
+      grype_enabled: false
+
+  # A job whose condition was false reports 'skipped', which reads as
+  # green. Fail instead whenever the Docker job did not succeed, so a
+  # missing build_artifact_shape output cannot hide as a pass.
+  maven-docker-checks:
+    name: 'Maven artefacts reached the image'
+    needs: ['maven-docker-build', 'maven-docker-image']
+    if: ${{ !cancelled() }}
+    permissions: {}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 2
+    steps:
+      - name: 'Require the Docker job to have run and passed'
+        shell: bash
+        env:
+          BUILD_RESULT: ${{ needs.maven-docker-build.result }}
+          IMAGE_RESULT: ${{ needs.maven-docker-image.result }}
+          # yamllint disable-line rule:line-length
+          SHAPE: ${{ needs.maven-docker-build.outputs.build_artifact_shape }}
+          # yamllint disable-line rule:line-length
+          NAME: ${{ needs.maven-docker-build.outputs.build_artifact_name }}
+        run: |
+          if [ "${BUILD_RESULT}" != 'success' ]; then
+            echo "::error::maven-docker-build ended '${BUILD_RESULT}'"
+            exit 1
+          fi
+          if [ "${IMAGE_RESULT}" != 'success' ]; then
+            echo "::error::maven-docker-image ended '${IMAGE_RESULT}'" \
+              "(build_artifact_shape '${SHAPE:-absent}'," \
+              "build_artifact_name '${NAME:-absent}')"
+            exit 1
+          fi
+          echo "Artefact '${NAME}' (${SHAPE}) reached the image ✅"
+
   # The merge lane, end to end, without publishing anything.
   #
   # dry_run skips credential loading and registry login entirely, so
