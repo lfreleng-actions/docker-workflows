@@ -702,26 +702,19 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
+          fetch-depth: ${{ inputs.gerrit_refspec != '' && '2' || '0' }}
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
-          fetch-depth: 0
           persist-credentials: false
 
       - name: 'Gather repository metadata'
@@ -771,29 +764,21 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      # A supplied gerrit_revision pins the checkout to the immutable
-      # merged commit on the GitHub mirror (standard checkout below);
-      # the Gerrit checkout path resolves the moving branch ref and
+      # A supplied gerrit_revision empties gerrit-refspec, so the step
+      # checks out the immutable merged commit from the GitHub mirror
+      # in plain mode; Gerrit mode resolves the moving branch ref and
       # only serves callers that cannot supply the revision
-      - name: 'Checkout Gerrit change'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          gerrit-refspec: ${{ inputs.gerrit_revision == '' && inputs.gerrit_refspec || '' }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec == '' || inputs.gerrit_revision != ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.gerrit_revision || inputs.ref }}
           persist-credentials: false
@@ -857,29 +842,21 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      # A supplied gerrit_revision pins the checkout to the immutable
-      # merged commit on the GitHub mirror (standard checkout below);
-      # the Gerrit checkout path resolves the moving branch ref and
+      # A supplied gerrit_revision empties gerrit-refspec, so the step
+      # checks out the immutable merged commit from the GitHub mirror
+      # in plain mode; Gerrit mode resolves the moving branch ref and
       # only serves callers that cannot supply the revision
-      - name: 'Checkout Gerrit change'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          gerrit-refspec: ${{ inputs.gerrit_revision == '' && inputs.gerrit_refspec || '' }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec == '' || inputs.gerrit_revision != ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.gerrit_revision || inputs.ref }}
           persist-credentials: false
@@ -964,29 +941,21 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
-      # A supplied gerrit_revision pins the checkout to the immutable
-      # merged commit on the GitHub mirror (standard checkout below);
-      # the Gerrit checkout path resolves the moving branch ref and
+      # A supplied gerrit_revision empties gerrit-refspec, so the step
+      # checks out the immutable merged commit from the GitHub mirror
+      # in plain mode; Gerrit mode resolves the moving branch ref and
       # only serves callers that cannot supply the revision
-      - name: 'Checkout Gerrit change'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          gerrit-refspec: ${{ inputs.gerrit_revision == '' && inputs.gerrit_refspec || '' }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec == '' || inputs.gerrit_revision != ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.gerrit_revision || inputs.ref }}
           persist-credentials: false
@@ -1353,25 +1322,17 @@ jobs:
 
       # Same checkout as the build job, so the test hook runs against
       # the tree that produced the images
-      - name: 'Checkout Gerrit change'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          gerrit-refspec: ${{ inputs.gerrit_revision == '' && inputs.gerrit_refspec || '' }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec == '' || inputs.gerrit_revision != ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.gerrit_revision || inputs.ref }}
           persist-credentials: false
@@ -1461,25 +1422,17 @@ jobs:
 
       # Same checkout as the build job, so lint covers the
       # Dockerfiles that produced the images
-      - name: 'Checkout Gerrit change'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          gerrit-refspec: ${{ inputs.gerrit_revision == '' && inputs.gerrit_refspec || '' }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec == '' || inputs.gerrit_revision != ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.gerrit_revision || inputs.ref }}
           persist-credentials: false
@@ -2004,37 +1957,28 @@ jobs:
             ${{ env.CONNECTION_ALLOW_LIST }}
 
       # On Gerrit change-merged dispatches GERRIT_REFSPEC is the branch
-      # ref (refs/heads/<branch>), so both checkout paths land on the
-      # merged commit. Both checkouts fetch depth 2: the detect action
+      # ref (refs/heads/<branch>), so both checkout modes land on the
+      # merged commit. Both modes fetch depth 2: the detect action
       # compares HEAD with its first parent and fails on a checkout
       # too shallow to hold it.
-      # A supplied gerrit_revision pins the checkout to the immutable
-      # merged commit on the GitHub mirror (standard checkout below);
-      # the Gerrit checkout path resolves the moving branch ref and
+      # A supplied gerrit_revision empties gerrit-refspec, so the step
+      # checks out the immutable merged commit from the GitHub mirror
+      # in plain mode; Gerrit mode resolves the moving branch ref and
       # only serves callers that cannot supply the revision
-      - name: 'Checkout Gerrit change'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec != '' && inputs.gerrit_revision == ''
+      - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          # yamllint disable-line rule:line-length
+          gerrit-refspec: ${{ inputs.gerrit_revision == '' && inputs.gerrit_refspec || '' }}
           gerrit-project: ${{ inputs.gerrit_project }}
+          gerrit-branch: ${{ inputs.gerrit_branch }}
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
           fetch-depth: '2'
           repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        # yamllint disable-line rule:line-length
-        if: inputs.gerrit_refspec == '' || inputs.gerrit_revision != ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.gerrit_revision || inputs.ref }}
-          fetch-depth: 2
           persist-credentials: false
 
       # Container release detection: the merged commit adds a release

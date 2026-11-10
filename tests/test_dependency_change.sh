@@ -655,32 +655,43 @@ check 'build-test: the scope step reads workflow inputs alone' \
 check 'build-test: docker-metadata has no dependency-scope step' \
   "$(step_field "${verify}" docker-metadata dependency-scope name)" ''
 
-# The detection compares HEAD with its base, so both checkouts of the
-# job must hold it: actions/checkout defaults to depth 1 and needs 2
-# or more set (0 fetches everything); checkout-gerrit-change-action
-# defaults to 2, so an unset depth passes and a set one must reach 2
-# checkout_depth ACTION DEFAULT
-checkout_depth() {
-  local count depth
-  count=$(yq -r ".jobs.\"repository-metadata\".steps[]
-    | select(.uses | test(\"^$1@\")) | .uses" "${verify}" | wc -l)
-  check "build-test: repository-metadata has one $1 step" "${count}" 1
-  depth=$(yq -r ".jobs.\"repository-metadata\".steps[]
-    | select(.uses | test(\"^$1@\")) | .with.\"fetch-depth\"" "${verify}")
-  if [ "${depth}" = 'null' ]; then
-    depth="$2"
-  fi
+# The detection compares HEAD with its base, so the job's checkout
+# must hold it in both modes. The job checks out in one step, through
+# checkout-gerrit-change-action, whose depth applies in both modes:
+# unset it defaults to 2; a set depth is 2 or more, 0 (everything), or
+# the expression that picks a depth for each mode, which is then
+# checked for each mode in turn.
+checkout_count=$(yq -r '[.jobs."repository-metadata".steps[]
+  | select(.uses | test("checkout"))] | length' "${verify}")
+check 'build-test: repository-metadata has one checkout step' \
+  "${checkout_count}" 1
+checkout_uses=$(yq -r '.jobs."repository-metadata".steps[]
+  | select(.uses | test("checkout")) | .uses' "${verify}")
+check 'build-test: repository-metadata checks out with the Gerrit action' \
+  "${checkout_uses%%@*}" lfreleng-actions/checkout-gerrit-change-action
+depth=$(yq -r '.jobs."repository-metadata".steps[]
+  | select(.uses | test("checkout")) | .with."fetch-depth"' "${verify}")
+# shellcheck disable=SC2016
+mode_depth="\${{ inputs.gerrit_refspec != '' && '2' || '0' }}"
+case "${depth}" in
+  null) depths='gerrit:2 plain:2' ;;
+  "${mode_depth}") depths='gerrit:2 plain:0' ;;
+  *) depths="gerrit:${depth} plain:${depth}" ;;
+esac
+for entry in ${depths}; do
+  mode="${entry%%:*}"
+  depth="${entry#*:}"
   if [[ "${depth}" =~ ^[0-9]+$ ]] &&
     { [ "${depth}" -eq 0 ] || [ "${depth}" -ge 2 ]; }; then
-    echo "ok: build-test: $1 in repository-metadata fetches depth ${depth}"
+    echo "ok: build-test: repository-metadata fetches depth ${depth}" \
+      "in ${mode} mode"
   else
-    echo "FAIL: build-test: $1 in repository-metadata fetches depth" \
-      "'${depth}'; the dependency change base needs 2 or more"
+    echo "FAIL: build-test: repository-metadata fetches depth" \
+      "'${depth}' in ${mode} mode; the dependency change base needs" \
+      "2 or more"
     failures=$((failures + 1))
   fi
-}
-checkout_depth actions/checkout 1
-checkout_depth lfreleng-actions/checkout-gerrit-change-action 2
+done
 
 # The grype job reads the verdict from repository-metadata: it needs
 # the job, keeps running when that job failed or skipped (its 'if:'

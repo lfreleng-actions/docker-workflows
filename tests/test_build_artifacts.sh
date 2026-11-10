@@ -118,7 +118,7 @@ for lane in "${lanes[@]}"; do
     "${root}/.github/workflows/${lane}.yaml")
   index() { awk -F'\t' -v k="$1" -v c="$2" '$c == k { print $1 }' \
     <<< "${order}"; }
-  last_checkout=$(awk -F'\t' '$3 ~ /^Checkout / { n = $1 } END { print n }' \
+  last_checkout=$(awk -F'\t' '$3 ~ /^Checkout( |$)/ { n = $1 } END { print n }' \
     <<< "${order}")
   validate=$(index build-artifacts 2)
   download=$(index download-build-artifacts 2)

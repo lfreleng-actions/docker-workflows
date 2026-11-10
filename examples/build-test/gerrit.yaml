@@ -116,7 +116,7 @@ jobs:
   # Call the reusable build-test workflow. When dispatched by Gerrit, the
   # gerrit_* inputs drive checkout-gerrit-change-action inside the reusable
   # workflow. For a manual GERRIT_DISABLED run, the GERRIT_* inputs are empty
-  # so the reusable workflow performs a normal checkout.
+  # so that action runs in plain mode and checks out the repository.
   build-test:
     needs: clear-vote
     if: >-

@@ -4,8 +4,8 @@
 
 # Exercises the reusable workflows in this repository against
 # downstream fixture repositories, in parallel, to prove the pipeline
-# (job graph, image discovery, harden-runner wiring, dual checkout,
-# artifact plumbing, SBOM/Grype chain) functions end-to-end.
+# (job graph, image discovery, harden-runner wiring, Gerrit and plain
+# checkout, artifact plumbing, SBOM/Grype chain) functions end-to-end.
 #
 # The reusable workflows are referenced with the self-repository form
 # ('$/'), which resolves this repository at the commit already
