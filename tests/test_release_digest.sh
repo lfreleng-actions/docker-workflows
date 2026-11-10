@@ -17,7 +17,8 @@
 #   turn the release tag and the publish switches into the action's
 #   tags and repositories inputs, the registry input's login, and a
 #   dry run's plan
-# - the gerrit-validate job's check of the registry input
+# - the gerrit-validate job's lane-specific check of the registry
+#   input and registry_user
 # - the action itself, fetched at the commit the workflow pins and run
 #   as its build step runs it, which resolves each pushed repository's
 #   digest from RepoDigests
@@ -269,7 +270,10 @@ registries_case 'a real run reports no plan' \
   GHCR_PUBLISH=true -- plan=''
 
 # validate_case DESCRIPTION REGISTRY REGISTRY_USER CHECK...: run the
-# gerrit-validate job's registry input check
+# gerrit-validate job's registry input check. It holds the release
+# lane's own rules alone; docker-promote-action's suite covers the
+# host rule every lane shares, and tests/test_registry_wiring.sh that
+# each lane hands the registry to it.
 validate_case() {
   local description="$1" status=0
   yq -r '.jobs."gerrit-validate".steps[]
@@ -289,34 +293,14 @@ validate_case 'registry_user without registry fails' '' svc-ci error
 validate_case 'a port-addressed registry passes' "${nexus}" ''
 validate_case 'a path-bearing registry passes' \
   acme.jfrog.io/docker-release svc-ci@example.org
-validate_case 'a scheme fails' "https://${nexus}" '' error
-validate_case 'an uppercase path component fails' \
-  acme.jfrog.io/Docker-Release '' error
-validate_case 'a trailing slash fails' "${nexus}/" '' error
-validate_case 'an empty host label fails' 'nexus3..onap.org:10002' '' error
-validate_case "a lone '.' fails" '.' '' error
-label63=$(printf 'a%.0s' {1..63})
-# A plain host, so a port case exercises the port rule alone
-host='nexus3.onap.org'
-validate_case 'a 63-character host label passes' "${label63}.example:5000" ''
-validate_case 'a 64-character host label fails' \
-  "${label63}a.example:5000" '' error
-validate_case 'a dotless host without a port fails' registry/team '' error
-validate_case 'a dotless host with a port passes' registry:5000 ''
-validate_case 'the highest valid port passes' "${host}:65535" ''
-validate_case 'port 0 fails' "${host}:0" '' error
-validate_case 'a port above the TCP range fails' "${host}:65536" '' error
-validate_case 'a six-digit port fails' "${host}:123456" '' error
-validate_case 'an over-long port cannot overflow the check' \
-  "${host}:99999999999999999999" '' error
-validate_case 'a zero-padded port reads as decimal, not octal' \
-  "${host}:08080" ''
-validate_case 'a port on a path-bearing registry is checked' \
-  "acme.jfrog.io:70000/docker-release" '' error
-validate_case 'localhost passes' localhost/team ''
 validate_case 'GHCR is refused' ghcr.io/probeorg '' error
 validate_case 'Docker Hub is refused, case and port aside' \
   Docker.IO:443 '' error
+validate_case 'a leading space cannot slip GHCR past the refusal' \
+  ' ghcr.io/probeorg' '' error
+validate_case 'a trailing space fails' 'acme.jfrog.io/docker-release ' '' \
+  error
+validate_case 'a whitespace-only registry fails' ' ' '' error
 
 # --- The registry credential wiring of each job ------------------------
 #

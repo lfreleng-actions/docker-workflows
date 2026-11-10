@@ -945,6 +945,37 @@ jobs:
       - name: 'Test latest_policy validation and decisions'
         run: bash tests/test_latest_policy.sh
 
+  # Registry host validation in every lane (#139): each lane hands its
+  # registry inputs to docker-promote-action in mode validate, at the
+  # commit its other docker-promote-action steps pin, before anything
+  # writes, and keeps no host rule of its own in bash. The action's
+  # own suite tests the rule.
+  registry-wiring:
+    name: 'Registry validation wiring'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
+        with:
+          config: '@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Test registry validation wiring'
+        run: bash tests/test_registry_wiring.sh
+
   # A bad Grype input fails each lane's gerrit-validate job, through
   # grype-scan-action in validate-only mode, before any build job
   # starts. A call to a lane with one would fail this run, so this job

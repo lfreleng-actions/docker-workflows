@@ -621,11 +621,12 @@ jobs:
           esac
           echo "latest_policy: ${LATEST_POLICY} ✅"
 
-      # Mirrors merge.yaml's check of its registry inputs, so the two
-      # lanes accept the same values, save that the host must also be
-      # one Docker reads as a host (see below). It runs whether or not
-      # credentials exist, so dry runs and fork pull requests surface
-      # a bad value too.
+      # The registry input composes image references and reaches docker
+      # login, docker push, cosign and crane. This step holds the
+      # checks only this lane needs; the next step checks the value
+      # against the registry rule docker-promote-action holds for
+      # every lane. Both run whether or not credentials exist, so dry
+      # runs and fork pull requests surface a bad value too.
       - name: 'Validate registry inputs'
         shell: bash
         env:
@@ -642,62 +643,15 @@ jobs:
             echo "No registry input; GHCR/Docker Hub only ✅"
             exit 0
           fi
-          # Require host[:port] with an optional repository path: the
-          # value composes image references and reaches docker login,
-          # docker push, cosign and crane, so schemes, credentials,
-          # query strings or hostile content must stop here. The path
-          # serves Artifactory's repository-path method, where the
-          # repository key sits below the host rather than on a port
-          # of its own as in Nexus 3.
-          #
-          # Path components take Docker's reference grammar: runs of
-          # lowercase alphanumerics joined by a single '.' or '_',
-          # exactly '__', or one or more '-'. Docker and crane reject
-          # anything else when they parse the reference, so a looser
-          # rule would accept a value here only to fail the publish
-          # later. The rule also excludes '.', '..' and trailing
-          # separators without needing checks of their own.
-          #
-          # The host takes dot-separated DNS labels of up to 63
-          # characters, so '.', 'a..b' or an over-long label stop here
-          # rather than in Docker.
-          label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
-          pattern="^${label}([.]${label})*(:[0-9]+)?"
-          pattern+='(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*$'
-          if [[ ! "${REGISTRY}" =~ ${pattern} ]]; then
-            echo "::error::Invalid registry input: ${REGISTRY}" \
-              "(expected host[:port] with an optional repository" \
-              "path of lowercase components)"
-            exit 1
-          fi
-          # The pattern accepts any run of digits after the ':', so
-          # bound the port to TCP's range here. Left to Docker, an
-          # out-of-range port passes this fail-fast check and fails
-          # at login instead, after the build has run. The digit
-          # count is bounded first, so a long run cannot overflow
-          # the arithmetic that follows; 10# keeps a leading zero
-          # from reading as octal.
-          endpoint="${REGISTRY%%/*}"
-          if [[ "${endpoint}" == *:* ]]; then
-            port="${endpoint##*:}"
-            if [[ ! "${port}" =~ ^[0-9]{1,5}$ ]] \
-              || [ "$((10#${port}))" -lt 1 ] \
-              || [ "$((10#${port}))" -gt 65535 ]; then
-              echo "::error::registry '${REGISTRY}' has port" \
-                "'${port}', outside the valid range 1-65535"
-              exit 1
-            fi
-          fi
-          # Docker reads a first component as a registry host only
-          # when it holds a '.' or a port or is localhost; anything
-          # else names a Docker Hub namespace, so the lane would log
-          # in to one place and push to docker.io.
-          case "${REGISTRY%%/*}" in
-            *.* | *:* | localhost) ;;
-            *)
-              echo "::error::registry '${REGISTRY}' has no '.' or" \
-                "port in its host, so Docker would push it to Docker" \
-                "Hub; use a fully qualified host or add the port"
+          # Mode validate strips surrounding whitespace before its
+          # check, while this lane uses the value as given, so refuse
+          # whitespace and anything beyond printable ASCII before the
+          # host is read below.
+          LC_ALL=C  # so [:graph:] means printable ASCII alone
+          case "${REGISTRY}" in
+            *[![:graph:]]*)
+              echo "::error::registry holds whitespace or a character" \
+                "outside printable ASCII"
               exit 1
               ;;
           esac
@@ -714,7 +668,21 @@ jobs:
               exit 1
               ;;
           esac
-          echo "Registry input validated: ${REGISTRY} ✅"
+          echo "Registry input is not GHCR or Docker Hub: ${REGISTRY} ✅"
+
+      # docker-promote-action holds the registry rule every lane
+      # shares (host[:port] of DNS labels and a TCP port, a host
+      # Docker reads as a host, and an optional repository path of
+      # Docker reference components), so this lane accepts the values
+      # the merge lane does. Mode validate contacts no registry.
+      - name: 'Validate registry host'
+        id: registry-hosts
+        if: inputs.registry != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/docker-promote-action@65fa4d7b93ad6cf841c9e98dcc276b5b0977a43b  # v0.4.1
+        with:
+          mode: 'validate'
+          push_registry: ${{ inputs.registry }}
 
       # A dry run has no tag-push context to infer the release tag
       # from, so it validates the tag named by the ref input instead.
