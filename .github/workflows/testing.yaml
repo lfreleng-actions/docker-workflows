@@ -1075,6 +1075,36 @@ jobs:
       - name: 'Test registry validation wiring'
         run: bash tests/test_registry_wiring.sh
 
+  # The lanes' source checkout (#127): every job that checks out
+  # source does so in one checkout-gerrit-change-action step at the
+  # shared pin, serving Gerrit and plain runs alike, with no
+  # persisted credential and checkout_submodules passed through.
+  checkout-wiring:
+    name: 'Checkout wiring'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
+        with:
+          config: '@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Test checkout wiring'
+        run: bash tests/test_checkout_wiring.sh
+
   # A bad Grype input fails each lane's gerrit-validate job, through
   # grype-scan-action in validate-only mode, before any build job
   # starts. A call to a lane with one would fail this run, so this job

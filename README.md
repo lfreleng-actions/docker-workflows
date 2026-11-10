@@ -495,6 +495,7 @@ same path.
 | -------------------------------------- | ------- | ------------ | -------------------------------------------------------------------------------------------------- |
 | `repository`                           | string  | `''`         | Repository to check out (owner/name); empty uses the caller                                        |
 | `ref`                                  | string  | `''`         | Branch/tag/SHA to check out (empty = default branch)                                               |
+| `checkout_submodules`                  | boolean | `false`      | Check out git submodules in every checkout, on the Gerrit and plain paths alike                    |
 | `path_prefix`                          | string  | `'.'`        | Path to the project root directory                                                                 |
 | `build_artifacts`                      | string  | `''`         | JSON list of same-run artefacts to place first; see Build Artifacts                                |
 | `images`                               | string  | `''`         | JSON image list (see Image Discovery); empty string auto-discovers                                 |
@@ -753,9 +754,10 @@ output reports whether the lane detected a release file that passed.
 
 ### build-test-release.yaml
 
-Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
-`build_artifacts`, `images`, `build_timeout_minutes`, the five
-`harden_runner_*` inputs (see [Egress allow-list](#egress-allow-list)),
+Adds to the shared inputs (`repository`, `ref`, `checkout_submodules`,
+`path_prefix`, `build_artifacts`, `images`, `build_timeout_minutes`,
+the five `harden_runner_*` inputs (see
+[Egress allow-list](#egress-allow-list)),
 `build_permit_egress_traffic`, the `gerrit_*` inputs,
 `test_command`/`test_permit_fail`,
 `lint_enabled`/`lint_permit_fail` (and its deprecated
@@ -802,6 +804,10 @@ One further input governs how hard signing failures land:
 See [Registry Capability](#registry-capability) for what the default
 list reflects and when to extend it.
 
+With `checkout_submodules` set, the jobs that check out the validated
+release tag resolve submodules at the commits recorded in that tag's
+tree, so the release image holds submodule content at those commits.
+
 Optional secrets: `DOCKERHUB_USERNAME`/`DOCKERHUB_PASSWORD` (the
 Docker Hub leg skips with a warning when unset) and
 `OP_SERVICE_ACCOUNT_TOKEN`/`VAULT_MAPPING_JSON` (the 1Password
@@ -837,8 +843,8 @@ the job starts logs a warning; the attestation succeeds either way.
 
 ### merge.yaml
 
-Adds to the shared inputs (`repository`, `ref`, `path_prefix`,
-`build_artifacts`, `images`, `namespace_mode`, `namespace`,
+Adds to the shared inputs (`repository`, `ref`, `checkout_submodules`,
+`path_prefix`, `build_artifacts`, `images`, `namespace_mode`, `namespace`,
 `build_command`, `build_command_images`, `build_timeout_minutes`,
 the five `harden_runner_*` inputs (see
 [Egress allow-list](#egress-allow-list)), `build_permit_egress_traffic`,
