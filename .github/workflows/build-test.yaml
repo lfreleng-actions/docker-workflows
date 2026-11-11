@@ -118,6 +118,24 @@ on:
         required: false
         type: string
         default: ''
+      select:
+        description: >-
+          Comma- or space-separated image name globs choosing a subset
+          of the images discovery finds or the images input lists, e.g.
+          'api-*'. Empty (the default) builds every image. A selection
+          matching no image fails the run. Cannot combine with
+          build_command, whose project tooling decides what it builds.
+        required: false
+        type: string
+        default: ''
+      select_dependencies:
+        description: >-
+          With select, also build the same-repository images the
+          selected ones build FROM, so a partial build still resolves
+          its chain. No effect when select is empty.
+        required: false
+        type: boolean
+        default: true
       namespace_mode:
         description: >-
           How the namespace prefixed to every image name resolves:
@@ -617,6 +635,26 @@ jobs:
           remediation-window-start: ${{ inputs.grype_remediation_window_start }}
           cache-db: ${{ inputs.grype_cache_db }}
           bypass-repository: ${{ inputs.grype_bypass_repository }}
+
+      # build_command builds whatever the project's tooling builds, so
+      # select cannot narrow it; refuse the pair rather than ignore
+      # select. tests/test_image_select.sh runs this script.
+      - name: 'Reject select with build_command'
+        id: select
+        shell: bash
+        env:
+          SELECT: ${{ inputs.select }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: |
+          # select only narrows discovered or declared Dockerfile builds
+          if [ -n "${SELECT}" ] && [ -n "${BUILD_COMMAND}" ]; then
+            echo "::error::select cannot combine with build_command:" \
+              "the command builds whatever the project's tooling builds." \
+              "Clear select, or drop build_command and build from" \
+              "discovered Dockerfiles or the images input"
+            exit 1
+          fi
+          echo "Image selection inputs validated ✅"
 
       # Resolved once here, the root every job descends from; each
       # job that names an image reads this job's namespace output
@@ -1151,6 +1189,12 @@ jobs:
         with:
           path_prefix: ${{ inputs.path_prefix }}
           images: ${{ inputs.images }}
+          # A subset of the images, plus their same-repository bases
+          # unless select_dependencies is false. No allow_empty: a
+          # selection matching nothing must fail, since the downstream
+          # jobs cannot handle an empty image set.
+          select: ${{ inputs.select }}
+          select_dependencies: ${{ inputs.select_dependencies }}
           repository: ${{ inputs.repository || github.repository }}
           # Bind ref to this job's effective checkout ref, so the
           # build id discriminates on the tree actually discovered.
