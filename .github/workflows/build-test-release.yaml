@@ -121,6 +121,24 @@ on:
         required: false
         type: string
         default: ''
+      select:
+        description: >-
+          Comma- or space-separated image name globs choosing a subset
+          of the images discovery finds or the images input lists, e.g.
+          'api-*'. Empty (the default) builds every image. A selection
+          matching no image fails the run. Cannot combine with
+          build_command, whose project tooling decides what it builds.
+        required: false
+        type: string
+        default: ''
+      select_dependencies:
+        description: >-
+          With select, also build the same-repository images the
+          selected ones build FROM, so a partial build still resolves
+          its chain. No effect when select is empty.
+        required: false
+        type: boolean
+        default: true
       namespace_mode:
         description: >-
           How the Docker Hub namespace (organisation/user) and the
@@ -1053,6 +1071,12 @@ jobs:
         with:
           path_prefix: ${{ inputs.path_prefix }}
           images: ${{ inputs.images }}
+          # A subset of the images, plus their same-repository bases
+          # unless select_dependencies is false. No allow_empty: a
+          # selection matching nothing must fail, since the downstream
+          # jobs cannot handle an empty image set.
+          select: ${{ inputs.select }}
+          select_dependencies: ${{ inputs.select_dependencies }}
           repository: ${{ inputs.repository || github.repository }}
           # Bind ref to this job's effective checkout ref, so the
           # build id discriminates on the tree actually discovered.

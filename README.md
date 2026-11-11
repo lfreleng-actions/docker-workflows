@@ -302,6 +302,20 @@ of extra `docker buildx build` arguments). Names in an explicit
 repository character set; auto-discovery instead keeps the first of
 any duplicate pair.
 
+The `select` input narrows that list to a subset: comma- or
+space-separated name globs, such as `api-*` or `api-* worker`,
+matched against the image names that discovery or the `images` input
+produced. With `select_dependencies` left at `true`, the selection
+also takes in the same-repository images each selected one builds
+`FROM`, so a partial build still resolves its chain; set it to
+`false` to build the matched images alone. An empty `select`, the
+default, builds every image. A selection that matches no image fails
+the docker-metadata job, since the build, test and publish jobs
+cannot run on an empty image set. `select` cannot combine with
+`build_command`, which builds whatever the project's tooling builds;
+when a caller sets both, the `gerrit-validate` job fails the run
+before any build.
+
 With an image namespace resolved (see
 [Image Namespace](#image-namespace)), the Dockerfile build path in
 every lane tags each built image both as `<namespace>/<name>:verify`
@@ -499,6 +513,8 @@ same path.
 | `path_prefix`                          | string  | `'.'`        | Path to the project root directory                                                                 |
 | `build_artifacts`                      | string  | `''`         | JSON list of same-run artefacts to place first; see Build Artifacts                                |
 | `images`                               | string  | `''`         | JSON image list (see Image Discovery); empty string auto-discovers                                 |
+| `select`                               | string  | `''`         | Image name globs choosing a subset (see Image Discovery); empty builds every image                 |
+| `select_dependencies`                  | boolean | `true`       | With `select`, also build the same-repository images the selected ones build `FROM`                |
 | `namespace_mode`                       | string  | `'none'`     | `none`, `auto` or `manual`; see Image Namespace                                                    |
 | `namespace`                            | string  | `''`         | Namespace for `manual` (e.g. `onap` -> `onap/<name>`)                                              |
 | `build_command`                        | string  | `''`         | Escape hatch: project tooling builds the images (make/mvn/gradle)                                  |
@@ -755,7 +771,8 @@ output reports whether the lane detected a release file that passed.
 ### build-test-release.yaml
 
 Adds to the shared inputs (`repository`, `ref`, `checkout_submodules`,
-`path_prefix`, `build_artifacts`, `images`, `build_timeout_minutes`,
+`path_prefix`, `build_artifacts`, `images`, `select`,
+`select_dependencies`, `build_timeout_minutes`,
 the five `harden_runner_*` inputs (see
 [Egress allow-list](#egress-allow-list)),
 `build_permit_egress_traffic`, the `gerrit_*` inputs,
@@ -844,7 +861,8 @@ the job starts logs a warning; the attestation succeeds either way.
 ### merge.yaml
 
 Adds to the shared inputs (`repository`, `ref`, `checkout_submodules`,
-`path_prefix`, `build_artifacts`, `images`, `namespace_mode`, `namespace`,
+`path_prefix`, `build_artifacts`, `images`, `select`,
+`select_dependencies`, `namespace_mode`, `namespace`,
 `build_command`, `build_command_images`, `build_timeout_minutes`,
 the five `harden_runner_*` inputs (see
 [Egress allow-list](#egress-allow-list)), `build_permit_egress_traffic`,
@@ -1160,8 +1178,14 @@ requests against pinned fixture releases:
 [test-docker-monorepo](https://github.com/lfreleng-actions/test-docker-monorepo)
 (three images with a same-repository FROM chain), covering
 auto-discovery, explicit image lists with per-image build arguments,
-image namespacing, the `build_command` escape hatch and the
-`test_command` hook. A further call checks out the monorepo commit
+image namespacing, image selection, the `build_command` escape hatch
+and the `test_command` hook. The two selection legs assert the exact
+set of images built: `chain-child` brings in its `base-alpine` base,
+and `util-echo` with `select_dependencies: false` builds alone.
+`tests/test_image_select.sh` checks every lane declares `select` and
+`select_dependencies` alike and passes both to discovery, and runs
+the `gerrit-validate` step that refuses `select` with
+`build_command`. A further call checks out the monorepo commit
 that adds a release descriptor, with the release registries set, and
 a follow-on job requires the lane to report that file detected.
 `tests/test_verify_release.sh` covers the rest of the release-file

@@ -68,6 +68,8 @@ jobs:
   #   - leg 6: the leg 3 namespaced chain by its plain alias
   #   - leg 7: build_command where discovery finds nothing
   #   - leg 8: the leg 4 command with its output declared
+  #   - leg 9: select of chain-child, which brings in its base
+  #   - leg 10: select of util-echo without its dependencies
   # Lint and Grype findings in fixture CONTENT soft-fail: the
   # self-test validates that the machinery executes, not the hygiene
   # of fixture Dockerfiles.
@@ -178,6 +180,39 @@ jobs:
             test_command: 'TAG=verify tests/scripts/test_images.sh'
             build_permit_egress_traffic: false
             build_permit_fail: false
+          - repository: 'lfreleng-actions/test-docker-monorepo'
+            ref: 'v0.0.1'
+            images: ''
+            namespace_mode: 'none'
+            build_command: ''
+            # chain-child builds FROM base-alpine, so the default
+            # select_dependencies builds both, and util-echo not at all.
+            # IMAGES carries the built tags; compare the names, exactly.
+            select: 'chain-child'
+            test_command: >-
+              built=$(jq -r '.[] | sub(":[^:]*$"; "")' <<< "${IMAGES}"
+              | sort -u | paste -sd ' ');
+              echo "Built: ${built}";
+              [ "${built}" = 'base-alpine chain-child' ] ||
+              { echo "::error::expected base-alpine chain-child"; exit 1; }
+            build_permit_egress_traffic: false
+            build_permit_fail: false
+          - repository: 'lfreleng-actions/test-docker-monorepo'
+            ref: 'v0.0.1'
+            images: ''
+            namespace_mode: 'none'
+            build_command: ''
+            # util-echo alone, with select_dependencies off
+            select: 'util-echo'
+            select_dependencies: false
+            test_command: >-
+              built=$(jq -r '.[] | sub(":[^:]*$"; "")' <<< "${IMAGES}"
+              | sort -u | paste -sd ' ');
+              echo "Built: ${built}";
+              [ "${built}" = 'util-echo' ] ||
+              { echo "::error::expected util-echo alone"; exit 1; }
+            build_permit_egress_traffic: false
+            build_permit_fail: false
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
@@ -198,6 +233,12 @@ jobs:
       # Legs that do not set path_prefix keep the workflow default
       path_prefix: ${{ matrix.path_prefix || '.' }}
       images: ${{ matrix.images }}
+      # Legs that do not select build every image
+      select: ${{ matrix.select || '' }}
+      # format() renders an unset key as '', which a comparison with
+      # false would equate to it, so only an explicit false disables
+      # yamllint disable-line rule:line-length
+      select_dependencies: ${{ format('{0}', matrix.select_dependencies) != 'false' }}
       namespace_mode: ${{ matrix.namespace_mode }}
       # Only the manual legs set a namespace
       namespace: ${{ matrix.namespace || '' }}
@@ -212,7 +253,7 @@ jobs:
       # The Grype database cache rotates its key on the database build
       # time, so exactly one job may write a given prefix. These legs
       # run in parallel, so leg 1 keeps the entry current and the rest
-      # restore without saving. With all eight writing, creation order
+      # restore without saving. With all ten writing, creation order
       # and build order can disagree, and a later run then restores a
       # staler database than the newest saved. That is not a cosmetic
       # problem: Grype refuses a database built more than five days
@@ -1012,6 +1053,37 @@ jobs:
           persist-credentials: false
       - name: 'Test namespace_mode resolution'
         run: bash tests/test_namespace_mode.sh
+
+  # Image selection in every lane (#160): select and
+  # select_dependencies declared alike and passed to discovery, and
+  # the gerrit-validate step refusing select with build_command,
+  # extracted from each lane and run. The select legs of build-test
+  # check which images a selection builds.
+  image-select:
+    name: 'Image selection'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
+        with:
+          config: '@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Test image selection inputs'
+        run: bash tests/test_image_select.sh
 
   # latest_policy in both publishing lanes (#115): the input and its
   # gerrit-validate check, the wiring of docker-promote-action at its
