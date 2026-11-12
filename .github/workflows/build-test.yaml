@@ -2051,7 +2051,7 @@ jobs:
       - name: 'Validate registry hosts'
         id: registry-hosts
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-promote-action@65fa4d7b93ad6cf841c9e98dcc276b5b0977a43b  # v0.4.1
+        uses: lfreleng-actions/docker-promote-action@e93fab056a6e66d199df08e864287fcc68313dbd  # v0.5.0
         with:
           mode: 'validate'
           pull_registry: ${{ inputs.snapshot_registry }}
@@ -2234,7 +2234,7 @@ jobs:
       - name: 'Verify staged images and release tags'
         if: steps.creds.outputs.available == 'true'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/docker-promote-action@65fa4d7b93ad6cf841c9e98dcc276b5b0977a43b  # v0.4.1
+        uses: lfreleng-actions/docker-promote-action@e93fab056a6e66d199df08e864287fcc68313dbd  # v0.5.0
         with:
           mode: 'verify'
           containers_json: ${{ needs.check-release.outputs.containers_json }}
