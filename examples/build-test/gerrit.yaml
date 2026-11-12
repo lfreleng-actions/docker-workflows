@@ -148,8 +148,8 @@ jobs:
       # test_command: ''              # smoke-test hook (IMAGES env = tags)
       # build_permit_egress_traffic: false  # audit egress for build job
       # Container release files: pass the registries merge.yaml
-      # receives, and a change adding or editing a
-      # releases/*-container.yaml file is checked before it merges.
+      # receives, and a change adding or editing a container release
+      # file in releases/ or .releases/ is checked before it merges.
       # snapshot_registry: 'nexus3.onap.org:10003'
       # release_registry: 'nexus3.onap.org:10002'
       # registry_user: ''             # empty derives from the repository

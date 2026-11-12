@@ -19,13 +19,16 @@
 #
 # Release-file verification: with snapshot_registry and
 # release_registry set (the values merge.yaml receives), a change
-# that adds or edits a container release file under releases/ is
-# checked before it merges, as Jenkins' gerrit-release-verify does.
-# check-release validates the file offline; release-verify then runs
-# the promotion's registry checks without writing anything, when a
-# registry credential is available. Neither job touches the image
-# build. check-release still runs detection on every change, which
-# takes seconds; release-verify skips when it finds no release file.
+# that adds or edits a container release file under releases/ or
+# .releases/ is checked before it merges, as Jenkins'
+# gerrit-release-verify does. check-release validates the file
+# offline, then against the release container schema; release-verify
+# then runs the promotion's registry checks without writing
+# anything, when a registry credential is available. Neither job
+# touches the image build. check-release still runs detection on
+# every change, which takes seconds; the schema check, which
+# installs uv and lftools-uv from astral.sh and PyPI, and
+# release-verify skip when it finds no release file.
 #
 # The dockerfile-lint (hadolint) job gates on docker-metadata rather
 # than build:
@@ -505,9 +508,12 @@ on:
     outputs:
       has_release:
         description: >-
-          'true' when the change adds or edits a container release
-          file and it passed the offline check; 'false' when it
-          carries none; empty when the release-file checks are off
+          Detection result: 'true' when the change adds or edits a
+          container release file, 'false' when it carries none, empty
+          when the release-file checks are off. 'true' can stay set
+          when that file then fails the offline or schema check, so
+          also require the workflow run to succeed before treating
+          the file as valid
         value: ${{ jobs.check-release.outputs.has_release }}
       grype_gate_active:
         description: >-
@@ -1952,12 +1958,13 @@ jobs:
               "| ${ADVISORY:-unknown} |"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-  # Offline release-file check: the change adds or edits a container
-  # release file under releases/, and it must parse and validate as
-  # merge.yaml's check-release job will read it once merged. Same
-  # action, same registry inputs, so verify predicts merge. The
-  # registry inputs are what turn this on: without them, a release
-  # file's registry overrides have no host to be checked against.
+  # Release-file check: the change adds or edits a container release
+  # file under releases/ or .releases/, and it must parse, validate
+  # and pass the release container schema as merge.yaml's
+  # check-release job will check it once merged. Same actions, same
+  # registry inputs, so verify predicts merge. The registry inputs
+  # are what turn this on: without them, a release file's registry
+  # overrides have no host to be checked against.
   check-release:
     name: 'Check Release File'
     needs: gerrit-validate
@@ -2074,10 +2081,12 @@ jobs:
           submodules: ${{ inputs.checkout_submodules }}
 
       # Reads files and git history only; runs nothing from the
-      # checkout and contacts no registry. Any value it outputs has
-      # passed its grammar checks, and a registry override has kept
-      # the host of the matching input, before release-verify sends
-      # it, with a credential, to a registry. Release files with
+      # checkout and contacts no registry. It looks under releases/
+      # and .releases/, as Jenkins does, and refuses more than one
+      # container release file across the two. Any value it outputs
+      # has passed its grammar checks, and a registry override has
+      # kept the host of the matching input, before release-verify
+      # sends it, with a credential, to a registry. Release files with
       # other distribution types are left to their own pipelines.
       - name: 'Detect container release file in change'
         id: detect
@@ -2087,12 +2096,30 @@ jobs:
           snapshot_registry: ${{ inputs.snapshot_registry }}
           release_registry: ${{ inputs.release_registry }}
 
+      # Jenkins' lftools schema verify. Detection does not evaluate
+      # the schema, and each accepts files the other rejects (a
+      # missing or empty ref, an unquoted numeric release tag), so
+      # both run. It follows detection, whose untrusted-input guards
+      # have then passed, and checks the file detection found:
+      # release_file, never a path of its own.
+      - name: 'Verify release file schema'
+        id: schema
+        if: steps.detect.outputs.has_release == 'true'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/verify-release-schema-action@4402955a5beef8f98d755094a74f82c6755a3bf9  # v1.1.4
+        with:
+          distribution-type: 'container'
+          release-file: ${{ steps.detect.outputs.release_file }}
+          lftools-uv-version: '0.5.7'
+
   # The promotion's own checks, with nothing written: every staged
   # image the release file names must exist, and no release tag may
   # already hold different bits. A tag already holding the staged
   # digest passes as released. The job checks out nothing, so no
   # project code runs beside the registry credential; it consumes
-  # only check-release's validated outputs.
+  # only check-release's validated outputs. A failed job still
+  # exports the outputs its earlier steps set, so a file that fails
+  # the schema reports has_release 'true'; the job's result gates too.
   release-verify:
     name: 'Verify Release Promotion'
     runs-on: ubuntu-latest
@@ -2100,7 +2127,7 @@ jobs:
       - 'gerrit-validate'
       - 'check-release'
     # yamllint disable-line rule:line-length
-    if: ${{ !cancelled() && needs.check-release.outputs.has_release == 'true' }}
+    if: ${{ !cancelled() && needs.check-release.result == 'success' && needs.check-release.outputs.has_release == 'true' }}
     permissions:
       contents: read
     timeout-minutes: 10
