@@ -673,52 +673,19 @@ jobs:
           echo "Image selection inputs validated ✅"
 
       # Resolved once here, the root every job descends from; each
-      # job that names an image reads this job's namespace output
+      # job that names an image reads this job's namespace output.
+      # docker-promote-action holds the rule every lane shares
+      # (none, auto or manual, then Docker's repository path
+      # grammar). Mode namespace contacts no registry.
       - name: 'Resolve image namespace'
         id: namespace
-        shell: bash
-        env:
-          NAMESPACE_MODE: ${{ inputs.namespace_mode }}
-          NAMESPACE: ${{ inputs.namespace }}
-          REPOSITORY: ${{ inputs.repository || github.repository }}
-        run: |
-          # none: no prefix; auto: the lowercased repository owner;
-          # manual: the namespace input
-          case "${NAMESPACE_MODE}" in
-            none) namespace='' ;;
-            auto) namespace="${REPOSITORY%%/*}"; namespace="${namespace,,}" ;;
-            manual) namespace="${NAMESPACE}" ;;
-            *)
-              echo "::error::Invalid namespace_mode '${NAMESPACE_MODE}'" \
-                "(expected none, auto or manual)"
-              exit 1
-              ;;
-          esac
-          if [ "${NAMESPACE_MODE}" != 'manual' ] && [ -n "${NAMESPACE}" ]
-          then
-            echo "::error::namespace '${NAMESPACE}' is set but" \
-              "namespace_mode is '${NAMESPACE_MODE}'; set namespace_mode" \
-              "to 'manual' or clear namespace"
-            exit 1
-          fi
-          if [ "${NAMESPACE_MODE}" = 'manual' ] && [ -z "${NAMESPACE}" ]; then
-            echo "::error::namespace_mode 'manual' requires the namespace input"
-            exit 1
-          fi
-          # Docker's repository path grammar: '/'-separated components,
-          # each runs of lowercase alphanumerics joined by a single '.'
-          # or '_', exactly '__', or one or more '-'
-          component='[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*'
-          if [ -n "${namespace}" ] &&
-            [[ ! "${namespace}" =~ ^${component}(/${component})*$ ]]; then
-            echo "::error::Invalid namespace '${namespace}'" \
-              "(namespace_mode ${NAMESPACE_MODE}): expected '/'-separated" \
-              "components of lowercase alphanumerics joined by a single" \
-              "'.' or '_', exactly '__', or one or more '-'"
-            exit 1
-          fi
-          echo "namespace=${namespace}" >> "${GITHUB_OUTPUT}"
-          echo "Image namespace (${NAMESPACE_MODE}): ${namespace:-<none>} ✅"
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/docker-promote-action@e93fab056a6e66d199df08e864287fcc68313dbd  # v0.5.0
+        with:
+          mode: 'namespace'
+          namespace_mode: ${{ inputs.namespace_mode }}
+          namespace: ${{ inputs.namespace }}
+          repository: ${{ inputs.repository || github.repository }}
 
   repository-metadata:
     name: 'Repository Metadata'
