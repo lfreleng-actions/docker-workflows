@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Regression test for namespace_mode resolution and its use by the
-# merge lane's snapshot publish and promotion. Each lane resolves
-# the image namespace once, in its gerrit-validate job, and every job
-# that names an image reads that job's 'namespace' output. The test
-# extracts that step script from each lane and runs it as GitHub runs
-# a 'shell: bash' step, checking the resolved value and that invalid
-# combinations fail with an ::error:: annotation. Promotion runs
-# docker-promote-action at the commit merge.yaml pins.
+# Regression test for namespace_mode wiring and its use by the merge
+# lane's snapshot publish and promotion. Each lane resolves the image
+# namespace once, in its gerrit-validate job, through
+# docker-promote-action in mode namespace, and every job that names
+# an image reads that job's 'namespace' output. The action's own
+# suite tests the resolution rule; this test checks each lane's step
+# uses the action at the commit its other docker-promote-action steps
+# pin, with the lane's namespace inputs, and that the job publishes
+# the step's output. Promotion runs docker-promote-action at the
+# commit merge.yaml pins.
 #
 # Usage: tests/test_namespace_mode.sh
 # PROMOTE_ACTION_DIR may name a local clone of docker-promote-action
@@ -26,61 +28,76 @@ trap 'rm -rf "${work}"' EXIT
 
 failures=0
 
-# resolve_case DESCRIPTION EXPECTED MODE NAMESPACE REPOSITORY [DOCKERHUB]
-# EXPECTED is the resolved namespace, or 'error' when the step must fail
-resolve_case() {
-  local status=0 actual
-  : > "${work}/output"
-  env -i PATH="${PATH}" HOME="${work}" GITHUB_OUTPUT="${work}/output" \
-    NAMESPACE_MODE="$3" NAMESPACE="$4" REPOSITORY="$5" \
-    DOCKERHUB_PUBLISH="${6:-false}" \
-    bash --noprofile --norc -eo pipefail "${work}/step.sh" \
-    > "${work}/log" 2>&1 || status=$?
-  actual=$(sed -n 's/^namespace=//p' "${work}/output")
-  if [ "$2" = 'error' ] && [ "${status}" -ne 0 ] &&
-    grep -q '^::error::' "${work}/log"; then
-    echo "ok: ${lane}: $1"
-  elif [ "$2" != 'error' ] && [ "${status}" -eq 0 ] &&
-    [ "${actual}" = "$2" ]; then
-    echo "ok: ${lane}: $1"
+# check DESCRIPTION ACTUAL EXPECTED
+check() {
+  if [ "$2" = "$3" ]; then
+    echo "ok: $1"
   else
-    echo "FAIL: ${lane}: $1: expected '$2', got '${actual}' (exit ${status})"
-    sed 's/^/  | /' "${work}/log"
+    echo "FAIL: $1: got '$2', expected '$3'"
     failures=$((failures + 1))
   fi
 }
 
+# promote_step FIELD: one field of the release-publish promote step
+promote_step() {
+  yq -r ".jobs.\"release-publish\".steps[] | select(.id == \"promote\") | .$1" \
+    "${root}/.github/workflows/merge.yaml"
+}
+promote_ref='lfreleng-actions/docker-promote-action'
+uses=$(promote_step uses)
+if [[ ! "${uses}" =~ ^${promote_ref}@([0-9a-f]{40})$ ]]; then
+  echo "FAIL: the release-publish promote step does not use"
+  echo "  docker-promote-action at a commit SHA (got '${uses}')"
+  exit 1
+fi
+pin="${BASH_REMATCH[1]}"
+
+# --- Each lane's namespace step ------------------------------------------
+
+# namespace_step FIELD: one field of the lane's gerrit-validate
+# namespace step
+namespace_step() {
+  yq -r ".jobs.\"gerrit-validate\".steps[] | select(.id == \"namespace\")
+    | .$1" "${workflow}"
+}
+
+# shellcheck disable=SC2016  # literal workflow expressions
 for lane in build-test merge build-test-release; do
   workflow="${root}/.github/workflows/${lane}.yaml"
-  yq -r '.jobs."gerrit-validate".steps[] | select(.id == "namespace") | .run' \
-    "${workflow}" > "${work}/step.sh"
-  if [ ! -s "${work}/step.sh" ]; then
-    echo "FAIL: no 'namespace' step in the gerrit-validate job of ${lane}"
-    failures=$((failures + 1))
-    continue
-  fi
-  resolve_case 'none resolves no namespace' '' none '' Org/repo
-  resolve_case 'auto lowercases the repository owner' \
-    'onap-team' auto '' ONAP-Team/repo
-  resolve_case 'manual takes the namespace input' onap manual onap Org/repo
-  resolve_case 'manual takes a sub-path' 'onap/so' manual 'onap/so' Org/repo
-  resolve_case 'an unknown mode fails' error Auto '' Org/repo
-  resolve_case 'manual without a namespace fails' error manual '' Org/repo
-  resolve_case 'a namespace with mode none fails' error none onap Org/repo
-  resolve_case 'a namespace with mode auto fails' error auto onap Org/repo
-  resolve_case 'an uppercase namespace fails' error manual ONAP Org/repo
-  resolve_case 'a leading separator fails' error manual '-team' Org/repo
-  resolve_case 'a trailing slash fails' error manual 'onap/' Org/repo
-  resolve_case 'an empty component fails' error manual 'a//b' Org/repo
+  while IFS= read -r other; do
+    check "${lane}: docker-promote-action is at the merge lane's pin" \
+      "${other}" "${promote_ref}@${pin}"
+  done < <(yq -r '.jobs[] | select(.steps != null) | .steps[]
+    | select(.uses != null) | .uses' "${workflow}" \
+    | grep "^${promote_ref}@")
+  check "${lane}: the namespace step uses docker-promote-action" \
+    "$(namespace_step uses)" "${promote_ref}@${pin}"
+  check "${lane}: the namespace step runs mode namespace" \
+    "$(namespace_step with.mode)" namespace
+  check "${lane}: the namespace step passes namespace_mode" \
+    "$(namespace_step with.namespace_mode)" '${{ inputs.namespace_mode }}'
+  check "${lane}: the namespace step passes namespace" \
+    "$(namespace_step with.namespace)" '${{ inputs.namespace }}'
+  check "${lane}: the namespace step passes repository" \
+    "$(namespace_step with.repository)" \
+    '${{ inputs.repository || github.repository }}'
+  keys='mode namespace namespace_mode repository'
   if [ "${lane}" = 'build-test-release' ]; then
-    resolve_case 'Docker Hub with mode none fails' \
-      error none '' Org/repo true
-    resolve_case 'Docker Hub with a sub-path fails' \
-      error manual 'onap/so' Org/repo true
-    resolve_case 'Docker Hub with mode auto resolves the owner' \
-      org auto '' Org/repo true
+    check "${lane}: the namespace step passes dockerhub_publish" \
+      "$(namespace_step with.dockerhub_publish)" \
+      '${{ inputs.dockerhub_publish }}'
+    keys='dockerhub_publish mode namespace namespace_mode repository'
   fi
+  check "${lane}: the namespace step passes nothing else" \
+    "$(namespace_step 'with | keys | sort | join(" ")')" "${keys}"
+  check "${lane}: the namespace step runs unconditionally" \
+    "$(namespace_step if)" null
+  check "${lane}: gerrit-validate publishes the step's namespace" \
+    "$(yq -r '.jobs."gerrit-validate".outputs.namespace' "${workflow}")" \
+    '${{ steps.namespace.outputs.namespace }}'
 done
+
+# --- Promotion and snapshot publish --------------------------------------
 
 # Merge-lane promotion runs docker-promote-action. The lane's step must
 # hand the action the resolved namespace and the release file's
@@ -88,20 +105,6 @@ done
 # pins and run under dry_run (which keeps crane and every registry out
 # of the test), must resolve names under the namespace and check every
 # path before anything copies.
-lane=merge
-# promote_step FIELD: one field of the release-publish promote step
-promote_step() {
-  yq -r ".jobs.\"release-publish\".steps[] | select(.id == \"promote\") | .$1" \
-    "${root}/.github/workflows/merge.yaml"
-}
-uses=$(promote_step uses)
-pattern='^lfreleng-actions/docker-promote-action@([0-9a-f]{40})$'
-if [[ ! "${uses}" =~ ${pattern} ]]; then
-  echo "FAIL: the release-publish promote step does not use"
-  echo "  docker-promote-action at a commit SHA (got '${uses}')"
-  exit 1
-fi
-pin="${BASH_REMATCH[1]}"
 
 # promote_input NAME VALUE: the promote step passes VALUE as input NAME
 promote_input() {
@@ -242,4 +245,4 @@ if [ "${failures}" -gt 0 ]; then
   echo "${failures} failure(s)"
   exit 1
 fi
-echo "All namespace_mode, snapshot and promotion cases passed"
+echo "All namespace_mode wiring, snapshot and promotion cases passed"

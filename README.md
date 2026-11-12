@@ -470,6 +470,10 @@ organisation or user; GHCR publishes under the calling repository
 owner whatever the mode. The release lane's `registry` input
 publishes as `<registry>/<namespace>/<name>`, or `<registry>/<name>`
 under `none`, as the merge lane's snapshots do.
+`docker-promote-action`'s `namespace` mode holds these rules for
+every lane, and its own suite tests them;
+`tests/test_namespace_mode.sh` checks each lane calls it at the
+shared pin with its namespace inputs.
 
 `auto` takes the owner of the `repository` input (or of the calling
 repository when that is empty), since a lane can build another
