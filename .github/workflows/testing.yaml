@@ -439,8 +439,11 @@ jobs:
   # The ref pins the fixture commit that ADDED the release descriptor,
   # and pins it deliberately: detection compares a merged commit
   # against its parent, so a moving branch would stop detecting the
-  # file the moment anything else merged there. v0.1.0 tags that
-  # commit, so the tag and the requirement coincide.
+  # file the moment anything else merged there. The commit adds
+  # releases/1.2.4-container.yaml alone, a descriptor carrying the
+  # ref the release container schema requires, where v0.1.0's 1.2.3
+  # descriptor has none. A commit SHA, not a release tag, names
+  # exactly that commit.
   #
   # The registries are real Linux Foundation hostnames because the
   # release descriptor overrides the pull registry and the workflow
@@ -460,7 +463,8 @@ jobs:
     uses: $/.github/workflows/merge.yaml
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
-      ref: 'v0.1.0'
+      # yamllint disable-line rule:line-length
+      ref: 'f7d28467c46c2a5da25cd9db39db4dfd70f7e838'  # adds releases/1.2.4-container.yaml
       build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
@@ -498,7 +502,8 @@ jobs:
     uses: $/.github/workflows/merge.yaml
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
-      ref: 'v0.1.0'
+      # yamllint disable-line rule:line-length
+      ref: 'f7d28467c46c2a5da25cd9db39db4dfd70f7e838'  # adds releases/1.2.4-container.yaml
       build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
@@ -586,7 +591,8 @@ jobs:
     uses: $/.github/workflows/build-test.yaml
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
-      ref: 'v0.1.0'
+      # yamllint disable-line rule:line-length
+      ref: 'f7d28467c46c2a5da25cd9db39db4dfd70f7e838'  # adds releases/1.2.4-container.yaml
       build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
@@ -609,7 +615,7 @@ jobs:
         env:
           HAS_RELEASE: ${{ needs.verify-release.outputs.has_release }}
         run: |
-          # The fixture commit adds releases/1.2.3-container.yaml
+          # The fixture commit adds releases/1.2.4-container.yaml
           if [ "${HAS_RELEASE}" != 'true' ]; then
             echo "::error::The verify lane did not detect the fixture's" \
               "release file (has_release '${HAS_RELEASE}')"
