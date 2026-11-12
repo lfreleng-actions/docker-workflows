@@ -5,14 +5,14 @@
 # =============================================================================
 # EXAMPLE: Plain GitHub-native caller for the reusable Docker merge workflow
 # =============================================================================
-# Model B (merge-driven snapshots + releases/ file-triggered releases) is
+# Model B (merge-driven snapshots + release-file-triggered releases) is
 # PRIMARILY a Gerrit pattern, generalising the Jenkins-heritage LF flow —
 # see gerrit.yaml in this directory for the canonical caller. This
 # GitHub-native variant serves projects that adopt the same model on a
 # plain GitHub repository: every push (merge) to a main branch builds the
 # repository's images and publishes the snapshot/staging tag set, and a
-# merged container release file under releases/ triggers a registry-side
-# release promotion.
+# merged container release file under releases/ or .releases/ triggers
+# a registry-side release promotion.
 #
 # The version comes from version.properties at the repository root
 # (major=/minor=/patch=), the Jenkins-heritage LF version source.

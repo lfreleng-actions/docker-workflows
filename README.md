@@ -57,8 +57,9 @@ Two release models cover the LF project estate:
   LF/Gerrit flow: every merge builds the images, gates them on
   hadolint, the test hook and a Grype scan of their SBOMs, and pushes
   the snapshot/staging tag set to the snapshot registry, versioned
-  from `version.properties`. Merging a `releases/` file with
-  `distribution_type: container` triggers a registry-side promotion:
+  from `version.properties`. Merging a `releases/` or `.releases/`
+  file with `distribution_type: container` that passes the release
+  container schema triggers a registry-side promotion:
   [docker-promote-action](https://github.com/lfreleng-actions/docker-promote-action)
   copies the staged `name:version` images to the release
   registry at `container_release_tag`, under the same image
@@ -736,16 +737,27 @@ before it merges. This lane does the same once the caller passes
 `snapshot_registry` and `release_registry`, with the values its
 `merge.yaml` caller receives; without them the two jobs below skip,
 and the lane behaves as before. A change that adds or edits a
-`releases/` file with `distribution_type: container` then goes
-through two jobs, neither of which touches the image build:
+`releases/` or `.releases/` file with `distribution_type: container`
+then goes through two jobs, neither of which touches the image
+build:
 
 - **check-release** runs `docker-release-detect-action`, the step
   `merge.yaml` runs once the file merges, with the same registries.
-  It needs no network access or credential. A malformed file fails
-  the run with an annotation naming the file and the field: a
+  Detection needs no network access or credential. A malformed file
+  fails the run with an annotation naming the file and the field: a
   missing or invalid `container_release_tag`, a bad container name
-  or version, more than one container release file, or a registry
-  override leaving the configured host.
+  or version, more than one container release file across the two
+  directories, or a registry override leaving the configured host.
+  When it finds a file, the job then runs
+  [verify-release-schema-action](https://github.com/lfreleng-actions/verify-release-schema-action),
+  Jenkins' `lftools schema verify` against the release container
+  schema, on the path detection reports. The schema catches what
+  detection does not check: a missing `project` or `ref`, an empty
+  `ref`, or an unquoted numeric `container_release_tag` such as
+  `1.10`. The step installs `uv`, a Python build and `lftools-uv`
+  (pinned), so it reaches GitHub, `releases.astral.sh`, `pypi.org`
+  and `files.pythonhosted.org`, all on the default allow-list; a
+  change without a release file skips it.
 - **release-verify** runs `docker-promote-action` with
   `mode: verify`, which performs the promotion's checks and writes
   nothing. It fails when a staged image does not exist, or a release
@@ -766,7 +778,10 @@ default checkout, the merge commit GitHub prepares, with the target
 branch, so every commit of the pull request counts. Leave `ref`
 empty on pull requests: pinned to the head commit, the comparison
 sees that commit's own changes alone. The `has_release` workflow
-output reports whether the lane detected a release file that passed.
+output reports whether the lane detected a release file. It can stay
+`'true'` when that file then fails the offline or schema check, so
+also require the workflow run to succeed before treating the file as
+valid.
 
 ### build-test-release.yaml
 
@@ -1018,13 +1033,18 @@ Optional secrets: `OP_SERVICE_ACCOUNT_TOKEN`/`VAULT_MAPPING_JSON`
 (the 1Password credential model shared across the workflow families;
 the publish jobs skip with a warning when unset). The version comes
 from `version.properties` at the project root, and release promotion
-triggers on merged `releases/` files with
+triggers on merged `releases/` or `.releases/` files with
 `distribution_type: container` (the LF self-release container
 schema, including its optional `container_pull_registry`/
 `container_push_registry` overrides).
 
 The `check-release` job detects and validates the release file with
-[docker-release-detect-action](https://github.com/lfreleng-actions/docker-release-detect-action).
+[docker-release-detect-action](https://github.com/lfreleng-actions/docker-release-detect-action),
+then checks the file it found against the release container schema
+with
+[verify-release-schema-action](https://github.com/lfreleng-actions/verify-release-schema-action),
+as Jenkins does at merge too: a file can merge without a verify run,
+and one failing the schema fails the job and promotes nothing.
 It compares the merged commit with its first parent alone, so a merge
 commit counts the release files it brings in, never one the
 target branch already held. It fails rather than skipping when the
@@ -1192,6 +1212,12 @@ a follow-on job requires the lane to report that file detected.
 checks: valid and malformed release files against
 `docker-release-detect-action`, and `docker-promote-action` in verify
 mode against a fake `crane`, each at the commit the lane pins.
+`tests/test_release_schema.sh` checks both lanes run
+`verify-release-schema-action` after detection, on detection's
+`release_file`, and gate the jobs after it on `check-release`
+passing; it then runs both actions' checks at their pinned commits
+on a valid `.releases/` file, files detection accepts and the schema
+rejects, and a change adding a file in each directory.
 
 A further `build-test.yaml` call sets `grype_gate_when:
 'dependencies-changed'`, and a follow-on job requires the gate to

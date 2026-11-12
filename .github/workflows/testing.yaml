@@ -439,8 +439,11 @@ jobs:
   # The ref pins the fixture commit that ADDED the release descriptor,
   # and pins it deliberately: detection compares a merged commit
   # against its parent, so a moving branch would stop detecting the
-  # file the moment anything else merged there. v0.1.0 tags that
-  # commit, so the tag and the requirement coincide.
+  # file the moment anything else merged there. The commit adds
+  # releases/1.2.4-container.yaml alone, a descriptor carrying the
+  # ref the release container schema requires, where v0.1.0's 1.2.3
+  # descriptor has none. A commit SHA, not a release tag, names
+  # exactly that commit.
   #
   # The registries are real Linux Foundation hostnames because the
   # release descriptor overrides the pull registry and the workflow
@@ -460,7 +463,8 @@ jobs:
     uses: $/.github/workflows/merge.yaml
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
-      ref: 'v0.1.0'
+      # yamllint disable-line rule:line-length
+      ref: 'f7d28467c46c2a5da25cd9db39db4dfd70f7e838'  # adds releases/1.2.4-container.yaml
       build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
@@ -498,7 +502,8 @@ jobs:
     uses: $/.github/workflows/merge.yaml
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
-      ref: 'v0.1.0'
+      # yamllint disable-line rule:line-length
+      ref: 'f7d28467c46c2a5da25cd9db39db4dfd70f7e838'  # adds releases/1.2.4-container.yaml
       build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
@@ -586,7 +591,8 @@ jobs:
     uses: $/.github/workflows/build-test.yaml
     with:
       repository: 'lfreleng-actions/test-docker-monorepo'
-      ref: 'v0.1.0'
+      # yamllint disable-line rule:line-length
+      ref: 'f7d28467c46c2a5da25cd9db39db4dfd70f7e838'  # adds releases/1.2.4-container.yaml
       build_timeout_minutes: 5
       snapshot_registry: 'nexus3.onap.org:10003'
       release_registry: 'nexus3.onap.org:10002'
@@ -609,7 +615,7 @@ jobs:
         env:
           HAS_RELEASE: ${{ needs.verify-release.outputs.has_release }}
         run: |
-          # The fixture commit adds releases/1.2.3-container.yaml
+          # The fixture commit adds releases/1.2.4-container.yaml
           if [ "${HAS_RELEASE}" != 'true' ]; then
             echo "::error::The verify lane did not detect the fixture's" \
               "release file (has_release '${HAS_RELEASE}')"
@@ -1382,6 +1388,46 @@ jobs:
           persist-credentials: false
       - name: 'Test release-file checks'
         run: bash tests/test_verify_release.sh
+
+  # The release container schema check (#155): the schema step's
+  # wiring in both lanes' check-release jobs and the gate on the job
+  # after it, then docker-release-detect-action and the schema action's
+  # bundled schema, through lftools-uv, at the pinned commits and
+  # version: a valid .releases/ file passes, files detection accepts
+  # and the schema rejects fail at the schema, and a change adding a
+  # file in each directory fails detection.
+  release-schema-checks:
+    name: 'Release schema checks'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
+        with:
+          config: '@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      # setup-uv at the pin verify-release-schema-action v1.1.4 uses,
+      # with its cache off as there
+      - name: 'Install uv'
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
+      - name: 'Test release schema checks'
+        run: bash tests/test_release_schema.sh
 
   # The impostor-commit ignores in .github/zizmor.yml against the
   # examples' all-zero placeholder 'uses:' lines. The zizmor hook runs

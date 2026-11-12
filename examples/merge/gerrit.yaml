@@ -13,7 +13,7 @@
 # the repository's images and publishes the snapshot/staging tag set
 # (version from version.properties); a registry-side release promotion
 # triggers when the merged commit adds a container release file under
-# releases/.
+# releases/ or .releases/.
 #
 # DEPLOYMENT NOTES:
 #   * Copy into .github/workflows/ with a filename containing BOTH 'gerrit'
