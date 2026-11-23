@@ -23,8 +23,10 @@
 #   unstarted; and the testing.yaml job that runs the validator with
 #   build-test's defaults and a bad gate-when and requires the
 #   rejection;
-# - the verify lane's wiring: repository-metadata-action at its v0.5.4
-#   commit in every workflow that calls it; in build-test.yaml its
+# - the verify lane's wiring: every workflow that calls
+#   repository-metadata-action pins it to one shared commit SHA with
+#   its version comment, and each breach of that rule, made on a copy
+#   of the workflows, failing the check; in build-test.yaml its
 #   metadata step running the detection behind the
 #   dependencies-changed gate, after the scope step and a checkout of
 #   depth 2 or more, and exporting dependencies_changed as a job
@@ -580,25 +582,74 @@ check 'testing: one step after the rejection reads its outcome and can fail' \
 # --- Wiring in the verify lane --------------------------------------------
 
 metadata_action='lfreleng-actions/repository-metadata-action'
-metadata_pin='ff822d06a64404a54feb79f8e27b687cc76d1c83'
 gate_if="inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed'"
 
+# metadata_pins DIR: the breaches, one per line, of the rule that every
+# workflow in DIR calling repository-metadata-action pins it to one
+# commit SHA (not a tag or a short SHA) with its version comment, which
+# the YAML parser drops, and the same pin and comment in every lane
+metadata_pins() {
+  local lane workflow uses sha tag pins='' breaches=''
+  for lane in build-test build-test-release merge; do
+    workflow="$1/${lane}.yaml"
+    uses=$(step_field "${workflow}" repository-metadata repo-metadata uses)
+    sha=${uses#"${metadata_action}@"}
+    if [ "${sha}" = "${uses}" ] || [[ ! "${sha}" =~ ^[0-9a-f]{40}$ ]]; then
+      breaches+="${lane}: repository-metadata calls '${uses}', not"
+      breaches+=" ${metadata_action} at a 40-hex commit SHA"$'\n'
+      continue
+    fi
+    tag=$(grep -E "uses: ${metadata_action}@${sha}[[:space:]]+# v[0-9]+\.[0-9]+\.[0-9]+$" \
+      "${workflow}" | head -n 1 | sed -E 's/.*# //') || true
+    if [ -z "${tag}" ]; then
+      breaches+="${lane}: the pin ${sha} lacks a '# vX.Y.Z' comment"$'\n'
+      continue
+    fi
+    pins+="${lane} ${sha} # ${tag}"$'\n'
+  done
+  if [ "$(cut -d' ' -f2- <<< "${pins%$'\n'}" | sort -u | wc -l)" -gt 1 ]; then
+    pins=${pins%$'\n'}
+    breaches+="the lanes pin ${metadata_action} apart: ${pins//$'\n'/; }"$'\n'
+  fi
+  printf '%s' "${breaches}"
+}
+
 # Every workflow that calls repository-metadata-action pins the one
-# commit v0.5.4 names (not the tag object), with its version comment,
-# which the YAML parser drops
-for lane in build-test build-test-release merge; do
-  workflow="${workflows}/${lane}.yaml"
-  check "${lane}: repository-metadata calls the action at the v0.5.4 pin" \
-    "$(step_field "${workflow}" repository-metadata repo-metadata uses)" \
-    "${metadata_action}@${metadata_pin}"
-  if grep -qE "uses: ${metadata_action}@${metadata_pin}[[:space:]]+# v0\.5\.4$" \
-    "${workflow}"; then
-    echo "ok: ${lane}: the pin carries its v0.5.4 comment"
+# shared commit SHA with its version comment, so the lanes move together
+breaches=$(metadata_pins "${workflows}")
+metadata_pin=''
+if [ -z "${breaches}" ]; then
+  metadata_pin=$(step_field "${verify}" repository-metadata repo-metadata uses)
+  metadata_pin=${metadata_pin#"${metadata_action}@"}
+  echo "ok: every lane pins ${metadata_action} to ${metadata_pin} with its version comment"
+else
+  echo "FAIL: the lanes do not share one ${metadata_action} pin:"
+  echo "  | ${breaches//$'\n'/$'\n'  | }"
+  failures=$((failures + 1))
+fi
+
+# pin_breach DESCRIPTION LANE SED: a copy of the workflows with the
+# lane's metadata pin line rewritten by SED breaks the rule
+pin_breach() {
+  local copy="${work}/pins"
+  rm -rf "${copy}"
+  mkdir "${copy}"
+  cp "${workflows}"/{build-test,build-test-release,merge}.yaml "${copy}/"
+  sed -i -E "/uses: ${metadata_action//\//\\/}@/$3" "${copy}/$2.yaml"
+  if [ -n "$(metadata_pins "${copy}")" ]; then
+    echo "ok: pin rule: $2: $1 is caught"
   else
-    echo "FAIL: ${lane}: the pin lacks its '# v0.5.4' comment"
+    echo "FAIL: pin rule: $2: $1 is not caught"
     failures=$((failures + 1))
   fi
-done
+}
+pin_breach 're-pinned to another commit' merge \
+  's/@[0-9a-f]{40}/@5c81b23afb2ea771b2d247807a12d90783328675/'
+pin_breach 'a different version comment' build-test-release \
+  's/# v[0-9.]+$/# v0.0.1/'
+pin_breach 'a tag pin' build-test 's/@[0-9a-f]{40}/@v0.5.5/'
+pin_breach 'a short SHA' build-test 's/@([0-9a-f]{7})[0-9a-f]{33}/@\1/'
+pin_breach 'a pin with no version comment' merge 's/[[:space:]]+# v[0-9.]+$//'
 
 # The detection runs in repository-metadata, on the metadata step,
 # behind the gate and the scope step's skip
@@ -1322,6 +1373,10 @@ done < "${work}/altered"
 # The detector repository-metadata-action runs at its pin: read its
 # pin from that action's own metadata, so the two cannot drift apart
 action='lfreleng-actions/dependency-change-action'
+if [ -z "${metadata_pin}" ]; then
+  echo "FAIL: no shared ${metadata_action} pin to fetch the detector at"
+  exit 1
+fi
 if [ -n "${REPOSITORY_METADATA_ACTION_DIR:-}" ]; then
   metadata_dir=$(cd "${REPOSITORY_METADATA_ACTION_DIR}" && pwd)
 else
