@@ -23,8 +23,11 @@
 #   unstarted; and the testing.yaml job that runs the validator with
 #   build-test's defaults and a bad gate-when and requires the
 #   rejection;
-# - the verify lane's wiring: repository-metadata-action at its v0.5.4
-#   commit in every workflow that calls it; in build-test.yaml its
+# - the verify lane's wiring: repository-metadata-action pinned at one
+#   and the same full commit SHA, with a version comment no older than
+#   the floor its inputs need, in every workflow that calls it, and
+#   each breach of that rule, made on copies of the workflows, failing
+#   it; in build-test.yaml its
 #   metadata step running the detection behind the
 #   dependencies-changed gate, after the scope step and a checkout of
 #   depth 2 or more, and exporting dependencies_changed as a job
@@ -580,25 +583,146 @@ check 'testing: one step after the rejection reads its outcome and can fail' \
 # --- Wiring in the verify lane --------------------------------------------
 
 metadata_action='lfreleng-actions/repository-metadata-action'
-metadata_pin='ff822d06a64404a54feb79f8e27b687cc76d1c83'
+# The oldest repository-metadata-action release these lanes accept:
+# v0.5.4 is the oldest release the metadata step's dependency-change
+# inputs (dependency_change, dependency_ecosystems,
+# dependency_path_prefix and the scope patterns) were tested against
+# (#246). Raise it when the step comes to rely on a newer release.
+metadata_floor='0.5.4'
 gate_if="inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed'"
 
-# Every workflow that calls repository-metadata-action pins the one
-# commit v0.5.4 names (not the tag object), with its version comment,
-# which the YAML parser drops
-for lane in build-test build-test-release merge; do
-  workflow="${workflows}/${lane}.yaml"
-  check "${lane}: repository-metadata calls the action at the v0.5.4 pin" \
-    "$(step_field "${workflow}" repository-metadata repo-metadata uses)" \
-    "${metadata_action}@${metadata_pin}"
-  if grep -qE "uses: ${metadata_action}@${metadata_pin}[[:space:]]+# v0\.5\.4$" \
-    "${workflow}"; then
-    echo "ok: ${lane}: the pin carries its v0.5.4 comment"
-  else
-    echo "FAIL: ${lane}: the pin lacks its '# v0.5.4' comment"
-    failures=$((failures + 1))
+# metadata_pin_of FILE...: print the one commit every call of
+# repository-metadata-action in the files pins. Each file calls the
+# action at least once, and every call, in every file, names the same
+# full commit SHA (not a tag, a branch or a short SHA) with a
+# '# vX.Y.Z' comment, which the YAML parser drops, naming a release no
+# older than metadata_floor. A breach prints why and returns 1.
+metadata_pin_of() {
+  local file line found pin='' version=''
+  local call="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*['\"]?${metadata_action}@"
+  local form="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+${metadata_action}@([0-9a-f]{40})[[:space:]]+#[[:space:]]v([0-9]+\.[0-9]+\.[0-9]+)\$"
+  for file in "$@"; do
+    found=0
+    while IFS= read -r line; do
+      found=1
+      if [[ ! "${line}" =~ ${form} ]]; then
+        echo "${file##*/}: not a full commit SHA with its '# vX.Y.Z'" \
+          "comment: ${line#"${line%%[![:space:]]*}"}"
+        return 1
+      fi
+      if [ -z "${pin}" ]; then
+        pin=${BASH_REMATCH[2]}
+        version=${BASH_REMATCH[3]}
+      elif [ "${BASH_REMATCH[2]} ${BASH_REMATCH[3]}" != \
+        "${pin} ${version}" ]; then
+        echo "${file##*/}: pins ${BASH_REMATCH[2]} (v${BASH_REMATCH[3]})," \
+          "but another call pins ${pin} (v${version})"
+        return 1
+      fi
+    done < <(grep -E "${call}" "${file}" || true)
+    if [ "${found}" -eq 0 ]; then
+      echo "${file##*/}: never calls ${metadata_action}"
+      return 1
+    fi
+  done
+  if [ "$(printf '%s\n' "${metadata_floor}" "${version}" | sort -V \
+    | head -n 1)" != "${metadata_floor}" ]; then
+    echo "the pin names v${version}, older than v${metadata_floor}"
+    return 1
   fi
+  echo "${pin}"
+}
+
+# Every workflow that calls repository-metadata-action pins one and
+# the same commit, at or above the floor
+lanes=(build-test build-test-release merge)
+lane_files=()
+for lane in "${lanes[@]}"; do
+  lane_files+=("${workflows}/${lane}.yaml")
 done
+if metadata_pin=$(metadata_pin_of "${lane_files[@]}"); then
+  echo "ok: the workflows share one ${metadata_action} pin: ${metadata_pin}"
+else
+  echo "FAIL: the ${metadata_action} pins: ${metadata_pin}"
+  failures=$((failures + 1))
+  metadata_pin=''
+fi
+for lane in "${lanes[@]}"; do
+  check "${lane}: repository-metadata calls the action at the shared pin" \
+    "$(step_field "${workflows}/${lane}.yaml" repository-metadata \
+      repo-metadata uses)" "${metadata_action}@${metadata_pin}"
+done
+
+# Each breach of the pin rule, made on copies of the workflows, fails
+# it; a bump that moves every call to one newer pin passes
+pins="${work}/pins"
+mkdir -p "${pins}"
+bumped_sha='0123456789abcdef0123456789abcdef01234567'
+# A release newer than the one the workflows pin today, so the cases
+# below stay a real bump and a real mismatch after any Dependabot bump
+current_version=$(grep -m 1 -oE \
+  "${metadata_action}@[0-9a-f]{40}[[:space:]]+# v[0-9]+\.[0-9]+\.[0-9]+" \
+  "${lane_files[0]}" | sed -E 's/.*# v//' || true)
+current_version=${current_version:-${metadata_floor}}
+IFS=. read -r major minor _ <<< "${current_version}"
+bumped_version="${major}.$((minor + 1)).0"
+check "pins: the bumped v${bumped_version} is newer than v${current_version}" \
+  "$(printf '%s\n' "${bumped_version}" "${current_version}" | sort -uV \
+    | paste -sd ' ' -)" "${current_version} ${bumped_version}"
+# pin_case DESCRIPTION EXPECTED SED [FILE]: apply SED to the copy of
+# FILE (every copy when FILE is empty) and expect metadata_pin_of to
+# print EXPECTED, or, for 'fail:REASON', to fail with a message
+# REASON matches as an extended regular expression
+pin_case() {
+  local lane result copies=()
+  for lane in "${lanes[@]}"; do
+    cp "${workflows}/${lane}.yaml" "${pins}/${lane}.yaml"
+    if [ -z "${4:-}" ] || [ "${4}" = "${lane}" ]; then
+      sed -E -i "$3" "${pins}/${lane}.yaml"
+    fi
+    copies+=("${pins}/${lane}.yaml")
+  done
+  if metadata_pin_of "${copies[@]}" > "${pins}/out"; then
+    result=$(cat "${pins}/out")
+  elif [[ "$2" == fail:* ]] && grep -qE "${2#fail:}" "${pins}/out"; then
+    result=$2
+  else
+    result="fail: $(cat "${pins}/out")"
+  fi
+  check "pins: $1" "${result}" "$2"
+}
+uses_line="(uses: ${metadata_action}@)[0-9a-f]{40}  # v[0-9.]+\$"
+pin_line="(${metadata_action}@[0-9a-f]{40})  # v[0-9.]+\$"
+pin_case 'a bump moving every call to one newer pin passes' "${bumped_sha}" \
+  "s|${uses_line}|\\1${bumped_sha}  # v${bumped_version}|"
+pin_case 'a release at the floor passes' "${bumped_sha}" \
+  "s|${uses_line}|\\1${bumped_sha}  # v${metadata_floor}|"
+pin_case 'a two-digit patch release above the floor passes' "${bumped_sha}" \
+  "s|${uses_line}|\\1${bumped_sha}  # v0.5.10|"
+pin_case 'one workflow at a different pin fails' 'fail:but another call pins' \
+  "s|${uses_line}|\\1${bumped_sha}  # v${bumped_version}|" merge
+pin_case 'a second call at a different pin fails' 'fail:but another call pins' \
+  "\$a\\      - uses: ${metadata_action}@${bumped_sha}  # v${bumped_version}" \
+  build-test
+pin_case 'one workflow naming another version for the pin fails' \
+  'fail:but another call pins' \
+  "s|${pin_line}|\\1  # v${bumped_version}|" \
+  build-test-release
+pin_case 'a pin older than the floor (v0.3.3) fails' 'fail:older than' \
+  "s|${uses_line}|\\1${bumped_sha}  # v0.3.3|"
+pin_case 'a pin just below the floor (v0.5.3) fails' 'fail:older than' \
+  "s|${uses_line}|\\1${bumped_sha}  # v0.5.3|"
+pin_case 'a pin without its version comment fails' 'fail:not a full' \
+  "s|${pin_line}|\\1|" merge
+pin_case 'a tag ref fails' 'fail:not a full' \
+  "s|${uses_line}|\\1v0.5.5  # v0.5.5|"
+pin_case 'a short SHA fails' 'fail:not a full' \
+  "s|${uses_line}|\\1f4417bd  # v0.5.5|"
+pin_case 'a branch ref fails' 'fail:not a full' \
+  "s|${uses_line}|\\1main  # v0.5.5|" build-test
+pin_case 'a workflow that never calls the action fails' \
+  'fail:never calls' \
+  "\\#uses: ${metadata_action}@#d" merge
 
 # The detection runs in repository-metadata, on the metadata step,
 # behind the gate and the scope step's skip
@@ -1322,6 +1446,10 @@ done < "${work}/altered"
 # The detector repository-metadata-action runs at its pin: read its
 # pin from that action's own metadata, so the two cannot drift apart
 action='lfreleng-actions/dependency-change-action'
+if [ -z "${metadata_pin}" ]; then
+  echo "FAIL: no shared ${metadata_action} pin to fetch; see above"
+  exit 1
+fi
 if [ -n "${REPOSITORY_METADATA_ACTION_DIR:-}" ]; then
   metadata_dir=$(cd "${REPOSITORY_METADATA_ACTION_DIR}" && pwd)
 else
