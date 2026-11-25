@@ -9,9 +9,10 @@
 #   defaults and pass each to grype-scan-action; the verify lane alone
 #   takes grype_gate_when and grype_dependency_ecosystems, and alone
 #   forwards a dependency change verdict, since a release always gates;
-# - the gerrit-validate step that validates those inputs through
-#   grype-scan-action in validate-only mode: at the scan's pin, with
-#   validate-only the string 'true' and, for every input the scan
+# - every grype-scan-action call shares a full commit pin with a
+#   version comment at or above the floor; the gerrit-validate step
+#   calls that action in validate-only mode, with validate-only the
+#   string 'true' and, for every input the scan
 #   passes as one grype_* input of the lane, the same expression and
 #   nothing else, no shell step reading a grype_* input beside it, and
 #   each breach of that contract, made on a copy of the workflow,
@@ -205,21 +206,149 @@ check 'build-test-release: no grype_dependency_patterns input' \
 # --- gerrit-validate: the Grype inputs, validated through the action -------
 
 grype_action='lfreleng-actions/grype-scan-action'
-grype_pin='f65dca2762823cfc8f376e32fee9baa6f3292696'
-grype_uses="${grype_action}@${grype_pin}"
+# Oldest release tested with the validators' validate-only inputs.
+grype_floor='0.6.2'
 validator_name='Validate Grype inputs'
+testing="${workflows}/testing.yaml"
+lanes=(build-test build-test-release merge)
+lane_files=()
 
-# Each lane as JSON, so jq can read the two steps and alter a copy
-for lane in build-test build-test-release merge; do
-  yq -r 'tojson' "${workflows}/${lane}.yaml" > "${work}/${lane}.json"
+# Each workflow as JSON for wiring checks, and as YAML for pin comments.
+for lane in "${lanes[@]}"; do
+  lane_files+=("${workflows}/${lane}.yaml")
 done
+grype_files=("${lane_files[@]}" "${testing}")
+for workflow in "${grype_files[@]}"; do
+  file=${workflow##*/}
+  yq -r 'tojson' "${workflow}" > "${work}/${file%.yaml}.json"
+done
+
+action_use_pattern() {
+  printf '%s\n' "^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*['\"]?$1@"
+}
+
+# action_pin_of ACTION FLOOR FILE...: print the shared commit, or
+# report the breaches and all call sites. Each file must call ACTION.
+action_pin_of() {
+  local action=$1 floor=$2
+  shift 2
+  local file entry line found pin='' version=''
+  local call form sites=() errors=()
+  call=$(action_use_pattern "${action}")
+  form="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+${action}@([0-9a-f]{40})[[:space:]]+#[[:space:]]+v([0-9]+\.[0-9]+\.[0-9]+)\$"
+  for file in "$@"; do
+    found=0
+    while IFS= read -r entry; do
+      found=1
+      line=${entry#*:}
+      sites+=("${file##*/}:${entry%%:*}: ${line#"${line%%[![:space:]]*}"}")
+      if [[ ! "${line}" =~ ${form} ]]; then
+        errors+=("${file##*/}:${entry%%:*}: not a full commit SHA with its '# vX.Y.Z' comment")
+      elif [ -z "${pin}" ]; then
+        pin=${BASH_REMATCH[2]}
+        version=${BASH_REMATCH[3]}
+      elif [ "${BASH_REMATCH[2]} ${BASH_REMATCH[3]}" != \
+        "${pin} ${version}" ]; then
+        errors+=("${file##*/}:${entry%%:*}: pins ${BASH_REMATCH[2]} (v${BASH_REMATCH[3]}), but another call pins ${pin} (v${version})")
+      fi
+    done < <(grep -nE "${call}" "${file}" || true)
+    if [ "${found}" -eq 0 ]; then
+      errors+=("${file##*/}: never calls ${action}")
+    fi
+  done
+  if [ -n "${version}" ] && [ "$(printf '%s\n' "${floor}" "${version}" \
+    | sort -V | head -n 1)" != "${floor}" ]; then
+    errors+=("the pin names v${version}, older than v${floor}")
+  fi
+  if [ "${#errors[@]}" -ne 0 ]; then
+    printf '%s\n' "${errors[@]}" 'Call sites:' "${sites[@]}"
+    return 1
+  fi
+  echo "${pin}"
+}
+
+# Compare the textual scan (which sees comments) with the actual YAML
+# calls, so a use written in another YAML form cannot go unchecked.
+grype_call=$(action_use_pattern "${grype_action}")
+for workflow in "${grype_files[@]}"; do
+  file=${workflow##*/}
+  call_count=$(jq -r --arg action "${grype_action}" \
+    '[.jobs[] | (.uses, .steps[]?.uses) | strings
+      | select(split("@")[0] == $action)] | length' \
+    "${work}/${file%.yaml}.json")
+  check "${file}: all Grype calls are on uses lines with their ref" \
+    "$(grep -cE "${grype_call}" "${workflow}" || true)" "${call_count}"
+  if [ "${workflow}" != "${testing}" ]; then
+    check "${file}: exactly two Grype calls" "${call_count}" 2
+  fi
+done
+if grype_pin=$(action_pin_of "${grype_action}" "${grype_floor}" \
+  "${grype_files[@]}"); then
+  echo "ok: the workflows share one ${grype_action} pin: ${grype_pin}"
+else
+  echo "FAIL: the ${grype_action} pins: ${grype_pin}"
+  failures=$((failures + 1))
+  grype_pin=''
+fi
+
+# Copy the real workflows and rewrite just the pin lines.
+grype_pin_case() {
+  local description=$1 expected=$2 rewrite=$3 only_file=${4:-}
+  local workflow file copy result copies=()
+  for workflow in "${grype_files[@]}"; do
+    file=${workflow##*/}
+    copy="${work}/grype-pins/${file}"
+    if [ -z "${only_file}" ] || [ "${file}" = "${only_file}" ]; then
+      sed -E "${rewrite}" "${workflow}" > "${copy}"
+    else
+      cp "${workflow}" "${copy}"
+    fi
+    copies+=("${copy}")
+  done
+  if result=$(action_pin_of "${grype_action}" "${grype_floor}" \
+    "${copies[@]}"); then
+    if [[ "${expected}" == fail:* ]]; then
+      result="unexpected success: ${result}"
+    fi
+  elif [[ "${expected}" == fail:* && "${result}" == *"${expected#fail:}"* ]]; then
+    result=${expected}
+  else
+    result="unexpected failure: ${result}"
+  fi
+  check "Grype pins: ${description}" "${result}" "${expected}"
+}
+
+mkdir -p "${work}/grype-pins"
+# Synthetic refs and below-floor version for these fixtures only.
+grype_bump_sha='0123456789abcdef0123456789abcdef01234567'
+if [ "${grype_bump_sha}" = "${grype_pin}" ]; then
+  grype_bump_sha="1${grype_bump_sha:1}"
+fi
+grype_ref_line="(uses: ${grype_action}@)[0-9a-f]{40}[[:space:]]+#[[:space:]]+v([0-9]+\.[0-9]+\.[0-9]+)\$"
+grype_current=$(sed -nE "s|.*${grype_ref_line}|\\2|p" "${verify}" | head -n 1)
+grype_major=${grype_current%%.*}
+grype_bump_version="$((10#${grype_major:-0} + 1)).0.0"
+grype_bump="s|${grype_ref_line}|\\1${grype_bump_sha}  # v${grype_bump_version}|"
+grype_pin_case 'a Dependabot bump passes' "${grype_bump_sha}" "${grype_bump}"
+grype_pin_case 'one call at a different SHA fails' 'fail:but another call pins' \
+  "s|${grype_ref_line}|\\1${grype_bump_sha}  # v\\2|" testing.yaml
+grype_pin_case 'a tag fails' 'fail:not a full commit SHA' \
+  "s|${grype_ref_line}|\\1v${grype_bump_version}  # v${grype_bump_version}|"
+grype_pin_case 'a branch fails' 'fail:not a full commit SHA' \
+  "s|${grype_ref_line}|\\1main  # v${grype_bump_version}|"
+grype_pin_case 'a short SHA fails' 'fail:not a full commit SHA' \
+  "s|${grype_ref_line}|\\1${grype_bump_sha:0:7}  # v${grype_bump_version}|"
+grype_pin_case 'a missing version comment fails' 'fail:not a full commit SHA' \
+  "s|${grype_ref_line}|\\1${grype_bump_sha}|"
+grype_pin_case 'a below-floor version fails' 'fail:older than' \
+  "s|${grype_ref_line}|\\1${grype_bump_sha}  # v0.0.0|"
 
 # The contract between the validator and the scan, as a jq program
 # over a workflow: it prints one line per breach and nothing when the
 # workflow keeps it. Lookups by name fail when they match more than
 # one step, and the validator's with: block is derived from the
 # scan's, so an input added to the scan and not to the validator is a
-# breach. $uses is the pin both must run; $required the inputs the
+# breach. $action is the action both must run; $required the inputs the
 # scan must pass as one grype_* input of the lane, so the comparison
 # cannot pass vacuously; $ecosystems is the one grype_* input a run:
 # step may still read, or empty.
@@ -229,6 +358,8 @@ def policy_expression:
 def reads_grype_inputs:
   [((.env // {}) | tostring), (.run // "")] | join(" ")
   | [match("inputs\\.grype_[a-z_]+"; "g").string] | unique;
+def action_name:
+  (.uses // "") | split("@")[0];
 (.jobs."gerrit-validate".steps // []) as $steps
 | [$steps[] | select(.name == $name)] as $validators
 | [(.jobs.grype.steps // [])[] | select(.id == "grype-audit")] as $scans
@@ -249,11 +380,11 @@ def reads_grype_inputs:
           "the scan does not pass \($missing | join(", ")) as the lane's own input"
         else empty end
     ),
-    (if $validator.uses != $uses then
-        "the validator runs \($validator.uses | tojson), not \($uses)"
+    (if ($validator | action_name) != $action then
+        "the validator runs \($validator.uses | tojson), not \($action)"
       else empty end),
-    (if $scan.uses != $uses then
-        "the scan runs \($scan.uses | tojson), not \($uses)"
+    (if ($scan | action_name) != $action then
+        "the scan runs \($scan.uses | tojson), not \($action)"
       else empty end),
     (if $passed."validate-only" != "true" then
         "validate-only is \($passed."validate-only" | tojson), not the string \"true\""
@@ -283,7 +414,7 @@ JQ
 # the scan must pass as the lane's own, ECOSYSTEMS the grype_* input a
 # shell step may still read, or empty
 contract() {
-  jq -r --arg name "${validator_name}" --arg uses "${grype_uses}" \
+  jq -r --arg name "${validator_name}" --arg action "${grype_action}" \
     --argjson required "$2" --arg ecosystems "$3" \
     -f "${work}/contract.jq" "$1"
 }
@@ -327,16 +458,6 @@ for lane in build-test build-test-release merge; do
         '.jobs."gerrit-validate".steps[] | select(.name == $name)
           | .with[$input] // "absent"' "${work}/${lane}.json")" absent
   done
-done
-
-# Every grype-scan-action reference in a lane is the one pinned line,
-# twice, with its version comment, which the YAML parser drops
-for lane in build-test build-test-release merge; do
-  workflow="${workflows}/${lane}.yaml"
-  check "${lane}: grype-scan-action appears at the pin twice" \
-    "$(grep -cE "uses: ${grype_uses}[[:space:]]+# v0\.6\.2$" "${workflow}")" 2
-  check "${lane}: grype-scan-action appears at no other reference" \
-    "$(grep -c "${grype_action}@" "${workflow}")" 2
 done
 
 # mutate LANE_JSON FILTER: a copy of a lane's JSON with a jq filter
@@ -398,12 +519,10 @@ done
     '(validator | .with.target) = "dir:."'
   breach 'a validator passing the scan token' build-test \
     '(validator | .with."github-token") = "${{ secrets.GITHUB_TOKEN }}"'
-  breach 'a validator at another pin' build-test \
-    '(validator | .uses) = "lfreleng-actions/grype-scan-action@5c81b23afb2ea771b2d247807a12d90783328675"'
-  breach 'a scan at another pin' build-test \
-    '(scan | .uses) = "lfreleng-actions/grype-scan-action@5c81b23afb2ea771b2d247807a12d90783328675"'
-  breach 'a floating reference' build-test \
-    '(validator | .uses) = "lfreleng-actions/grype-scan-action@v0.6.2"'
+  breach 'a validator using another action' build-test \
+    '(validator | .uses) = "example/other-action"'
+  breach 'a scan using another action' build-test \
+    '(scan | .uses) = "example/other-action"'
   breach 'a conditional validator' build-test \
     '(validator | .if) = "inputs.grype_enabled"'
   breach 'a scan that drops a required input' build-test \
@@ -532,8 +651,6 @@ done
 # so testing.yaml runs the validator itself, as the lanes do, with
 # build-test's defaults and a gate-when the action does not know, and
 # a following step requires that step to have failed
-testing="${workflows}/testing.yaml"
-yq -r 'tojson' "${testing}" > "${work}/testing.json"
 reject_job='grype-validate-rejects'
 
 # rejection FILTER: one jq result over testing.yaml; the filter may
@@ -544,8 +661,10 @@ rejection() {
     '"$1" "${work}/testing.json"
 }
 check 'testing: the rejection job runs no other action' \
-  "$(rejection '[job.steps[] | select(.uses != null) | .uses] | join(" ")')" \
-  "${grype_uses}"
+  "$(rejection '[job.steps[] | select(.uses != null) | .uses | split("@")[0]]
+    | join(" ")')" "${grype_action}"
+check 'testing: the rejected step runs Grype' \
+  "$(rejection 'reject | (.uses // "") | split("@")[0]')" "${grype_action}"
 check 'testing: the rejection job grants no permission' \
   "$(rejection 'job.permissions | tojson')" '{}'
 check 'testing: the rejected step continues on error' \
@@ -591,55 +710,12 @@ metadata_action='lfreleng-actions/repository-metadata-action'
 metadata_floor='0.5.4'
 gate_if="inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed'"
 
-# metadata_pin_of FILE...: print the one commit every call of
-# repository-metadata-action in the files pins. Each file calls the
-# action at least once, and every call, in every file, names the same
-# full commit SHA (not a tag, a branch or a short SHA) with a
-# '# vX.Y.Z' comment, which the YAML parser drops, naming a release no
-# older than metadata_floor. A breach prints why and returns 1.
 metadata_pin_of() {
-  local file line found pin='' version=''
-  local call="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*['\"]?${metadata_action}@"
-  local form="^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]+${metadata_action}@([0-9a-f]{40})[[:space:]]+#[[:space:]]v([0-9]+\.[0-9]+\.[0-9]+)\$"
-  for file in "$@"; do
-    found=0
-    while IFS= read -r line; do
-      found=1
-      if [[ ! "${line}" =~ ${form} ]]; then
-        echo "${file##*/}: not a full commit SHA with its '# vX.Y.Z'" \
-          "comment: ${line#"${line%%[![:space:]]*}"}"
-        return 1
-      fi
-      if [ -z "${pin}" ]; then
-        pin=${BASH_REMATCH[2]}
-        version=${BASH_REMATCH[3]}
-      elif [ "${BASH_REMATCH[2]} ${BASH_REMATCH[3]}" != \
-        "${pin} ${version}" ]; then
-        echo "${file##*/}: pins ${BASH_REMATCH[2]} (v${BASH_REMATCH[3]})," \
-          "but another call pins ${pin} (v${version})"
-        return 1
-      fi
-    done < <(grep -E "${call}" "${file}" || true)
-    if [ "${found}" -eq 0 ]; then
-      echo "${file##*/}: never calls ${metadata_action}"
-      return 1
-    fi
-  done
-  if [ "$(printf '%s\n' "${metadata_floor}" "${version}" | sort -V \
-    | head -n 1)" != "${metadata_floor}" ]; then
-    echo "the pin names v${version}, older than v${metadata_floor}"
-    return 1
-  fi
-  echo "${pin}"
+  action_pin_of "${metadata_action}" "${metadata_floor}" "$@"
 }
 
 # Every workflow that calls repository-metadata-action pins one and
 # the same commit, at or above the floor
-lanes=(build-test build-test-release merge)
-lane_files=()
-for lane in "${lanes[@]}"; do
-  lane_files+=("${workflows}/${lane}.yaml")
-done
 if metadata_pin=$(metadata_pin_of "${lane_files[@]}"); then
   echo "ok: the workflows share one ${metadata_action} pin: ${metadata_pin}"
 else
