@@ -1635,7 +1635,7 @@ jobs:
         id: load-credential
         if: steps.registries.outputs.registry == 'true'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/credential-load-action@c4bf64f187865afb318669d8c9a95147c9e9d832  # v2.1.1
+        uses: lfreleng-actions/credential-load-action@330fb10b16994db82186a6ad8d6a60a3528534a8  # v2.1.2
         with:
           # yamllint disable-line rule:line-length
           op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
@@ -1791,7 +1791,7 @@ jobs:
         if: inputs.sigstore_sign && needs.build.outputs.registry_login != '' && startsWith(matrix.image, format('{0}/', inputs.registry))
         continue-on-error: true
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/credential-load-action@c4bf64f187865afb318669d8c9a95147c9e9d832  # v2.1.1
+        uses: lfreleng-actions/credential-load-action@330fb10b16994db82186a6ad8d6a60a3528534a8  # v2.1.2
         with:
           # yamllint disable-line rule:line-length
           op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
@@ -2888,7 +2888,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: ${{ inputs.push_latest && needs.build.outputs.registry_login != '' }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/credential-load-action@c4bf64f187865afb318669d8c9a95147c9e9d832  # v2.1.1
+        uses: lfreleng-actions/credential-load-action@330fb10b16994db82186a6ad8d6a60a3528534a8  # v2.1.2
         with:
           # yamllint disable-line rule:line-length
           op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
