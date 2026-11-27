@@ -34,8 +34,9 @@
 #   depth 2 or more, and exporting dependencies_changed as a job
 #   output; the grype job needing that job, keeping its !cancelled()
 #   guard and forwarding the output only from a job that succeeded;
-#   no dependency-change-action call, sidecar file or manifest input
-#   left in any workflow; and the gate outputs the lane reports;
+#   no sidecar file or manifest input left in any workflow, and no
+#   dependency-change-action call but the select_changed one in
+#   docker-metadata; and the gate outputs the lane reports;
 # - the two testing.yaml calls that prove the verdict's round trip:
 #   the unresolved one against a fixture at a tag and the resolved one
 #   against this repository's own fixture at the commit under test;
@@ -632,8 +633,17 @@ for lane in build-test build-test-release merge; do
   check "${lane}: build needs gerrit-validate" \
     "$(jq -r '.jobs.build.needs | index("gerrit-validate") != null' \
       "${work}/${lane}.json")" true
-  check "${lane}: build runs on success alone" \
-    "$(jq -r '.jobs.build.if // "none"' "${work}/${lane}.json")" none
+  # An 'if:' with no status function keeps the implicit success(),
+  # so the empty-selection skip select_changed adds leaves it intact
+  build_if=$(jq -r '.jobs.build.if // "none"' "${work}/${lane}.json")
+  if [ "${build_if}" != none ] &&
+    ! grep -qE '(always|failure|cancelled|success)\(' <<< "${build_if}"
+  then
+    build_if='success() and a condition'
+  fi
+  check "${lane}: build runs on success alone" "${build_if}" \
+    "$([ "${lane}" = build-test-release ] && echo none ||
+      echo 'success() and a condition')"
   check "${lane}: every other job descends from gerrit-validate" \
     "$(jq -r '.jobs as $jobs
       | def needs: ($jobs[.].needs // []) | if type == "string" then [.] else . end;
@@ -918,14 +928,23 @@ check 'build-test: the sbom artefact still requires its SBOMs' \
   "$(yq -r '.jobs.sbom.steps[] | select(.name == "Upload SBOM artifacts")
     | .with."if-no-files-found"' "${verify}")" error
 
-# The old sidecar wiring is gone from every workflow: no direct
-# dependency-change-action call, no sidecar file and no manifest
-# input, so the job output is the verdict's one route
-for token in 'dependency-change-action@' 'dependency-change.json' \
-  'dependency-change-manifest'; do
+# The old sidecar wiring is gone from every workflow: no sidecar file
+# and no manifest input, so the job output is the verdict's one route.
+# The one direct dependency-change-action call left in a lane is
+# docker-metadata's, for select_changed's changed paths, which reads
+# no verdict; tests/test_change_selection_wiring.sh covers it.
+for token in 'dependency-change.json' 'dependency-change-manifest'; do
   check "workflows: no '${token}' remains" \
     "$(cat "${verify}" "${release}" "${workflows}/merge.yaml" \
       | grep -c -- "${token}" || true)" 0
+done
+for lane_file in "${verify}" "${release}" "${workflows}/merge.yaml"; do
+  # shellcheck disable=SC2016  # \$job is a yq variable
+  check "${lane_file##*/}: dependency-change-action runs directly only for the changed paths" \
+    "$(yq -r '[.jobs | to_entries[] | .key as $job | .value.steps[]?
+      | select((.uses // "") | test("^lfreleng-actions/dependency-change-action@"))
+      | $job + "/" + (.id // "")] | join(" ")' "${lane_file}")" \
+    "$([ "${lane_file}" = "${release}" ] || echo 'docker-metadata/changes')"
 done
 
 # No inline detection may stand beside the action, where the two

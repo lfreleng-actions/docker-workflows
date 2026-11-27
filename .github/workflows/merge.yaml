@@ -128,6 +128,17 @@ on:
         required: false
         type: boolean
         default: true
+      select_changed:
+        description: >-
+          Build only the images the change under test touched, plus
+          the same-repository images built FROM them. A changed file
+          inside path_prefix that no image reads builds every image; a
+          change that selects no image builds none and passes with a
+          notice. A diff that cannot be resolved builds every image.
+          Cannot combine with select or build_command.
+        required: false
+        type: boolean
+        default: false
       namespace_mode:
         description: >-
           How the namespace prefixed to every image name on the
@@ -507,6 +518,20 @@ on:
           Result of the Promote Release job; skipped when the change
           carries no container release file
         value: ${{ jobs.release-publish.result }}
+      selection_reason:
+        description: >-
+          Why these images built, from docker-build-matrix-action:
+          'all' without change scoping (select_changed off, or its diff
+          unresolved), 'changed' for the images the change touched,
+          'shared' when a changed file no image reads selected every
+          image, 'none' when the change selected no image
+        value: ${{ jobs.docker-metadata.outputs.selection_reason }}
+      changes_resolved:
+        description: >-
+          With select_changed, 'true' when the change's files resolved
+          and 'false' when they did not, so every image built; empty
+          without select_changed
+        value: ${{ jobs.docker-metadata.outputs.changes_resolved }}
 
 permissions: {}
 
@@ -653,21 +678,44 @@ jobs:
           bypass-repository: ${{ inputs.grype_bypass_repository }}
 
       # build_command builds whatever the project's tooling builds, so
-      # select cannot narrow it; refuse the pair rather than ignore
-      # select. tests/test_image_select.sh runs this script.
-      - name: 'Reject select with build_command'
+      # neither select nor select_changed can narrow it, and a change
+      # cannot narrow a caller's explicit selection; refuse each pair
+      # rather than ignore one input. docker-build-matrix-action
+      # refuses the same pairs, later and less clearly.
+      # tests/test_image_select.sh runs this script.
+      - name: 'Reject conflicting image selection inputs'
         id: select
         shell: bash
         env:
           SELECT: ${{ inputs.select }}
+          SELECT_CHANGED: ${{ inputs.select_changed }}
           BUILD_COMMAND: ${{ inputs.build_command }}
         run: |
           # select only narrows discovered or declared Dockerfile builds
+          errors=0
           if [ -n "${SELECT}" ] && [ -n "${BUILD_COMMAND}" ]; then
             echo "::error::select cannot combine with build_command:" \
               "the command builds whatever the project's tooling builds." \
               "Clear select, or drop build_command and build from" \
               "discovered Dockerfiles or the images input"
+            errors=1
+          fi
+          if [ "${SELECT_CHANGED}" = 'true' ] && [ -n "${BUILD_COMMAND}" ]
+          then
+            echo "::error::select_changed cannot combine with" \
+              "build_command: the command builds whatever the project's" \
+              "tooling builds. Turn select_changed off, or drop" \
+              "build_command and build from discovered Dockerfiles or" \
+              "the images input"
+            errors=1
+          fi
+          if [ "${SELECT_CHANGED}" = 'true' ] && [ -n "${SELECT}" ]; then
+            echo "::error::select_changed cannot combine with select:" \
+              "the change chooses the images. Turn select_changed off," \
+              "or clear select"
+            errors=1
+          fi
+          if [ "${errors}" -ne 0 ]; then
             exit 1
           fi
           echo "Image selection inputs validated ✅"
@@ -753,6 +801,11 @@ jobs:
       images_json: ${{ steps.discover.outputs.images_json }}
       image_count: ${{ steps.discover.outputs.image_count }}
       build_id: ${{ steps.discover.outputs.build_id }}
+      # 'none' when select_changed chose no image; the build job, and
+      # with it every job that needs images, then skips
+      selection_reason: ${{ steps.discover.outputs.selection_reason }}
+      # Under select_changed, 'true' or 'false' as the diff resolved
+      changes_resolved: ${{ steps.change-scope.outputs.resolved }}
     permissions:
       contents: read
     timeout-minutes: 5
@@ -784,7 +837,10 @@ jobs:
       # A supplied gerrit_revision empties gerrit-refspec, so the step
       # checks out the immutable merged commit from the GitHub mirror
       # in plain mode; Gerrit mode resolves the moving branch ref and
-      # only serves callers that cannot supply the revision
+      # only serves callers that cannot supply the revision. The full
+      # history off Gerrit, so select_changed can reach the base a
+      # push compares against (github.event.before), which a shallow
+      # clone lacks; a Gerrit merge needs only its parent.
       - name: 'Checkout'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
@@ -796,10 +852,52 @@ jobs:
           # yamllint disable-line rule:line-length
           gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
           delay: '0s'
+          fetch-depth: ${{ inputs.gerrit_refspec != '' && '2' || '0' }}
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.gerrit_revision || inputs.ref }}
           persist-credentials: false
           submodules: ${{ inputs.checkout_submodules }}
+
+      # select_changed: every path the change under test touched, as
+      # compact JSON relative to the repository root, or empty when
+      # the action cannot resolve the comparison base. changed-paths
+      # lists every path whatever the presets; the docker preset is
+      # there because the action requires one, and its changed
+      # verdict goes unused.
+      - name: 'Find changed files'
+        id: changes
+        if: inputs.select_changed
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/dependency-change-action@9eb559c7768513c551f9649400a27fae257c9f17  # v0.3.0
+        with:
+          ecosystems: 'docker'
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          path-prefix: ${{ inputs.path_prefix }}
+
+      # An unresolved diff leaves changed_files empty, which turns
+      # change scoping off: every image builds. '[]' would instead
+      # mean nothing changed and build nothing, so it is never
+      # substituted.
+      - name: 'Report change scope'
+        id: change-scope
+        if: inputs.select_changed
+        shell: bash
+        env:
+          CHANGED_PATHS: ${{ steps.changes.outputs.changed-paths }}
+          CHANGES_REASON: ${{ steps.changes.outputs.reason }}
+        run: |
+          # Report whether the change's files resolved
+          if [ -n "${CHANGED_PATHS}" ]; then
+            echo 'resolved=true' >> "${GITHUB_OUTPUT}"
+            echo "select_changed: the change touched" \
+              "$(jq 'length' <<< "${CHANGED_PATHS}") path(s)"
+            exit 0
+          fi
+          echo 'resolved=false' >> "${GITHUB_OUTPUT}"
+          # A newline in the reason could forge a workflow command
+          echo "::notice::select_changed is set, but the change's files" \
+            "could not be resolved, so every image builds:" \
+            "$(printf '%s' "${CHANGES_REASON}" | tr -d '\r\n')"
 
       # An explicit 'images' input wins; otherwise the action walks
       # the estate-observed Dockerfile locations, keeping discovery
@@ -813,11 +911,16 @@ jobs:
           path_prefix: ${{ inputs.path_prefix }}
           images: ${{ inputs.images }}
           # A subset of the images, plus their same-repository bases
-          # unless select_dependencies is false. No allow_empty: a
-          # selection matching nothing must fail, since the downstream
-          # jobs cannot handle an empty image set.
+          # unless select_dependencies is false. No allow_empty for
+          # select: a selection matching nothing must fail.
           select: ${{ inputs.select }}
           select_dependencies: ${{ inputs.select_dependencies }}
+          # Empty unless select_changed resolved the diff
+          changed_files: ${{ steps.changes.outputs.changed-paths }}
+          select_dependents: 'true'
+          # A change may touch no image; the build job skips then
+          # yamllint disable-line rule:line-length
+          allow_empty: ${{ inputs.select_changed && 'true' || 'false' }}
           repository: ${{ inputs.repository || github.repository }}
           # Bind ref to this job's effective checkout ref, so the
           # build id discriminates on the tree actually discovered.
@@ -830,6 +933,14 @@ jobs:
           # error: the build job enumerates what the command created
           build_command: ${{ inputs.build_command }}
           build_command_images: ${{ inputs.build_command_images }}
+
+      - name: 'Report an empty selection'
+        if: steps.discover.outputs.selection_reason == 'none'
+        shell: bash
+        run: |
+          # The build job and every job needing images skip
+          echo "::notice::select_changed: the change touched no image," \
+            "so none builds and the jobs that need images skip"
 
   resolve-version:
     name: 'Resolve Version'
@@ -923,6 +1034,11 @@ jobs:
   build:
     name: 'Docker Build'
     needs: ['gerrit-validate', 'docker-metadata']
+    # select_changed may choose no image. Skipping here skips tests,
+    # sbom and grype, and snapshot-publish, which requires a build
+    # that succeeded, so an empty selection publishes nothing without
+    # failing; a non-empty one still fails when it saves no archive.
+    if: needs.docker-metadata.outputs.selection_reason != 'none'
     runs-on: ubuntu-latest
     outputs:
       images: ${{ steps.build.outputs.images }}

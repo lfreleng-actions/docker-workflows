@@ -261,6 +261,303 @@ jobs:
       # yamllint disable-line rule:line-length
       grype_cache_db: ${{ matrix.grype_cache_db || 'restore-only' }}
 
+  # select_changed against the monorepo fixture at a tag. The
+  # fixture's HEAD is not this run's commit, so dependency-change-action
+  # cannot resolve the diff, and the lane must fall back to building
+  # every image, with a notice, rather than treat the change as
+  # touching nothing. test_command requires all three images; the job
+  # below requires the lane to report the diff unresolved and the
+  # selection as 'all'. A fixture from another repository can never
+  # resolve; the resolved cases run on this repository's own fixture
+  # below. Lint, SBOM and Grype are off: the build-test legs cover
+  # them.
+  build-test-select-changed:
+    name: 'Build/Test (select_changed, unresolved)'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-docker-monorepo'
+      ref: 'v0.0.1'
+      build_timeout_minutes: 5
+      select_changed: true
+      test_command: >-
+        built=$(jq -r '.[] | sub(":[^:]*$"; "")' <<< "${IMAGES}"
+        | sort -u | paste -sd ' ');
+        echo "Built: ${built}";
+        [ "${built}" = 'base-alpine chain-child util-echo' ] ||
+        { echo "::error::expected every image"; exit 1; }
+      lint_enabled: false
+      sbom_enabled: false
+      grype_enabled: false
+
+  build-test-select-changed-checks:
+    name: 'select_changed falls back to every image'
+    needs: build-test-select-changed
+    permissions: {}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 2
+    steps:
+      - name: 'Require the unresolved fallback'
+        shell: bash
+        env:
+          # yamllint disable-line rule:line-length
+          CHANGES_RESOLVED: ${{ needs.build-test-select-changed.outputs.changes_resolved }}
+          # yamllint disable-line rule:line-length
+          SELECTION_REASON: ${{ needs.build-test-select-changed.outputs.selection_reason }}
+        run: |
+          # The report step sets changes_resolved and the notice together
+          status=0
+          if [ "${CHANGES_RESOLVED}" != 'false' ]; then
+            echo "::error::select_changed reported changes_resolved" \
+              "'${CHANGES_RESOLVED}', expected 'false'"
+            status=1
+          fi
+          if [ "${SELECTION_REASON}" != 'all' ]; then
+            echo "::error::select_changed reported selection_reason" \
+              "'${SELECTION_REASON}', expected 'all'"
+            status=1
+          fi
+          if [ "${status}" -ne 0 ]; then
+            exit "${status}"
+          fi
+          echo "select_changed built every image on an unresolved diff ✅"
+
+  # select_changed with a resolved diff, through the lanes and the
+  # jobs after them. The calls below build tests/fixtures/select-changed
+  # at the run's own commit, so the checkout's HEAD is GITHUB_SHA and
+  # dependency-change-action compares it with the base branch, the
+  # first parent of the pull request's merge commit. select-child
+  # builds FROM select-base; select-leaf stands alone.
+  #   - leaf: select-leaf declares paths ['.'], so every change
+  #     touches it, and it builds without the base chain
+  #   - base: select-base declares paths ['.'], so every change
+  #     rebuilds it and select-child, which builds FROM it
+  #   - discovered, in the verify and merge lanes: path_prefix is the
+  #     fixture, so a pull request that leaves it alone selects no
+  #     image; the build and every job needing images skip, the merge
+  #     lane's snapshot-publish among them, and the run still passes
+  # A pull request that edits the fixture widens each selection; an
+  # empty diff, from commits that cancel out, gives '.' nothing to
+  # match, so every leg selects none and its build skips. This
+  # job reads the same two commits and predicts every leg's selection
+  # with tests/select_changed_oracle.sh, so each assertion follows
+  # the diff and nothing else passes.
+  select-changed-oracle:
+    name: 'select_changed: expected selections'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    outputs:
+      discovered_reason: ${{ steps.oracle.outputs.discovered_reason }}
+      discovered_images: ${{ steps.oracle.outputs.discovered_images }}
+      leaf_reason: ${{ steps.oracle.outputs.leaf_reason }}
+      leaf_images: ${{ steps.oracle.outputs.leaf_images }}
+      base_reason: ${{ steps.oracle.outputs.base_reason }}
+      base_images: ${{ steps.oracle.outputs.base_images }}
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@65ff87957e1cac2de3203a85dbb07c31810321cb  # v0.16.4
+        with:
+          config: '@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c  # v2.23.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The same two commits the lanes' change detection compares
+          fetch-depth: 2
+          persist-credentials: false
+      - name: 'Predict each selection from the diff'
+        id: oracle
+        shell: bash
+        run: |
+          # One key=value line per leg output
+          git diff --name-only --no-renames -z HEAD^1 HEAD \
+            | bash tests/select_changed_oracle.sh \
+            | tee -a "${GITHUB_OUTPUT}"
+
+  build-test-select-changed-leaf:
+    name: 'Build/Test (select_changed, leaf)'
+    needs: select-changed-oracle
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      # yamllint disable-line rule:line-length
+      images: '[{"name": "select-base", "context": "tests/fixtures/select-changed/select-base"}, {"name": "select-child", "context": "tests/fixtures/select-changed/select-child"}, {"name": "select-leaf", "context": "tests/fixtures/select-changed/select-leaf", "paths": ["."]}]'
+      build_timeout_minutes: 5
+      select_changed: true
+      test_command: >-
+        built=$(jq -r '.[] | sub(":[^:]*$"; "")' <<< "${IMAGES}"
+        | sort -u | paste -sd ' ');
+        echo "Built: ${built}";
+        [ "${built}" =
+        '${{ needs.select-changed-oracle.outputs.leaf_images }}' ] ||
+        { echo "::error::expected the oracle's leaf selection"; exit 1; }
+      lint_enabled: false
+      sbom_enabled: false
+      grype_enabled: false
+
+  build-test-select-changed-base:
+    name: 'Build/Test (select_changed, base)'
+    needs: select-changed-oracle
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      # yamllint disable-line rule:line-length
+      images: '[{"name": "select-base", "context": "tests/fixtures/select-changed/select-base", "paths": ["."]}, {"name": "select-child", "context": "tests/fixtures/select-changed/select-child"}, {"name": "select-leaf", "context": "tests/fixtures/select-changed/select-leaf"}]'
+      build_timeout_minutes: 5
+      select_changed: true
+      test_command: >-
+        built=$(jq -r '.[] | sub(":[^:]*$"; "")' <<< "${IMAGES}"
+        | sort -u | paste -sd ' ');
+        echo "Built: ${built}";
+        [ "${built}" =
+        '${{ needs.select-changed-oracle.outputs.base_images }}' ] ||
+        { echo "::error::expected the oracle's base selection"; exit 1; }
+      lint_enabled: false
+      sbom_enabled: false
+      grype_enabled: false
+
+  build-test-select-changed-discovered:
+    name: 'Build/Test (select_changed, discovered)'
+    needs: select-changed-oracle
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/build-test.yaml
+    with:
+      path_prefix: 'tests/fixtures/select-changed'
+      build_timeout_minutes: 5
+      select_changed: true
+      # Runs only when the change selects an image
+      test_command: >-
+        built=$(jq -r '.[] | sub(":[^:]*$"; "")' <<< "${IMAGES}"
+        | sort -u | paste -sd ' ');
+        echo "Built: ${built}";
+        [ "${built}" =
+        '${{ needs.select-changed-oracle.outputs.discovered_images }}' ] ||
+        { echo "::error::expected the oracle's selection"; exit 1; }
+      lint_enabled: false
+      sbom_enabled: false
+      grype_enabled: false
+
+  merge-select-changed:
+    name: 'Merge (dry run, select_changed)'
+    needs: select-changed-oracle
+    permissions:
+      contents: read
+    uses: $/.github/workflows/merge.yaml
+    with:
+      path_prefix: 'tests/fixtures/select-changed'
+      build_timeout_minutes: 5
+      snapshot_registry: 'nexus3.onap.org:10003'
+      release_registry: 'nexus3.onap.org:10002'
+      dry_run: true
+      select_changed: true
+      # Runs only when the change selects an image
+      test_command: >-
+        built=$(jq -r '.[] | sub(":[^:]*$"; "")' <<< "${IMAGES}"
+        | sort -u | paste -sd ' ');
+        echo "Built: ${built}";
+        [ "${built}" =
+        '${{ needs.select-changed-oracle.outputs.discovered_images }}' ] ||
+        { echo "::error::expected the oracle's selection"; exit 1; }
+      lint_enabled: false
+      sbom_enabled: false
+      grype_enabled: false
+
+  # A skipped job renders green, so the calls passing prove nothing
+  # about the selection or the jobs after it. This job requires each
+  # call to report the diff resolved and the oracle's reason, and the
+  # merge lane's tests and snapshot-publish to have run or skipped as
+  # that reason demands.
+  select-changed-resolved-checks:
+    name: 'select_changed follows the diff'
+    needs:
+      - select-changed-oracle
+      - build-test-select-changed-leaf
+      - build-test-select-changed-base
+      - build-test-select-changed-discovered
+      - merge-select-changed
+    permissions: {}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 2
+    steps:
+      - name: 'Require the predicted selections'
+        shell: bash
+        env:
+          # yamllint disable-line rule:line-length
+          EXPECTED_REASON: ${{ needs.select-changed-oracle.outputs.discovered_reason }}
+          # yamllint disable-line rule:line-length
+          EXPECTED_LEAF_REASON: ${{ needs.select-changed-oracle.outputs.leaf_reason }}
+          # yamllint disable-line rule:line-length
+          EXPECTED_BASE_REASON: ${{ needs.select-changed-oracle.outputs.base_reason }}
+          # yamllint disable-line rule:line-length
+          LEAF_RESOLVED: ${{ needs.build-test-select-changed-leaf.outputs.changes_resolved }}
+          # yamllint disable-line rule:line-length
+          LEAF_REASON: ${{ needs.build-test-select-changed-leaf.outputs.selection_reason }}
+          # yamllint disable-line rule:line-length
+          BASE_RESOLVED: ${{ needs.build-test-select-changed-base.outputs.changes_resolved }}
+          # yamllint disable-line rule:line-length
+          BASE_REASON: ${{ needs.build-test-select-changed-base.outputs.selection_reason }}
+          # yamllint disable-line rule:line-length
+          VERIFY_RESOLVED: ${{ needs.build-test-select-changed-discovered.outputs.changes_resolved }}
+          # yamllint disable-line rule:line-length
+          VERIFY_REASON: ${{ needs.build-test-select-changed-discovered.outputs.selection_reason }}
+          # yamllint disable-line rule:line-length
+          MERGE_RESOLVED: ${{ needs.merge-select-changed.outputs.changes_resolved }}
+          # yamllint disable-line rule:line-length
+          MERGE_REASON: ${{ needs.merge-select-changed.outputs.selection_reason }}
+          MERGE_TESTS: ${{ needs.merge-select-changed.outputs.tests_result }}
+          # yamllint disable-line rule:line-length
+          MERGE_SNAPSHOT: ${{ needs.merge-select-changed.outputs.snapshot_publish_result }}
+        run: |
+          # An empty output reads as 'absent' and fails the check
+          failures=0
+          expect() {
+            if [ "$2" = "$3" ]; then
+              echo "ok: $1: $2"
+            else
+              echo "::error::$1: expected '$3' but got '${2:-absent}'"
+              failures=$((failures + 1))
+            fi
+          }
+          expect 'leaf changes_resolved' "${LEAF_RESOLVED}" true
+          expect 'leaf selection_reason' "${LEAF_REASON}" \
+            "${EXPECTED_LEAF_REASON}"
+          expect 'base changes_resolved' "${BASE_RESOLVED}" true
+          expect 'base selection_reason' "${BASE_REASON}" \
+            "${EXPECTED_BASE_REASON}"
+          expect 'verify changes_resolved' "${VERIFY_RESOLVED}" true
+          expect 'verify selection_reason' "${VERIFY_REASON}" \
+            "${EXPECTED_REASON}"
+          expect 'merge changes_resolved' "${MERGE_RESOLVED}" true
+          expect 'merge selection_reason' "${MERGE_REASON}" \
+            "${EXPECTED_REASON}"
+          # An empty selection skips the tests and stages nothing; any
+          # other runs both
+          ran='success'
+          if [ "${EXPECTED_REASON}" = 'none' ]; then
+            ran='skipped'
+          fi
+          expect 'merge tests_result' "${MERGE_TESTS}" "${ran}"
+          expect 'merge snapshot_publish_result' "${MERGE_SNAPSHOT}" \
+            "${ran}"
+          [ "${failures}" -eq 0 ]
+
   # build_artifacts end to end. An earlier job uploads target/hello.txt
   # and the verify lane places it in this repository's fixture before
   # the build; the fixture Dockerfile copies a file the repository does
@@ -1091,6 +1388,37 @@ jobs:
           persist-credentials: false
       - name: 'Test image selection inputs'
         run: bash tests/test_image_select.sh
+
+  # select_changed in the verify and merge lanes (#126): the input,
+  # the changed-paths step and its checkout depth, the changed_files
+  # mapping, the report step run on resolved and unresolved diffs,
+  # the empty-selection skip, the release lane left out, and the two
+  # actions' pins by agreement and floor.
+  change-selection-wiring:
+    name: 'Change selection wiring'
+    permissions:
+      contents: read
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@65ff87957e1cac2de3203a85dbb07c31810321cb  # v0.16.4
+        with:
+          config: '@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c  # v2.23.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Test change selection wiring'
+        run: bash tests/test_change_selection_wiring.sh
 
   # latest_policy in both publishing lanes (#115): the input and its
   # gerrit-validate check, the wiring of docker-promote-action at its
