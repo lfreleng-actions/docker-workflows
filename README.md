@@ -317,6 +317,48 @@ cannot run on an empty image set. `select` cannot combine with
 when a caller sets both, the `gerrit-validate` job fails the run
 before any build.
 
+`select_changed: true`, in the verify and merge lanes, limits the
+build to the images the change under test touched. The docker-metadata job
+asks
+[dependency-change-action](https://github.com/lfreleng-actions/dependency-change-action)
+for every path the change touched: a pull request's or Gerrit
+change's files against its base, or a push's against the commit
+before it, which is why that job checks out the full history off
+Gerrit. It hands that list to docker-build-matrix-action as
+`changed_files`, which selects each image whose context, Dockerfile,
+local build contexts or declared `paths` hold a changed file, plus
+every same-repository image built `FROM` a selected one, so a base
+image change rebuilds its children. A changed file inside
+`path_prefix` that no image reads, a shared `scripts/` directory for
+example, builds every image. The release lane has no
+`select_changed`: a release builds every image.
+
+- **Unresolved diff:** when the action cannot prove what changed (a
+  fixture checked out from another repository, a missing base), the
+  list stays empty, change scoping turns off and every image builds,
+  with a notice saying why. It never reads as "nothing changed".
+- **Empty selection:** a change that touches no image builds none.
+  The run passes with a notice; the build job skips, and with it
+  every job that needs images, including the merge lane's
+  `snapshot-publish`, which stages nothing rather than failing. A
+  selection that is not empty still fails the merge lane when the
+  build saves no image archive.
+- **Conflicts:** `select_changed` cannot combine with `select` or
+  `build_command`; the `gerrit-validate` job fails the run when a
+  caller sets either pair.
+- **Safe failure:** the selection reads the paths an image declares
+  and its Dockerfile references. An input it cannot see, such as a
+  file reached through a symbolic link, does not select its image, so
+  that image is not rebuilt and, in the merge lane, its earlier
+  snapshot stays the newest
+  ([docker-build-matrix-action#39](https://github.com/lfreleng-actions/docker-build-matrix-action/issues/39)).
+  Leave `select_changed` off where that matters.
+
+`build-test.yaml` and `merge.yaml` report the outcome as the
+`selection_reason` workflow output (`all`, `changed`, `shared` or
+`none`) and, under `select_changed`, `changes_resolved` (`true` or
+`false`).
+
 With an image namespace resolved (see
 [Image Namespace](#image-namespace)), the Dockerfile build path in
 every lane tags each built image both as `<namespace>/<name>:verify`
@@ -520,6 +562,7 @@ same path.
 | `images`                               | string  | `''`         | JSON image list (see Image Discovery); empty string auto-discovers                                 |
 | `select`                               | string  | `''`         | Image name globs choosing a subset (see Image Discovery); empty builds every image                 |
 | `select_dependencies`                  | boolean | `true`       | With `select`, also build the same-repository images the selected ones build `FROM`                |
+| `select_changed`                       | boolean | `false`      | Build the images the change touched and their dependents, not all (see Image Discovery)            |
 | `namespace_mode`                       | string  | `'none'`     | `none`, `auto` or `manual`; see Image Namespace                                                    |
 | `namespace`                            | string  | `''`         | Namespace for `manual` (e.g. `onap` -> `onap/<name>`)                                              |
 | `build_command`                        | string  | `''`         | Escape hatch: project tooling builds the images (make/mvn/gradle)                                  |
@@ -881,7 +924,7 @@ the job starts logs a warning; the attestation succeeds either way.
 
 Adds to the shared inputs (`repository`, `ref`, `checkout_submodules`,
 `path_prefix`, `build_artifacts`, `images`, `select`,
-`select_dependencies`, `namespace_mode`, `namespace`,
+`select_dependencies`, `select_changed`, `namespace_mode`, `namespace`,
 `build_command`, `build_command_images`, `build_timeout_minutes`,
 the five `harden_runner_*` inputs (see
 [Egress allow-list](#egress-allow-list)), `build_permit_egress_traffic`,
@@ -923,6 +966,10 @@ Outputs, each a job result (`success`, `failure`, `cancelled` or
 | `release_publish_result`  | Promote Release; skipped when the change has no release file   |
 
 <!-- markdownlint-enable MD013 -->
+
+Two more report the change scoping, as in `build-test.yaml`:
+`selection_reason` (`all`, `changed`, `shared` or `none`) and, under
+`select_changed`, `changes_resolved` (`true` or `false`).
 
 A failing lint, test, SBOM or Grype job blocks the snapshot publish
 and nothing stages. The `*_permit_fail` inputs, or the
@@ -1209,7 +1256,34 @@ and `util-echo` with `select_dependencies: false` builds alone.
 `tests/test_image_select.sh` checks every lane declares `select` and
 `select_dependencies` alike and passes both to discovery, and runs
 the `gerrit-validate` step that refuses `select` with
-`build_command`. A further call checks out the monorepo commit
+`build_command`, and `select_changed` with either. A further call
+sets `select_changed` on the monorepo fixture at a tag, whose `HEAD`
+is not the run's commit, so the diff cannot resolve: its test
+command requires every image built, and a follow-on job requires
+the lane to report the diff unresolved and the selection `all`.
+Selection by a resolved diff runs on `tests/fixtures/select-changed`
+at the run's own commit: `select-child` builds from `select-base`,
+and `select-leaf` stands alone. One call makes the leaf read every
+path, so it builds alone; another makes the base read every path, so
+it builds with its child; and discovery calls in the verify and
+merge lanes select the images the change touched, none when it
+leaves the fixture alone. An empty diff, from commits that cancel
+out, gives every call nothing to match, so each selects none.
+`tests/select_changed_oracle.sh` predicts
+each selection from the same diff, each call's test command
+requires the images it predicts, and a follow-on job requires every
+call to report the diff resolved with the predicted reason, and the
+merge lane's tests and snapshot publish to skip on an empty
+selection and run otherwise.
+`tests/test_change_selection_wiring.sh` checks the rest of the
+`select_changed` wiring in the verify and merge lanes: the
+changed-paths step ahead of discovery, the checkout depth, the
+`changed_files` mapping, the report step on resolved and unresolved
+diffs, the empty-selection skip, both lanes' selection outputs, its
+absence from the release lane, both actions' pins by agreement and
+version floor, the resolved calls' wiring, and the oracle on fixed
+diffs. A further
+call checks out the monorepo commit
 that adds a release descriptor, with the release registries set, and
 a follow-on job requires the lane to report that file detected.
 `tests/test_verify_release.sh` covers the rest of the release-file

@@ -4,12 +4,16 @@
 
 # Regression test for image selection. Every lane declares the select
 # and select_dependencies inputs identically and hands both to
-# docker-build-matrix-action in its docker-metadata job, without
-# allow_empty, so a selection matching nothing still fails. Each lane
-# offering build_command refuses it alongside select in its
-# gerrit-validate job: the test extracts that step script and runs it
-# as GitHub runs a 'shell: bash' step. The build-test legs in
-# testing.yaml check which images a selection builds.
+# docker-build-matrix-action in its docker-metadata job. allow_empty
+# follows select_changed alone, so a select matching nothing still
+# fails; the release lane, which has no select_changed, never passes
+# it. Each lane offering build_command refuses it alongside select,
+# and alongside select_changed, and refuses select_changed with
+# select, in its gerrit-validate job: the test extracts that step
+# script and runs it as GitHub runs a 'shell: bash' step. The
+# build-test legs in testing.yaml check which images a selection
+# builds; tests/test_change_selection_wiring.sh covers the rest of
+# select_changed.
 #
 # Usage: bash tests/test_image_select.sh
 # Needs bash and yq (either the Go or the Python implementation).
@@ -44,16 +48,16 @@ discover() {
     | .$1" "${workflow}"
 }
 
-# select_case DESCRIPTION EXPECTED SELECT BUILD_COMMAND
-# EXPECTED is 'ok', or 'error' when the step must fail
+# select_case DESCRIPTION EXPECTED SELECT BUILD_COMMAND [SELECT_CHANGED]
+# EXPECTED is 'ok', or the start of the error the step must fail with
 select_case() {
   local status=0
   env -i PATH="${PATH}" HOME="${work}" SELECT="$3" BUILD_COMMAND="$4" \
+    SELECT_CHANGED="${5:-false}" \
     bash --noprofile --norc -eo pipefail "${work}/step.sh" \
     > "${work}/log" 2>&1 || status=$?
-  if { [ "$2" = 'error' ] && [ "${status}" -ne 0 ] &&
-    grep -q '^::error::select cannot combine with build_command' \
-      "${work}/log"; } ||
+  if { [ "$2" != 'ok' ] && [ "${status}" -ne 0 ] &&
+    grep -qF "::error::$2" "${work}/log"; } ||
     { [ "$2" = 'ok' ] && [ "${status}" -eq 0 ] &&
       ! grep -q '^::error::' "${work}/log"; }; then
     echo "ok: ${lane}: $1"
@@ -91,8 +95,15 @@ for lane in build-test merge build-test-release; do
   # shellcheck disable=SC2016
   check 'discovery takes select_dependencies' \
     "$(discover with.select_dependencies)" '${{ inputs.select_dependencies }}'
-  check 'discovery does not pass allow_empty' \
-    "$(discover with.allow_empty)" null
+  if [ "$(input select_changed type)" = null ]; then
+    check 'discovery does not pass allow_empty' \
+      "$(discover with.allow_empty)" null
+  else
+    # shellcheck disable=SC2016
+    check 'discovery allows an empty set under select_changed alone' \
+      "$(discover with.allow_empty)" \
+      "\${{ inputs.select_changed && 'true' || 'false' }}"
+  fi
 
   yq -r '.jobs."gerrit-validate".steps[] | select(.id == "select") | .run' \
     "${workflow}" > "${work}/step.sh"
@@ -110,7 +121,14 @@ for lane in build-test merge build-test-release; do
   select_case 'neither input set passes' ok '' ''
   select_case 'select alone passes' ok 'api-*' ''
   select_case 'build_command alone passes' ok '' 'make images'
-  select_case 'select with build_command fails' error 'api-*' 'make images'
+  select_case 'select with build_command fails' \
+    'select cannot combine with build_command' 'api-*' 'make images'
+  select_case 'select_changed alone passes' ok '' '' true
+  select_case 'select_changed with build_command fails' \
+    'select_changed cannot combine with build_command' '' 'make images' true
+  select_case 'select_changed with select fails' \
+    'select_changed cannot combine with select' 'api-*' '' true
+  select_case 'select_changed off leaves select alone' ok 'api-*' '' false
 done
 
 if [ "${failures}" -gt 0 ]; then
